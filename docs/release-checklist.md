@@ -14,7 +14,7 @@ npm run verify
 | 检查 | 命令 | 通过标准 |
 | --- | --- | --- |
 | 单元/集成测试 | `node scripts/run-tests.mjs` | 全绿 |
-| 工具 schema 契约 | `node scripts/verify-host-schema.mjs` | PASS，3 个工具 |
+| 工具 schema 契约 | `node scripts/verify-host-schema.mjs` | PASS，5 个工具 |
 | manifest 自检 | `node scripts/verify-manifest.mjs` | 通过（name/engines/files/补丁一致） |
 | 发布包内容 | `node scripts/verify-package.mjs` | 只含该含的文件，< 2 MB |
 

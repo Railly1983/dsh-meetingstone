@@ -281,3 +281,26 @@ test('list_roles 暴露配置透明度字段（职责/人设/通道）', async (
   assert.equal(byId['role-xiaobai'].hasPrompt, false, '没配人设要如实 false')
   assert.equal(byId['role-xiaobai'].channelId, undefined)
 })
+
+test('dispatch 传入 projectKey（按项目隔离并发）', async () => {
+  const registered = new Map()
+  const calls = []
+  registerTools(
+    { tools: { register: (spec) => registered.set(spec.name, spec) } },
+    {
+      registry: {
+        list: () => [],
+        resolve: () => ({
+          roleId: 'role-sashi', name: '沙僧', description: '',
+          channel: { kind: 'acp-cli' }, permissionPreset: 'project-write', enabled: true, timeoutMs: 1000,
+        }),
+        errors: [],
+      },
+      dispatcher: { async dispatch(input) { calls.push(input); return { ok: true, taskRef: { childId: 'c1' } } } },
+      probe: { probe: async () => ({}) },
+    },
+  )
+  const spec = registered.get('meetingstone_dispatch')
+  await spec.execute({ role: 'SS', task: 'x' }, { agent: { session: { header: { cwd: 'D:/proj-a' } } } })
+  assert.equal(calls[0].projectKey, 'D:/proj-a', '必须把项目根作为并发计数键')
+})

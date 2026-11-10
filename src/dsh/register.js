@@ -380,6 +380,8 @@ export function registerTools(ctx, deps) {
           ...(typeof args?.cwd === 'string' ? { cwd: args.cwd } : {}),
           ...(typeof args?.readOnly === 'boolean' ? { readOnly: args.readOnly } : {}),
           ...(continuation ? { continuation } : {}),
+          // 并发计数按项目隔离：不传的话 dispatcher 会把所有项目算成 default（真机审计发现）
+          ...(typeof projectRoot === 'string' && projectRoot ? { projectKey: projectRoot } : {}),
           registry: effective.registry,
           ...(agent || projectRoot
             ? { context: { ...(agent ? { agent } : {}), ...(projectRoot ? { projectRoot } : {}) } }
