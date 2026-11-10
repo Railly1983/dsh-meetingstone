@@ -52,3 +52,17 @@
 | C. 中文名保留、英文名换 | 中文口头叫集合石，仓库/npm 用独立英文名 | 兼顾；但两份名字长期需维护 |
 
 **本文不替负责人决定**，仅记录事实与选项。
+
+## 6. 决议（2026-11-10，负责人已定）
+
+**采用方案 A：保留 MeetingStone + 显式声明。**
+
+| 项 | 定稿值 |
+| --- | --- |
+| GitHub 仓库 | **`dsh-meetingstone`** |
+| npm 包 | **`dsh-meetingstone`**（已核验 404 可用） |
+| 插件 ID | `meetingstone` |
+| 中文名 | 集合石 |
+| 必须声明 | README 首段写明：**本项目与魔兽世界的「集合石 / MeetingStone」插件无关**，也与 DeepSeek / OpenAI / Anthropic / 腾讯等厂商无隶属或背书关系 |
+| 后续动作 | 发布前补一次商标初筛，结果记入 `docs/security.md` |
+

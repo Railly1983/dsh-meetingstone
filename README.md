@@ -45,4 +45,4 @@ DSH 已经有一套完整的任务、子智能体、权限和统计体系，但"
 
 MIT，见 [LICENSE](LICENSE)。
 
-本项目与 DeepSeek、OpenAI、Anthropic、腾讯等厂商无隶属或背书关系；文中出现的模型与 CLI 名称归各自权利人所有。
+**命名声明**：本项目的 "MeetingStone / 集合石" 与魔兽世界的同名插件 **没有任何关系**——那个是游戏里的组队找队伍工具，本项目是 DeepSeek Harness 的插件。本项目也与 DeepSeek、OpenAI、Anthropic、腾讯等厂商无隶属或背书关系；文中出现的模型与 CLI 名称归各自权利人所有。
