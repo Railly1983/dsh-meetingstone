@@ -38,11 +38,5 @@
     "dispatch",
     "role"
   ],
-  "license": "MIT",
-  "peerDependencies": {
-    "@deepseek-ai/schemastery": "^3.18.5"
-  },
-  "devDependencies": {
-    "@deepseek-ai/schemastery": "3.18.5"
-  }
+  "license": "MIT"
 }

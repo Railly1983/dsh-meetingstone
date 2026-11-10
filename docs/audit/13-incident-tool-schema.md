@@ -73,3 +73,6 @@ Invalid schema for function 'meetingstone_dispatch':
 1. `ctx.tools.register()` 应对 `parameters` 也跑 `assertSupportedJsonSchema`；
 2. 投影前逐个工具校验，**单个工具非法时降级隐藏该工具并告警**，而不是整包发给 API 让服务端拒；
 3. 这属于"一个插件的错误能拖垮整个 profile"的爆炸半径问题，值得宿主侧做隔离。
+
+> **后续（2026-11-10）**：为彻底消除 peer 依赖解析风险，配置校验改为内置零依赖实现（`src/schema.js`），
+> 不再声明 `@deepseek-ai/schemastery` 的 peer/dev 依赖；R19 因此自然消解（插件不再有外部运行时依赖）。

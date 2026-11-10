@@ -6,7 +6,7 @@
 
 ```
 src/index.js            装配层：读 Config → 建注册表/探测/适配器/派单器 → 注册工具 → 生命周期
-├── src/config.js       Config schema（Schemastery）+ 通道实例表
+├── src/config.js       Config schema（内置零依赖校验，见 src/schema.js）+ 通道实例表
 ├── src/roles/          C1 角色注册表（纯逻辑）
 │   ├── ids.js          roleId 规则、别名规范化
 │   └── registry.js     全局 + 项目合并、别名冲突降级、权限只收紧
@@ -63,6 +63,7 @@ src/index.js            装配层：读 Config → 建注册表/探测/适配器
 | 我们用的 | 宿主来源 | 说明 |
 | --- | --- | --- |
 | `ctx.tools.register` / `defineTool` | `@deepseek-ai/dsh-tools` | 工具注册；未注入时用等价本地编译（schema 仍合法） |
+| `src/schema.js` | 本项目自带 | 配置校验（类型/默认值/枚举/必填），**零运行时依赖** |
 | `ctx.subagents.getProvider` / `startActivation` | `docs/subsystems/subagent.md` | 派单执行 |
 | `ctx.effect` | Cordis | 生命周期 |
 | `exec.agent.session.header.cwd` | `audit/07` §4.2 | 项目根的权威来源 |

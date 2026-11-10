@@ -27,3 +27,6 @@ desktop.ini
 # 测试与覆盖率
 coverage/
 *.lcov
+
+# 打包产物
+*.tgz
