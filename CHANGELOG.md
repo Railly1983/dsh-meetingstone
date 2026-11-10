@@ -2,6 +2,19 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.0.4] - 2026-11-10
+
+### Added
+- **派单结果落盘**：`.meetingstone/runs/<childId>.json`，原子写、结果 256 KiB 上限、错误 16 KiB、保留 100 条/30 天；
+  `get_task` 内存优先、磁盘兜底（DSH 重启后仍可查终态）；写盘失败只附 `persistenceWarning`，不篡改真实结果
+- **上下文重放**：`dispatch` 新增 `continuesFrom`，把上次结果作为不可信上下文重放（64 KiB，头 48K + 尾 16K）；
+  找不到结果直接失败（`CONTINUATION_NOT_FOUND`），不静默降级
+- `list_roles` 返回 `description` / `hasPrompt` / `channelId` / `model`，配置可自证
+
+### Changed
+- 版本 0.0.4；测试 173 项
+- Codex provider 可换新版二进制（运维步骤见 docs/installation.md），0.167 下支持 gpt-6.1-sol 等 4 个模型
+
 ## [Unreleased]
 
 ### Added

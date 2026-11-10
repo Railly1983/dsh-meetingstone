@@ -58,6 +58,7 @@
  */
 
 import { providerNameFor } from './adapter.js'
+import { resolveContinuation } from '../context-replay.js'
 
 /**
  * 插件模块级 inject：等待工具注册表就绪。
@@ -182,7 +183,11 @@ function toRoleView(role, ctx) {
     permissionPreset: role.permissionPreset,
     enabled: role.enabled !== false,
     availability: availabilityOf(role, ctx),
-    // TODO(P2-roles-source)：registry 未暴露来源，标 unknown，不编造。
+    // 配置透明性：不返回 prompt 全文（可能很长），只给"有没有人设"和摘要
+    description: typeof role.description === 'string' ? role.description : '',
+    hasPrompt: typeof role.prompt === 'string' && role.prompt.trim() !== '',
+    ...(typeof role.channel?.channelId === 'string' ? { channelId: role.channel.channelId } : {}),
+    ...(typeof role.channel?.model === 'string' ? { model: role.channel.model } : {}),
     source: typeof role.source === 'string' ? role.source : 'unknown',
   }
 }
@@ -243,7 +248,22 @@ function toCliView(r) {
  * @returns {Array<{ name: string }>} 已注册的工具定义（便于调用方/测试核对）
  */
 export function registerTools(ctx, deps) {
-  const { registry, dispatcher, probe } = deps ?? {}
+  const { registry, dispatcher, probe, loadPersistedRun } = deps ?? {}
+
+  /**
+   * 取一次任务的结果（内存优先、磁盘兜底），供上下文重放使用。
+   * 返回 `null` 表示"确实没有这条记录"；带 `code` 的对象由重放层翻译成对应错误。
+   * @param {any} exec
+   * @param {string} childId
+   */
+  const resolveRun =
+    typeof deps.resolveRun === 'function'
+      ? deps.resolveRun
+      : async (exec, childId) => {
+          const live = typeof dispatcher.getTask === 'function' ? await dispatcher.getTask(childId) : null
+          if (live && live.status !== 'unknown') return live
+          return loadPersistedRun ? await loadPersistedRun(exec, childId) : live
+        }
   if (!ctx || !ctx.tools || typeof ctx.tools.register !== 'function') {
     throw new Error('TOOLS_UNAVAILABLE: ctx.tools.register 不可用')
   }
@@ -294,7 +314,7 @@ export function registerTools(ctx, deps) {
     {
       name: TOOL_NAMES.LIST_ROLES,
       description:
-        '列出集合石已配置的角色（roleId/名称/别名/通道/权限档位/启用状态/可用性/来源）与注册表的错误；不派单、不探测本机 CLI。',
+        '列出集合石已配置的角色（roleId/名称/别名/通道/权限档位/启用状态/可用性/来源/职责说明/是否配置人设）与注册表的错误；不派单、不探测本机 CLI。',
       parameters: {},
       output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
       async execute(_args, exec) {
@@ -318,6 +338,11 @@ export function registerTools(ctx, deps) {
         task: { type: 'string', required: true, description: '任务内容' },
         cwd: { type: 'string', description: '目标目录；调用方须先校验在项目内' },
         readOnly: { type: 'boolean', description: '只收紧、不放宽；无法强制时会明确标记' },
+        continuesFrom: {
+          type: 'string',
+          description:
+            '上一次派单的 childId：把它的终态作为不可信上下文重放进本次任务（不是真续聊，子 Agent 没有上次的内部状态）',
+        },
       },
       output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
       async execute(args, exec) {
@@ -326,6 +351,23 @@ export function registerTools(ctx, deps) {
 
         // 1) 按当前会话的项目根取「全局 + 项目覆盖」的注册表
         const effective = await registryFor(exec)
+
+        // 1.5) 上下文重放：找不到/没就绪就如实失败，绝不静默退化成普通派单
+        let continuation = null
+        if (typeof args?.continuesFrom === 'string' && args.continuesFrom.trim()) {
+          try {
+            continuation = await resolveContinuation(args.continuesFrom.trim(), {
+              loadRun: (childId) => resolveRun(exec, childId),
+            })
+          } catch (err) {
+            const code = err && typeof err === 'object' && typeof err.code === 'string' ? err.code : 'CONTINUATION_UNAVAILABLE'
+            return {
+              ok: false,
+              code,
+              message: err instanceof Error ? err.message : String(err),
+            }
+          }
+        }
 
         // 2) 宿主执行上下文（exec.agent）随请求透传给适配器，作为 startActivation 的 parent；
         //    同时给出项目根，供适配器做 cwd 边界校验。
@@ -337,6 +379,7 @@ export function registerTools(ctx, deps) {
           task: args?.task,
           ...(typeof args?.cwd === 'string' ? { cwd: args.cwd } : {}),
           ...(typeof args?.readOnly === 'boolean' ? { readOnly: args.readOnly } : {}),
+          ...(continuation ? { continuation } : {}),
           registry: effective.registry,
           ...(agent || projectRoot
             ? { context: { ...(agent ? { agent } : {}), ...(projectRoot ? { projectRoot } : {}) } }
@@ -356,20 +399,27 @@ export function registerTools(ctx, deps) {
       name: TOOL_NAMES.GET_TASK,
       description:
         '按 childId 查询一次派发的结果：status（running/completed/failed/cancelled/unknown）、输出文本、停止原因。' +
-        '结果只在本进程内存里保留最近 20 条，DSH 重启后返回 unknown（不编造）。',
+        '先查本进程内存（最近 20 条），查不到再读项目内 `.meetingstone/runs/<childId>.json`，因此 DSH 重启后仍可查到终态。',
       parameters: {
         childId: { type: 'string', required: true, description: 'meetingstone_dispatch 返回的 taskRef.childId' },
       },
       output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
-      async execute(args) {
+      async execute(args, exec) {
         const childId = args?.childId
         if (typeof childId !== 'string' || !childId.trim()) {
           return { status: 'unknown', reason: '缺少 childId' }
         }
+        const id = childId.trim()
         if (typeof dispatcher.getTask !== 'function') {
           return { status: 'unknown', reason: '当前派单器不支持结果查询' }
         }
-        return dispatcher.getTask(childId.trim())
+        const live = await dispatcher.getTask(id)
+        // 内存里是 running/unknown 时才去磁盘找终态（内存已完成就直接返回，避免多读一次文件）
+        if (live?.status === 'running' || live?.status === 'unknown') {
+          const persisted = await loadPersistedRun?.(exec, id)
+          if (persisted) return persisted
+        }
+        return live
       },
     },
     {

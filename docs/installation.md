@@ -203,3 +203,35 @@ $node = "$env:USERPROFILE\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\nod
 & $node --test "tests/**/*.test.mjs"
 & $node scripts/verify-manifest.mjs
 ```
+
+### 换成新版 Codex（2026-11-10 实测可用）
+
+provider bundle 自带 `@openai/codex@0.153.4`，且**在自己的 node_modules 里解析**二进制
+（`createRequire(import.meta.url).resolve("@openai/codex/package.json")`），
+所以不能靠 profile 的 `pnpm.overrides` 换版本（实测被插件管理器忽略）。
+
+可行做法是**物理镜像**：先把新版装成 profile 的直接依赖，再把它的内容镜像进 provider 的嵌套目录。
+
+```powershell
+$node = "$env:USERPROFILE\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
+$dsh  = "C:\Users\<你>\AppData\Local\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
+
+# 1. 装新版（作为普通依赖，不产生 profile 层）
+& $dsh plugin --profile desktop add @openai/codex@0.167.0-alpha.3.2
+
+# 2. 镜像到 provider 的嵌套依赖（先确认目标不是 reparse point！）
+$root = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@openai\codex"
+$prov = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@deepseek-ai\dsh-subagent-codex\node_modules\@openai\codex"
+robocopy $root $prov /MIR /R:1 /W:1
+
+# 3. 验证 provider 解析到新版本
+$script = "const {createRequire}=require('node:module');const r=createRequire('file:///$($prov -replace '\\','/')/lib/index.js');console.log(require(r.resolve('@openai/codex/package.json')).version)"
+& $node -e $script
+```
+
+**注意**：provider 重装/升级会把嵌套依赖还原成 pinned 版本，需要重新执行第 2 步。
+已验证 0.167 与 provider 的 app-server 协议兼容（initialize / thread/start / turn/start / turn/completed），
+且该版本下可用模型包括 `gpt-6.1-sol`、`gpt-5.6-sol`、`gpt-6-astra`、`gpt-6-luna`。
+
+> 不要写 `pnpm-workspace.yaml` 的 overrides：profile 自带该文件（`nodeLinker: hoisted`），
+> 覆盖它会把 profile 当成 workspace 根，安装直接失败。

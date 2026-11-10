@@ -20,6 +20,7 @@ import { inject as toolsInject, registerTools } from './dsh/register.js'
 import { createRequire } from 'node:module'
 import { toRegistryInput } from './project/config-file.js'
 import { createNodeProjectConfigStore } from './project/load.js'
+import { createRunStore } from './run-store.js'
 
 /**
  * 宿主运行时把 `@deepseek-ai/dsh-tools` 作为 shared package 提供。
@@ -65,7 +66,7 @@ export const name = 'meetingstone'
 /** 包名，与 package.json 的 name 一致（补丁按包名解析入口）。 */
 export const PACKAGE_NAME = 'dsh-meetingstone'
 
-export const PLUGIN_VERSION = '0.0.3'
+export const PLUGIN_VERSION = '0.0.4'
 
 /**
  * 插件入口。
@@ -115,7 +116,71 @@ export function apply(ctx, config = {}) {
 
   // parent 由每次工具执行的 context.agent 传入（不再用全局 holder）
   // 通道实例表承载模型/强度：宿主的启动 spec 不接收这两个字段（DD7 方案 B）
-  const adapter = createDshAdapter(ctx, { channels: cfg.channels ?? [] })
+  //
+  // 派单结果落盘（P0）：一个项目根一个 store，按需创建并缓存。
+  // 写盘失败**不篡改**真实结果——失败的 store 记在这里，工具层把它作为 persistenceWarning 返回。
+  /** @type {Map<string, any>} */
+  const runStores = new Map()
+
+  /** @param {string | null | undefined} projectRoot */
+  function storeFor(projectRoot) {
+    if (typeof projectRoot !== 'string' || !projectRoot) return null
+    let store = runStores.get(projectRoot)
+    if (!store) {
+      store = createRunStore({ root: projectRoot })
+      runStores.set(projectRoot, store)
+    }
+    return store
+  }
+
+  /** @type {Map<string, { code: string, message: string }>} */
+  const persistenceWarnings = new Map()
+
+  /**
+   * 把记录写到项目目录。失败时记一条警告（按 childId），不影响任务本身。
+   * @param {any} record
+   */
+  async function persistRun(record) {
+    const store = storeFor(record?.projectRoot)
+    if (!store) return
+    try {
+      await store.writeRun(record)
+      persistenceWarnings.delete(String(record?.childId ?? ''))
+    } catch (err) {
+      persistenceWarnings.set(String(record?.childId ?? ''), {
+        code: err?.code ?? 'RUN_WRITE_FAILED',
+        message: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  const adapter = createDshAdapter(ctx, {
+    channels: cfg.channels ?? [],
+    onRunStart: (record) => void persistRun(record),
+    onRunFinish: (record) => void persistRun(record),
+  })
+
+  /**
+   * 内存查不到时的磁盘兜底（DSH 重启后仍能读到终态）。
+   * @param {any} exec
+   * @param {string} childId
+   */
+  async function loadPersistedRun(exec, childId) {
+    const store = storeFor(exec?.agent?.session?.header?.cwd)
+    if (!store) return null
+    try {
+      const record = await store.loadRun(childId)
+      const warning = persistenceWarnings.get(childId)
+      return warning ? { ...record, persistenceWarning: warning } : record
+    } catch (err) {
+      return {
+        status: 'unknown',
+        childId,
+        reason: err instanceof Error ? err.message : String(err),
+        ...(err?.code ? { code: err.code } : {}),
+      }
+    }
+  }
 
   const dispatcher = createDispatcher({
     registry: globalRegistry,
@@ -131,6 +196,7 @@ export function apply(ctx, config = {}) {
       dispatcher,
       probe,
       resolveRegistry,
+      loadPersistedRun,
       ...(typeof hostDefineTool === 'function' ? { defineTool: hostDefineTool } : {}),
     })
     registered = true

@@ -237,6 +237,8 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
         readOnly,
         timeoutMs: role.timeoutMs,
         context: req.context,
+        // 上下文重放块（P1）：由工具层解析好后透传，适配器只负责拼进提示词
+        ...(req.continuation ? { continuation: req.continuation } : {}),
         onFinish,
       })
     } catch (err) {

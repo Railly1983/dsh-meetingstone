@@ -1,5 +1,6 @@
 // @ts-check
 import { relative, resolve } from 'node:path'
+import { composePromptWithContinuation } from '../context-replay.js'
 /**
  * DSH 接线层 · 适配器（阶段 2）。
  *
@@ -135,26 +136,32 @@ function errorMessage(err) {
 }
 
 /**
- * 把角色身份与任务拼成子 Agent 的提示词。
+ * 把角色身份、可选的"上次结果重放块"和任务拼成子 Agent 的提示词。
  *
  * 为什么要拼：子 Agent 默认不知道"自己是谁"。CLIWorker 时代靠 persona 的 prompt 注入，
  * 我们替代它时必须保留这个语义，否则「沙僧」和「小白」派出去只是同一个裸模型。
  *
+ * 重放块必须放在人设之后、任务之前，并且用显式边界标记——旧输出是不可信数据。
+ *
  * @param {any} role
  * @param {string} task
+ * @param {{ text: string } | null} [continuation]
  * @returns {string}
  */
-function composePrompt(role, task) {
-  const body = String(task ?? '')
+function composePrompt(role, task, continuation = null) {
   const name = typeof role?.name === 'string' ? role.name : ''
-  const persona = typeof role?.prompt === 'string' && role.prompt.trim()
-    ? role.prompt.trim()
-    : typeof role?.description === 'string' && role.description.trim()
-      ? role.description.trim()
-      : ''
-  if (!name && !persona) return body
-  const head = [name ? `你是「${name}」。` : '', persona].filter(Boolean).join(' ')
-  return `${head}\n\n任务：${body}`
+  const persona =
+    typeof role?.prompt === 'string' && role.prompt.trim()
+      ? role.prompt.trim()
+      : typeof role?.description === 'string' && role.description.trim()
+        ? role.description.trim()
+        : ''
+  return composePromptWithContinuation({
+    personaHead: name ? `你是「${name}」。` : '',
+    persona,
+    continuation: continuation && typeof continuation.text === 'string' ? continuation : null,
+    task: String(task ?? ''),
+  })
 }
 
 /**
@@ -205,6 +212,29 @@ function safeService(ctx, name) {
 export function createDshAdapter(ctx, options = {}) {
   const getParent = options.getParent ?? null
   const now = typeof options.now === 'function' ? options.now : () => Date.now()
+  /** 落盘钩子：start 成功后记 running，终态时记 completed/failed/cancelled（失败不影响真实结果） */
+  const onRunStart = typeof options.onRunStart === 'function' ? options.onRunStart : null
+  const onRunFinish = typeof options.onRunFinish === 'function' ? options.onRunFinish : null
+
+  /** @param {any} record */
+  function emitRunStart(record) {
+    if (!onRunStart) return
+    try {
+      onRunStart(record)
+    } catch {
+      /* 落盘是尽力而为，绝不阻断派单 */
+    }
+  }
+
+  /** @param {any} record */
+  function emitRunFinish(record) {
+    if (!onRunFinish) return
+    try {
+      onRunFinish(record)
+    } catch {
+      /* 同上 */
+    }
+  }
 
   /** @type {Map<string, any>} */
   const channelsById = new Map()
@@ -379,7 +409,7 @@ export function createDshAdapter(ctx, options = {}) {
       signal: controller.signal,
       request: {
         parent,
-        prompt: [{ type: 'text', text: composePrompt(role, task) }],
+        prompt: [{ type: 'text', text: composePrompt(role, task, input?.continuation) }],
         ...(typeof cwd === 'string' && cwd ? { cwd } : {}),
         // 不传 maxDepth：实现里 `resolveChildDepth(parent, undefined)` 自带默认上限；
         // 传了反而要求 provider 具备 depthLimit 能力。
@@ -410,28 +440,52 @@ export function createDshAdapter(ctx, options = {}) {
     if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
       timer = setTimeout(() => controller.abort(new Error('meetingstone: timeout')), timeoutMs)
     }
-    handles.set(childId, { activation, controller, timer, onFinish: input?.onFinish })
+    /** 落盘用的基础信息（不含终态），cancel 也需要它 */
+    const runBase = {
+      childId,
+      projectRoot: typeof input?.context?.projectRoot === 'string' ? input.context.projectRoot : null,
+      role: role?.roleId ?? null,
+      channel: role?.channel?.kind ?? null,
+      provider,
+      model: role?.channel?.model ?? null,
+      status: 'running',
+      createdAt: taskRef.startedAt,
+      startedAt: taskRef.startedAt,
+    }
+    handles.set(childId, { activation, controller, timer, onFinish: input?.onFinish, runBase })
+
+    // 先记 running（结果落盘），再挂终态钩子
+    emitRunStart(runBase)
 
     // 任务自己结束后记录结果并释放内部句柄（result 是 subagent.md 确认的 Promise）。
     if (activation.result && typeof activation.result.then === 'function') {
       void activation.result.then(
         (result) => {
-          rememberFinished(childId, {
+          const settled = {
             status: 'completed',
             stopReason: result?.stopReason ?? 'completed',
             output: resultText(result),
             ...(result?.diagnostic ? { diagnostic: String(result.diagnostic) } : {}),
             at: now(),
-          })
+          }
+          rememberFinished(childId, settled)
+          emitRunFinish({ ...runBase, ...settled, finishedAt: settled.at })
           cleanup(childId)
         },
         (err) => {
-          rememberFinished(childId, {
+          const settled = {
             status: 'failed',
             stopReason: 'error',
             output: '',
             diagnostic: errorMessage(err),
             at: now(),
+          }
+          rememberFinished(childId, settled)
+          emitRunFinish({
+            ...runBase,
+            ...settled,
+            error: { code: 'ADAPTER_ERROR', message: errorMessage(err) },
+            finishedAt: settled.at,
           })
           cleanup(childId)
         },
@@ -491,11 +545,14 @@ export function createDshAdapter(ctx, options = {}) {
     if (typeof handle.activation?.dispose === 'function') {
       await handle.activation.dispose()
     }
-    rememberFinished(String(childId), {
+    const settled = {
       status: 'cancelled',
       output: '',
       at: now(),
-    })
+    }
+    rememberFinished(String(childId), settled)
+    // 只在底层结算之后写终态：避免"记录已取消、进程其实又成功完成"
+    emitRunFinish({ ...handle.runBase, ...settled, finishedAt: settled.at })
   }
 
   // 插件卸载：单一 disposer 内串行 await 全部收尾（02-plugin-spec.md §2.4 的硬要求，

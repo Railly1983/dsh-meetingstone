@@ -255,3 +255,29 @@ test('项目配置文件损坏时：仍能列角色，并把解析错误一起�
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('list_roles 暴露配置透明度字段（职责/人设/通道）', async () => {
+  const { ctx, tools } = makeCtx()
+  apply(ctx, {
+    roles: [
+      {
+        roleId: 'role-sashi',
+        name: '沙僧',
+        description: '技术骨干',
+        prompt: '你是技术骨干。',
+        channel: { kind: 'acp-cli', provider: 'acp', channelId: 'ch-acp', model: 'hy4' },
+        permissionPreset: 'project-write',
+      },
+      { roleId: 'role-xiaobai', name: '小白', description: '杂活' },
+    ],
+  })
+  const listTool = tools.find((t) => t.name === 'meetingstone_list_roles')
+  const res = await listTool.execute({})
+  const byId = Object.fromEntries((res?.roles ?? res).map((r) => [r.roleId, r]))
+  assert.equal(byId['role-sashi'].description, '技术骨干')
+  assert.equal(byId['role-sashi'].hasPrompt, true)
+  assert.equal(byId['role-sashi'].channelId, 'ch-acp')
+  assert.equal(byId['role-sashi'].model, 'hy4')
+  assert.equal(byId['role-xiaobai'].hasPrompt, false, '没配人设要如实 false')
+  assert.equal(byId['role-xiaobai'].channelId, undefined)
+})

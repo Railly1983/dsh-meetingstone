@@ -228,3 +228,20 @@ when using Codex with a ChatGPT account. (code: model_not_found)
 | `in-process`（spawn/fork） | ✅ | 原生可见、并发串行、槽位释放均已验证 |
 | `codex` | ✅ | 模型必须固定在 provider 行（账号仅接受 `gpt-5.6-sol`） |
 | `acp-cli`（CodeBuddy） | ✅ | stdin 常开 + node 启动 bin |
+
+
+## 9. 新版 Codex 接入（2026-11-10 23:00）
+
+结论：**provider 的 pinned 版本可以换掉**，方法是物理镜像嵌套依赖（见 docs/installation.md）。
+
+关键事实：
+
+| 事实 | 证据 |
+| --- | --- |
+| provider 在自己包内解析 codex | `createRequire(import.meta.url).resolve("@openai/codex/package.json")` |
+| profile 的 `pnpm.overrides` 无效 | 写入后重装仍解析到 0.153.4 |
+| 新版协议兼容 | 用 0.167 复现 initialize → thread/start → turn/start → turn/complete，返回 PONG |
+| 模型目录由版本决定 | 0.167 下 gpt-6.1-sol / gpt-5.6-sol / gpt-6-astra / gpt-6-luna 全部可用；0.153.4 只认 gpt-5.6-sol |
+| 端到端 | dispatch(role=SELFTESTCODEX) → `{"output":"PONG\nGPT-6"}` |
+
+**教训**：把"官方 pinned"当成不可改的约束，是没查实现就下的结论。
