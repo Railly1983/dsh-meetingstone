@@ -338,7 +338,13 @@ test('registerTools：defineTool 可注入（生产注入真实实现，测试�
     ...deps,
     defineTool: (spec) => {
       seen.push(spec.name)
-      return { ...spec, wrapped: true }
+      // 模拟真实 defineTool 的产物（编译后的 JSON Schema）；注册前自检不接受未编译字典
+      return {
+        ...spec,
+        parameters: { type: 'object', properties: {} },
+        output: { ...spec.output, schema: { type: 'object', additionalProperties: true } },
+        wrapped: true,
+      }
     },
   })
   assert.deepEqual(seen, [TOOL_NAMES.LIST_ROLES, TOOL_NAMES.DISPATCH, TOOL_NAMES.CLI_STATUS])

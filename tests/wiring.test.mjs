@@ -9,6 +9,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { apply, inject, name, PLUGIN_VERSION } from '../src/index.js'
+import { registerTools } from '../src/dsh/register.js'
 
 /** 记录注册了哪些工具，并提供最小可用的 ctx 形状。 */
 function makeCtx() {
@@ -76,6 +77,56 @@ test('apply 注册三个工具且不抛错（即便宿主没有 subagents）', (
     assert.equal(typeof t.execute, 'function', `${t.name} 缺少 execute`)
     assert.ok(t.description && t.description.length > 5, `${t.name} 缺少描述`)
   }
+})
+
+test('注册给宿主的工具 schema 是合法 JSON Schema（不撞 readOnly 保留注解）', () => {
+  const { ctx, tools } = makeCtx()
+  apply(ctx, config)
+  // 回归：原样注册未编译的参数字典时，根上的 readOnly 会被 DeepSeek 当成
+  // JSON Schema 保留注解（要求 boolean），整轮请求被 400 INVALID_REQUEST 拒掉。
+  for (const t of tools) {
+    assert.equal(t.parameters.type, 'object', `${t.name}: parameters 未编译成 object 根`)
+    assert.equal(typeof t.parameters.properties, 'object', `${t.name}: 缺 properties`)
+    assert.equal(
+      typeof t.output.schema.additionalProperties,
+      'boolean',
+      `${t.name}: object 输出 schema 必须显式声明 additionalProperties`,
+    )
+    for (const key of ['readOnly', 'writeOnly', 'deprecated']) {
+      assert.ok(
+        !Object.hasOwn(t.parameters, key),
+        `${t.name}: parameters 根上出现保留注解 ${key}`,
+      )
+    }
+  }
+  const dispatch = tools.find((t) => t.name === 'meetingstone_dispatch')
+  assert.equal(dispatch.parameters.properties.readOnly.type, 'boolean')
+  assert.deepEqual(dispatch.parameters.required, ['role', 'task'])
+  assert.deepEqual(dispatch.parameters.properties.role.type, 'string')
+})
+
+test('注入宿主 defineTool 时传的是作者 spec 字典（不双重编译）', () => {
+  const seen = []
+  const fakeDefineTool = (spec) => {
+    seen.push(spec)
+    // 模拟真实 defineTool 的产物（编译后的 JSON Schema）；注册前自检不接受未编译字典
+    return {
+      ...spec,
+      parameters: { type: 'object', properties: {} },
+      output: { ...spec.output, schema: { type: 'object', additionalProperties: true } },
+    }
+  }
+  const ctx = { tools: { register: () => () => {} } }
+  registerTools(ctx, {
+    registry: { list: () => [], errors: [] },
+    dispatcher: { dispatch: async () => ({ ok: true }) },
+    probe: { probe: async () => ({}), probeAll: async () => [] },
+    defineTool: fakeDefineTool,
+  })
+  assert.equal(seen.length, 3)
+  assert.equal(Object.hasOwn(seen[1].parameters, 'readOnly'), true, '应把作者 DSL 交给 defineTool')
+  assert.equal(seen[1].parameters.readOnly.type, 'boolean')
+  assert.equal(seen[1].parameters.type, undefined, '不能预先编译，否则 defineTool 会二次编译')
 })
 
 test('list_roles 返回配置里的角色', async () => {

@@ -112,6 +112,39 @@ dependencies:
 
 > ⚠️ `project-write` 档位在 Windows 上目前是 **partial enforcement**（目录外普通文件被拒，但硬链接可越界）。别把它理解成"绝对只读"。详见 `docs/audit/08-sandbox.md`。
 
+## 安装前必做（发布门禁 · 2026-11-10 事故后新增）
+
+> **教训**：一个非法的工具 `parameters` 会让 DeepSeek 对**整个 tools 数组**返回 400，
+> profile 下所有会话每一轮都发不出请求。详见 `docs/audit/13-incident-tool-schema.md`。
+
+```powershell
+# 1) 门禁：全量测试 + 宿主/模型 API 契约校验（不过不许装）
+npm run verify
+
+# 2) 隔离 profile 里"跑得动"（不是只看 --dump-config）
+$env:DSH_HOME = "$env:TEMP\mt-isolated\dsh-home"
+& $dsh plugin --profile mt-test add "D:\MeetingStone"
+# 启动该 profile 后发一轮最小消息，确认 200 且工具可见，再动 desktop
+```
+
+三条硬规则：
+
+1. **`npm run verify` 不过，不装真实 profile。**
+2. **"装得上" ≠ "跑得动"**：必须真发一轮请求。
+3. 新插件先进 `bundles` 但在 `cordis.patch.yml` 里 `disabled: true`，验证后再放开。
+
+## 回滚（一分钟止血）
+
+```powershell
+# 方式一：CLI 卸载
+& $dsh plugin --profile desktop remove dsh-meetingstone
+
+# 方式二：profile 文件已备份（安装前自动备份）
+Copy-Item "$env:USERPROFILE\.dsh\profiles\desktop\package.json.bak-<时间戳>" `
+          "$env:USERPROFILE\.dsh\profiles\desktop\package.json" -Force
+# 然后重启 DeepSeek Harness
+```
+
 ## 卸载
 
 ```powershell

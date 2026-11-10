@@ -37,13 +37,15 @@
  *    且要求 session 处于已开启的 turn 内。
  *
  * ── 明确未解决 / 待运行验证 ────────────────────────────────────────────────
- * TODO(P2-defineTool): 生产应由插件入口（src/index.js，并行工作面）注入
- *   `@deepseek-ai/dsh-tools` 的真实 `defineTool` 作为 `deps.defineTool`，以获得
- *   args 推断/校验与 canonical 值校验。本模块**不静态 import 宿主包**：本地测试环境
- *   只装了 `@deepseek-ai/schemastery`，静态 import 会让 `node --test` 直接失败，
- *   且 registerTools 要用假 ctx 单测。未注入时退化为「把 spec 原样交给
- *   ctx.tools.register」——工具定义形状仍是官方 ToolDefinition 形状，但**参数校验不生效**，
- *   属未验证的降级路径，必须在真机联调前补上注入。
+ * P2-defineTool（已接线）：入口 src/index.js 同步探测宿主的
+ *   `@deepseek-ai/dsh-tools` 并把真实 `defineTool` 作为 `deps.defineTool` 注入，
+ *   获得 args 校验与 canonical 值校验。本模块**不静态 import 宿主包**：本地测试环境
+ *   只装了 `@deepseek-ai/schemastery`，静态 import 会让 `node --test` 直接失败。
+ *   拿不到宿主包时**不再原样注册**（那会把未编译的参数字典当 JSON Schema，
+ *   触发 DeepSeek `Invalid schema ... readOnly is not of type "boolean"`），
+ *   改用下面的 compileToolSpec 做等价编译；该降级路径不含运行时 args 校验。
+ *   另：官方 defineTool 要求 object 根显式声明 `additionalProperties`，
+ *   故三个 `output.schema` 都带 `additionalProperties: true`。
  * TODO(P2-approval): 审批应挂在 `meetingstone_dispatch.execute` 里、`dispatcher.dispatch()`
  *   **之前**：`const outcome = await ctx.approval.request({ agent, toolName:
  *   'meetingstone_dispatch', callId, reason, signal })`；只有 `outcome === 'allowed-once'`
@@ -80,6 +82,88 @@ export const CLI_STATUS_CLIS = Object.freeze(['codex', 'codebuddy', 'claude'])
  */
 function renderObject(_args, value) {
   return [{ type: 'text', text: JSON.stringify(value ?? null) }]
+}
+
+/**
+ * 与宿主 `@deepseek-ai/dsh-tools` 的 `parameterSchemaSpecToJsonSchema` 等价的最小编译。
+ * 出处：本机 0.2.2-rc.1 `app.asar` 内 `lib/index.js` / `lib/types/schema.js`：
+ * 字段字典 → `{ type:'object', properties, required? }`；字段只保留
+ * type/description/title/default/examples/enum/const，`required:true` 提升到根级。
+ *
+ * 为什么必须编译：未编译的字典把 `readOnly` 等字段名暴露在 JSON Schema 根上；
+ * `readOnly` 是 JSON Schema 保留注解（值必须是 boolean），DeepSeek API 校验直接报
+ * `Invalid schema for function ... is not of type "boolean"` 并拒掉整轮请求。
+ * @param {object} spec
+ */
+function compileParameterSpec(spec) {
+  const properties = {}
+  const required = []
+  for (const [key, field] of Object.entries(spec ?? {})) {
+    const source = field && typeof field === 'object' ? field : {}
+    const node = {}
+    for (const k of ['type', 'description', 'title', 'default', 'examples', 'enum', 'const']) {
+      if (Object.hasOwn(source, k)) node[k] = source[k]
+    }
+    // 避免 `__proto__` 之类的键触发原型赋值语义（与宿主实现一致）。
+    Object.defineProperty(properties, key, {
+      value: node,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    })
+    if (source.required === true) required.push(key)
+  }
+  return {
+    type: 'object',
+    properties,
+    ...(required.length > 0 ? { required } : {}),
+  }
+}
+
+/** 与 `valueSchemaSpecToJsonSchema` 等价：object 根必须显式声明 additionalProperties。 */
+function compileValueSchema(spec) {
+  const node = { ...(spec ?? {}) }
+  if (node.type === 'object' && typeof node.additionalProperties !== 'boolean') {
+    node.additionalProperties = true
+  }
+  return node
+}
+
+/** 降级路径：把作者 DSL 编译成 ctx.tools.register 期望的 registry-ready 定义。 */
+function compileToolSpec(spec) {
+  return {
+    ...spec,
+    parameters: compileParameterSpec(spec.parameters),
+    output: { ...spec.output, schema: compileValueSchema(spec.output?.schema) },
+  }
+}
+
+/**
+ * 注册前 fail-fast（2026-11-10 事故兜底）。
+ *
+ * 宿主 `register()` 只校验 output.schema、不校验 parameters，投影时又原样深拷贝；
+ * 一个坏定义混进全局工具集，会让 profile 下所有会话每轮都被 API 拒。
+ * 宁可让本插件加载失败（错误局限在插件自己），也不把坏 schema 交出去。
+ * 两条注册路径（官方 defineTool / 本地编译）都过这一关。
+ * @param {object} definition
+ */
+function assertHostReadySchema(definition) {
+  const name = definition?.name ?? '(unknown)'
+  const p = definition?.parameters
+  if (!p || typeof p !== 'object' || p.type !== 'object' || !p.properties) {
+    throw new Error(`TOOL_SCHEMA_INVALID: ${name} 的 parameters 不是 object 根 JSON Schema`)
+  }
+  for (const key of ['readOnly', 'writeOnly', 'deprecated', '$schema', '$ref']) {
+    if (Object.hasOwn(p, key)) {
+      throw new Error(
+        `TOOL_SCHEMA_INVALID: ${name} 的 parameters 根上出现保留关键字 ${key}（字段字典未编译）`,
+      )
+    }
+  }
+  const s = definition?.output?.schema
+  if (s?.type === 'object' && typeof s.additionalProperties !== 'boolean') {
+    throw new Error(`TOOL_SCHEMA_INVALID: ${name} 的 object 输出 schema 缺 additionalProperties`)
+  }
 }
 
 /**
@@ -163,9 +247,10 @@ export function registerTools(ctx, deps) {
     throw new Error('DISPATCHER_UNAVAILABLE: deps.dispatcher.dispatch 不可用')
   }
 
-  // 未注入时是明确标注的降级路径（见文件头 TODO(P2-defineTool)），不是伪造的宿主 API。
+  // 宿主 defineTool 可用 → 官方编译 + args 校验；否则本地等价编译 schema。
+  // 两条路径都只把合法 JSON Schema 交给 ctx.tools.register（见文件头 P2-defineTool）。
   const defineTool =
-    typeof deps.defineTool === 'function' ? deps.defineTool : (/** @type {object} */ spec) => spec
+    typeof deps.defineTool === 'function' ? deps.defineTool : compileToolSpec
 
   // 按「当前会话的项目根」构造注册表（全局角色 + 项目 .meetingstone.json 覆盖）。
   // 未注入时退回静态 registry（只有全局角色），并在返回里如实说明，不假装项目配置生效。
@@ -204,7 +289,7 @@ export function registerTools(ctx, deps) {
       description:
         '列出集合石已配置的角色（roleId/名称/别名/通道/权限档位/启用状态/可用性/来源）与注册表的错误；不派单、不探测本机 CLI。',
       parameters: {},
-      output: { schema: { type: 'object' }, render: renderObject },
+      output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
       async execute(_args, exec) {
         const effective = await registryFor(exec)
         const roles = effective.registry
@@ -227,7 +312,7 @@ export function registerTools(ctx, deps) {
         cwd: { type: 'string', description: '目标目录；调用方须先校验在项目内' },
         readOnly: { type: 'boolean', description: '只收紧、不放宽；无法强制时会明确标记' },
       },
-      output: { schema: { type: 'object' }, render: renderObject },
+      output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
       async execute(args, exec) {
         // TODO(P2-approval)：审批必须挂在这里，dispatcher.dispatch() 之前，见文件头第 5 条。
         // 第一版按要求不接审批：不调用 ctx.approval，也不假装已授权。
@@ -267,7 +352,7 @@ export function registerTools(ctx, deps) {
       parameters: {
         cli: { type: 'string', description: 'codex | codebuddy | claude；省略则查全部' },
       },
-      output: { schema: { type: 'object' }, render: renderObject },
+      output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
       async execute(args) {
         const cli = args?.cli
         if (cli !== undefined && cli !== null && !CLI_STATUS_CLIS.includes(cli)) {
@@ -285,7 +370,10 @@ export function registerTools(ctx, deps) {
 
   for (const tool of tools) {
     // 注册即 effect：卸载时框架自动注销（文件头第 2 条），无需手工 unregister。
-    ctx.tools.register(defineTool(tool))
+    const definition = defineTool(tool)
+    // 交出前最后一道闸：坏 schema 宁可让本插件加载失败，也不能污染全局工具集。
+    assertHostReadySchema(definition)
+    ctx.tools.register(definition)
   }
   return /** @type {Array<{ name: string }>} */ (tools)
 }

@@ -17,6 +17,11 @@
   "engines": {
     "dsh": ">=0.2.2-rc.1 <0.3.0-0"
   },
+  "scripts": {
+    "test": "node --test",
+    "check:host-schema": "node scripts/verify-host-schema.mjs",
+    "verify": "node --test && node scripts/verify-host-schema.mjs"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

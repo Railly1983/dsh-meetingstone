@@ -17,8 +17,30 @@ import { createProbe } from './cli/probe.js'
 import { createDefaultResolvers, runCommand } from './cli/resolvers.js'
 import { createDshAdapter } from './dsh/adapter.js'
 import { inject as toolsInject, registerTools } from './dsh/register.js'
+import { createRequire } from 'node:module'
 import { toRegistryInput } from './project/config-file.js'
 import { createNodeProjectConfigStore } from './project/load.js'
+
+/**
+ * 宿主运行时把 `@deepseek-ai/dsh-tools` 作为 shared package 提供。
+ * `defineTool` 会把「字段 spec 字典」编译成模型可见的 JSON Schema，并在
+ * execute 前校验 args；缺了它，`ctx.tools.register` 收到的是未编译的字典，
+ * 其中 `readOnly` 会被当成 JSON Schema 的保留注解（要求 boolean），
+ * DeepSeek API 直接返回 `Invalid schema for function ... is not of type "boolean"`。
+ *
+ * 本地单测环境只装了 schemastery，故用同步探测 + 容错：拿不到宿主包时
+ * 由 register.js 走等价的本地编译（见该文件 compileToolSpec），绝不降级为
+ * 「原样注册」。刻意不用顶层 await 动态 import——插件可能被宿主以同步
+ * require(ESM) 方式加载，含 TLA 的模块会抛 ERR_REQUIRE_ASYNC_MODULE。
+ * 本地编译路径只保证 schema 合法，不含运行时 args 校验。
+ */
+const require = createRequire(import.meta.url)
+let hostDefineTool
+try {
+  ({ defineTool: hostDefineTool } = require('@deepseek-ai/dsh-tools'))
+} catch {
+  hostDefineTool = undefined
+}
 
 export { Config }
 // 工具注册需要宿主注入 tools 服务（dsh-tools 的 defineTool 走这一层）
@@ -80,7 +102,13 @@ export function apply(ctx, config = {}) {
   let registered = false
 
   ctx.effect(() => {
-    registerTools(ctx, { registry: globalRegistry, dispatcher, probe, resolveRegistry })
+    registerTools(ctx, {
+      registry: globalRegistry,
+      dispatcher,
+      probe,
+      resolveRegistry,
+      ...(typeof hostDefineTool === 'function' ? { defineTool: hostDefineTool } : {}),
+    })
     registered = true
 
     const line = `[${name}] loaded v${PLUGIN_VERSION} (roles=${globalRegistry.list().length})`
