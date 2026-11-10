@@ -2,6 +2,13 @@
 
 > 采集人：八戒 ｜ 日期：2026-11-10 ｜ 方式：工具层取证（**未做截图级 UI 观察，见 §4**）
 
+> **2026-11-10 补充（真机验证后修正）**：本文件早期结论针对**外部 CLI Worker**，不适用于**进程内通道**。
+> 实测：通过 `in-process`（`spawn`）派发的子 Agent **会**出现在原生 `list_agents` 里，
+> 例如 `d52874f6-... [running] — meetingstone:role-selftest`，任务结束后变 `[inactive]`。
+> 见 `audit/14-live-dispatch-verification.md` §2.3。
+> 结论应改为：**in-process 通道原生可见；外部 CLI provider 通道不可见**。
+
+
 ## 1. 结论
 
 | 问题 | 结论 | 证据 |
