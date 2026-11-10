@@ -4,9 +4,14 @@
     {
       "roleId": "role-selftest",
       "name": "自检员",
-      "aliases": ["SELFTEST"],
+      "aliases": [
+        "SELFTEST"
+      ],
       "description": "进程内 spawn 通道的自检角色",
-      "channel": { "kind": "in-process", "provider": "spawn" },
+      "channel": {
+        "kind": "in-process",
+        "provider": "spawn"
+      },
       "permissionPreset": "project-write",
       "enabled": true,
       "timeoutMs": 120000
@@ -14,9 +19,14 @@
     {
       "roleId": "role-selftest-fork",
       "name": "自检员B",
-      "aliases": ["SELFTESTB"],
+      "aliases": [
+        "SELFTESTB"
+      ],
       "description": "进程内 fork 通道的自检角色（对照实验）",
-      "channel": { "kind": "in-process", "provider": "fork" },
+      "channel": {
+        "kind": "in-process",
+        "provider": "fork"
+      },
       "permissionPreset": "project-write",
       "enabled": true,
       "timeoutMs": 120000
@@ -24,9 +34,14 @@
     {
       "roleId": "role-selftest-ro",
       "name": "自检员只读",
-      "aliases": ["SELFTESTRO"],
+      "aliases": [
+        "SELFTESTRO"
+      ],
       "description": "只读档位但不引用通道实例：用于验证 READONLY_UNENFORCEABLE 拒绝路径",
-      "channel": { "kind": "in-process", "provider": "spawn" },
+      "channel": {
+        "kind": "in-process",
+        "provider": "spawn"
+      },
       "permissionPreset": "read-only",
       "enabled": true,
       "timeoutMs": 120000
@@ -34,14 +49,37 @@
     {
       "roleId": "role-selftest-codex",
       "name": "自检员Codex",
-      "aliases": ["SELFTESTCODEX"],
+      "aliases": [
+        "SELFTESTCODEX"
+      ],
       "description": "外部 CLI 通道自检：走官方 codex provider（需装 @deepseek-ai/dsh-subagent-codex）",
-      "channel": { "kind": "codex", "provider": "codex" },
+      "channel": {
+        "kind": "codex",
+        "provider": "codex"
+      },
+      "permissionPreset": "project-write",
+      "enabled": true,
+      "timeoutMs": 300000
+    },
+    {
+      "roleId": "role-selftest-codebuddy",
+      "name": "自检员CodeBuddy",
+      "aliases": [
+        "SELFTESTCB"
+      ],
+      "description": "外部 CLI 通道自检：走官方 acp provider + 本机 CodeBuddy ACP",
+      "channel": {
+        "kind": "acp-cli",
+        "provider": "acp"
+      },
       "permissionPreset": "project-write",
       "enabled": true,
       "timeoutMs": 300000
     }
   ],
   "dispatchNotes": "仓库自带项目级自检配置：验证派单/结果回读/取消/只读拒绝/外部 CLI 通道。",
-  "limits": { "maxParallelReadonly": 2, "serializeWrites": true }
+  "limits": {
+    "maxParallelReadonly": 2,
+    "serializeWrites": true
+  }
 }

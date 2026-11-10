@@ -155,6 +155,28 @@ Copy-Item "$env:USERPROFILE\.dsh\profiles\desktop\package.json.bak-<时间戳>" 
 # 然后重启 DeepSeek Harness
 ```
 
+### ACP 通道实战：接 CodeBuddy（2026-11-10 实测）
+
+```yaml
+- id: subagent-acp
+  name: '@deepseek-ai/dsh-subagent-acp'
+  config:
+    providerName: acp
+    command: 'C:\Users\<你>\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe'
+    args:
+      - 'C:\Users\<你>\AppData\Roaming\npm\node_modules\@tencent-ai\codebuddy-code\bin\codebuddy'
+      - '--acp'
+    permission: allow
+```
+
+**关键坑**：CodeBuddy 的 ACP 入口必须**保持 stdin 打开**才能起来——如果启动后立刻关闭 stdin，
+会崩在 headless 初始化（`Failed to start the backend application`），这也是早期探测误判"不可用"的原因。
+用 `command: codebuddy`（.cmd）不行：子进程直接 spawn 不经过 shell，.cmd 起不来；要用 node + bin 脚本。
+
+握手验证（不依赖 DSH，可单独跑）：向 `node <bin> --acp` 的 stdin 写一行
+`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}`，
+应收到带 `agentCapabilities` 的 result。
+
 ## 卸载
 
 ```powershell
