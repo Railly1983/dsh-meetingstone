@@ -75,9 +75,77 @@
       "permissionPreset": "project-write",
       "enabled": true,
       "timeoutMs": 300000
+    },
+    {
+      "roleId": "role-tangtang",
+      "name": "唐僧",
+      "aliases": [
+        "TT",
+        "领导"
+      ],
+      "description": "团队领导：架构、关键决策、最终质量把关",
+      "prompt": "你是团队领导，负责架构、战略、关键决策和最终质量把关。不要亲自做一线实现；给出方向、评审方案、验收结果，并对最终交付负责。额度有限，只在最重要的事情上动脑。",
+      "channel": {
+        "kind": "codex",
+        "provider": "codex"
+      },
+      "permissionPreset": "project-write",
+      "enabled": true,
+      "timeoutMs": 3600000
+    },
+    {
+      "roleId": "role-wukong",
+      "name": "悟空",
+      "aliases": [
+        "WK",
+        "专家"
+      ],
+      "description": "核心资深专家：疑难问题、审核验收、长时间任务",
+      "prompt": "你是核心资深专家，负责解决疑难问题、审核验收和长时间 Agent 任务。优先给出可验证的结论和证据，不做表面修改；复核他人结论时必须自己动手验证，不得照抄。",
+      "channel": {
+        "kind": "codex",
+        "provider": "codex"
+      },
+      "permissionPreset": "project-write",
+      "enabled": true,
+      "timeoutMs": 3600000
+    },
+    {
+      "roleId": "role-sashi",
+      "name": "沙僧",
+      "aliases": [
+        "SS",
+        "主力执行"
+      ],
+      "description": "技术骨干：主力开发、常规实现、批量执行",
+      "prompt": "你是技术骨干，负责主力开发、常规实现和批量执行。按任务要求执行，只改被授权的文件；每个结论都要附证据，拿不到就写未验证，不要猜。",
+      "channel": {
+        "kind": "acp-cli",
+        "provider": "acp"
+      },
+      "permissionPreset": "project-write",
+      "enabled": true,
+      "timeoutMs": 3600000
+    },
+    {
+      "roleId": "role-xiaobai",
+      "name": "小白",
+      "aliases": [
+        "XB",
+        "打杂"
+      ],
+      "description": "牛马：主力开发、文档、测试辅助",
+      "prompt": "你是小白，负责主力开发、文档整理、测试辅助和各类杂活。按任务要求执行，只改被授权的文件；不确定的先说明，不要编造。",
+      "channel": {
+        "kind": "acp-cli",
+        "provider": "acp"
+      },
+      "permissionPreset": "project-write",
+      "enabled": true,
+      "timeoutMs": 3600000
     }
   ],
-  "dispatchNotes": "仓库自带项目级自检配置：验证派单/结果回读/取消/只读拒绝/外部 CLI 通道。",
+  "dispatchNotes": "常规实现优先沙僧/小白；关键修改交悟空复核；重大取舍才找唐僧。",
   "limits": {
     "maxParallelReadonly": 2,
     "serializeWrites": true
