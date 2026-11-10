@@ -213,6 +213,14 @@ when using Codex with a ChatGPT account. (code: model_not_found)
 派单提示词形如：`你是「沙僧」。<prompt>\n\n任务：<task>`。
 `prompt` 缺失时回退到 `description`，两者都没有则只发任务正文。已加回归测试。
 
+**真机验证**（2026-11-10 21:50）：派单给 CodeBuddy 角色，任务为「只回复你的角色名」：
+
+```json
+{"status":"completed","output":"自检员CodeBuddy"}
+```
+
+子 Agent 能报出角色名，证明角色身份确实随提示词传到了外部 CLI。
+
 ### 8.3 三条通道汇总
 
 | 通道 | 状态 | 备注 |
