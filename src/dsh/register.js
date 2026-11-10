@@ -69,6 +69,8 @@ export const inject = Object.freeze(['tools'])
 export const TOOL_NAMES = Object.freeze({
   LIST_ROLES: 'meetingstone_list_roles',
   DISPATCH: 'meetingstone_dispatch',
+  GET_TASK: 'meetingstone_get_task',
+  CANCEL_TASK: 'meetingstone_cancel_task',
   CLI_STATUS: 'meetingstone_cli_status',
 })
 
@@ -348,6 +350,43 @@ export function registerTools(ctx, deps) {
           return { ...result, projectErrors: effective.projectErrors }
         }
         return result
+      },
+    },
+    {
+      name: TOOL_NAMES.GET_TASK,
+      description:
+        '按 childId 查询一次派发的结果：status（running/completed/failed/cancelled/unknown）、输出文本、停止原因。' +
+        '结果只在本进程内存里保留最近 20 条，DSH 重启后返回 unknown（不编造）。',
+      parameters: {
+        childId: { type: 'string', required: true, description: 'meetingstone_dispatch 返回的 taskRef.childId' },
+      },
+      output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
+      async execute(args) {
+        const childId = args?.childId
+        if (typeof childId !== 'string' || !childId.trim()) {
+          return { status: 'unknown', reason: '缺少 childId' }
+        }
+        if (typeof dispatcher.getTask !== 'function') {
+          return { status: 'unknown', reason: '当前派单器不支持结果查询' }
+        }
+        return dispatcher.getTask(childId.trim())
+      },
+    },
+    {
+      name: TOOL_NAMES.CANCEL_TASK,
+      description:
+        '按 childId 取消一次派发（中止 + 释放宿主 activation），并释放并发槽位。重复调用无害。',
+      parameters: {
+        childId: { type: 'string', required: true, description: 'meetingstone_dispatch 返回的 taskRef.childId' },
+      },
+      output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
+      async execute(args) {
+        const childId = args?.childId
+        if (typeof childId !== 'string' || !childId.trim()) {
+          return { ok: false, code: 'INVALID_CHILD_ID', message: '缺少 childId' }
+        }
+        await dispatcher.cancel(childId.trim())
+        return { ok: true, childId: childId.trim(), cancelled: true }
       },
     },
     {

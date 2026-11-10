@@ -63,14 +63,16 @@ test('inject 声明了 tools 依赖', () => {
   assert.deepEqual(inject, ['tools', 'subagents'], 'tools 用于注册，subagents 用于派单与可用性')
 })
 
-test('apply 注册三个工具且不抛错（即便宿主没有 subagents）', () => {
+test('apply 注册五个工具且不抛错（即便宿主没有 subagents）', () => {
   const { ctx, tools } = makeCtx()
   apply(ctx, config)
-  assert.equal(tools.length, 3)
+  assert.equal(tools.length, 5)
   const names = tools.map((t) => t.name).sort()
   assert.deepEqual(names, [
+    'meetingstone_cancel_task',
     'meetingstone_cli_status',
     'meetingstone_dispatch',
+    'meetingstone_get_task',
     'meetingstone_list_roles',
   ])
   for (const t of tools) {
@@ -123,7 +125,7 @@ test('注入宿主 defineTool 时传的是作者 spec 字典（不双重编译�
     probe: { probe: async () => ({}), probeAll: async () => [] },
     defineTool: fakeDefineTool,
   })
-  assert.equal(seen.length, 3)
+  assert.equal(seen.length, 5)
   assert.equal(Object.hasOwn(seen[1].parameters, 'readOnly'), true, '应把作者 DSL 交给 defineTool')
   assert.equal(seen[1].parameters.readOnly.type, 'boolean')
   assert.equal(seen[1].parameters.type, undefined, '不能预先编译，否则 defineTool 会二次编译')
@@ -173,7 +175,7 @@ test('dispose 幂等，且在 dispose 后再次 dispose 不报错', () => {
 test('空配置也能加载（roles=0）', () => {
   const { ctx, tools, logs } = makeCtx()
   assert.doesNotThrow(() => apply(ctx, {}))
-  assert.equal(tools.length, 3)
+  assert.equal(tools.length, 5)
   assert.ok(logs.some((l) => l.includes('roles=0')))
 })
 

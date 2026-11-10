@@ -240,10 +240,22 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
     release(taskRef)
   }
 
+  /**
+   * 查询任务结果。适配器不支持时返回 unknown，不编造。
+   * @param {string | object} ref
+   */
+  async function getTask(ref) {
+    if (typeof adapter.getTask !== 'function') {
+      return { status: 'unknown', reason: '当前适配器不支持结果查询' }
+    }
+    return adapter.getTask(ref)
+  }
+
   return {
     dispatch,
     release,
     cancel,
+    getTask,
     stats: (projectKey) => {
       if (typeof projectKey === 'string') {
         const c = countsFor(projectKey)

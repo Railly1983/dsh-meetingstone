@@ -135,6 +135,20 @@ function errorMessage(err) {
 }
 
 /**
+ * 把宿主 `SubagentResult.output`（ContentBlock[]）压成人类可读文本。
+ * @param {any} result
+ * @returns {string}
+ */
+function resultText(result) {
+  const output = result?.output
+  if (!Array.isArray(output)) return ''
+  return output
+    .map((block) => (block && typeof block.text === 'string' ? block.text : ''))
+    .filter(Boolean)
+    .join('\n')
+}
+
+/**
  * 安全读取宿主服务。
  * Cordis 里访问**未 inject** 的属性会直接抛（`cannot get property "x" without inject`，
  * optional chaining 也挡不住），所以必须 try/catch：拿不到返回 null，
@@ -177,8 +191,24 @@ export function createDshAdapter(ctx, options = {}) {
     }
   }
 
-  /** @type {Map<string, { activation: any, controller: AbortController, timer: any }>} */
+  /** @type {Map<string, { activation: any, controller: AbortController, timer: any, onFinish?: Function }>} */
   const handles = new Map()
+
+  /**
+   * 已完成任务的结果快照（childId → 结果），只留最近 20 条。
+   * 用途：`meetingstone_get_task` 读回"子 Agent 到底输出了什么"。
+   * @type {Map<string, { status: string, stopReason?: string, output: string, diagnostic?: string, at: number }>}
+   */
+  const finished = new Map()
+  /** @param {string} childId @param {any} value */
+  function rememberFinished(childId, value) {
+    finished.set(childId, value)
+    while (finished.size > 20) {
+      const oldest = finished.keys().next().value
+      if (oldest === undefined) break
+      finished.delete(oldest)
+    }
+  }
 
   /**
    * 查询 provider 是否注册。**只信宿主返回值，不猜**。
@@ -359,11 +389,29 @@ export function createDshAdapter(ctx, options = {}) {
     }
     handles.set(childId, { activation, controller, timer, onFinish: input?.onFinish })
 
-    // 任务自己结束后释放内部句柄（result 是 subagent.md 确认的 Promise）。
+    // 任务自己结束后记录结果并释放内部句柄（result 是 subagent.md 确认的 Promise）。
     if (activation.result && typeof activation.result.then === 'function') {
       void activation.result.then(
-        () => cleanup(childId),
-        () => cleanup(childId),
+        (result) => {
+          rememberFinished(childId, {
+            status: 'completed',
+            stopReason: result?.stopReason ?? 'completed',
+            output: resultText(result),
+            ...(result?.diagnostic ? { diagnostic: String(result.diagnostic) } : {}),
+            at: now(),
+          })
+          cleanup(childId)
+        },
+        (err) => {
+          rememberFinished(childId, {
+            status: 'failed',
+            stopReason: 'error',
+            output: '',
+            diagnostic: errorMessage(err),
+            at: now(),
+          })
+          cleanup(childId)
+        },
       )
     }
 
@@ -387,9 +435,31 @@ export function createDshAdapter(ctx, options = {}) {
     }
   }
 
+  /**
+   * 查询一次派发的结果。**不阻塞**：仍在跑就返回 running。
+   * 结果只在当前进程内存里保存（最近 20 条），DSH 重启后读不到——如实返回 unknown。
+   * @param {string | object} ref childId 或 taskRef
+   */
+  async function getTask(ref) {
+    const childId = typeof ref === 'string' ? ref : ref?.childId
+    if (!childId) return { status: 'unknown', reason: '缺少 childId' }
+
+    const done = finished.get(String(childId))
+    if (done) return { childId: String(childId), ...done }
+
+    const handle = handles.get(String(childId))
+    if (handle) return { childId: String(childId), status: 'running', output: '' }
+
+    return {
+      childId: String(childId),
+      status: 'unknown',
+      reason: '本进程没有该任务的记录（可能已重启，或不是本插件派发的）',
+    }
+  }
+
   /** 取消：先 abort，再让宿主 dispose 这个 activation。重复调用无害。 */
   async function cancel(taskRef) {
-    const childId = taskRef?.childId
+    const childId = typeof taskRef === 'string' ? taskRef : taskRef?.childId
     if (!childId) return
     const handle = handles.get(String(childId))
     if (!handle) return
@@ -398,6 +468,11 @@ export function createDshAdapter(ctx, options = {}) {
     if (typeof handle.activation?.dispose === 'function') {
       await handle.activation.dispose()
     }
+    rememberFinished(String(childId), {
+      status: 'cancelled',
+      output: '',
+      at: now(),
+    })
   }
 
   // 插件卸载：单一 disposer 内串行 await 全部收尾（02-plugin-spec.md §2.4 的硬要求，
@@ -433,7 +508,7 @@ export function createDshAdapter(ctx, options = {}) {
     }, 'meetingstone: activation-cleanup')
   }
 
-  return { canStart, start, cancel }
+  return { canStart, start, cancel, getTask }
 }
 
 /**
