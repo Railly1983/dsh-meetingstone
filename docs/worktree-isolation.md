@@ -18,7 +18,7 @@
 | 谁建树 | 插件（`src/worktree.js`，literal argv） | 宿主 `create_worktree` 工具或你手敲 git |
 | 路径 | `<projectRoot>/.meetingstone/worktrees/<operationId>` | 你指定（必须在项目根内） |
 | 分支 | `meetingstone/<operationId>` | 你指定 |
-| 并行 | 默认开（2/项目、4/全局） | 需要自己关掉 `serializeWrites` 或显式 `isolation:'none'` |
+| 并行 | 默认开（2/项目、4/全局；**仅当前插件实例**内的计数） | 需**同时**：① 手动建好独立工作树 ② 设 `isolation:'none'` ③ 关掉 `serializeWrites`（否则同项目仍串行） |
 | 合并/清理 | 不自动，人工（§5） | 不自动，人工（§5） |
 | 记录 | `worktree` / `changedFiles` / `overlapWarnings` 自动落盘 | 插件不感知，记录里没有 worktree 字段 |
 
