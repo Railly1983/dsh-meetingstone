@@ -476,3 +476,26 @@ LEFTOVER=0
 | `@latest`（0.0.1-rc.1）安装会怎样 | **未验证** | 仅据 registry 元数据判断已过时，未实际安装旧版 |
 | 装进真实 desktop profile 的依赖去重行为 | **未验证** | 按安全边界禁止；仅在隔离 profile 观察到 1.9.0/3.19.0 |
 | `--dump-config-schema` 是否会触发模块顶层副作用 | **未验证** | 只观察到 rc=0 与 schema 输出，未审计该包的顶层代码 |
+
+---
+
+## 附：真实 desktop profile 沙盘演练（2026-11-10，八戒）
+
+在**复制出来的 desktop profile**（临时 DSH_HOME）里装 `@deepseek-ai/dsh-subagent-codex@0.2.2-rc.1`：
+
+| 检查 | 结果 |
+| --- | --- |
+| 安装 | rc=0，3.5s，profile `bundles` 末尾追加 `@deepseek-ai/dsh-subagent-codex` |
+| lock 变更 | +153 行（provider 及其依赖），-2 行只是 `dsh-cliworker-now@0.8.7` 的版本行重排，版本未变 |
+| `@deepseek-ai/schemastery` | 顶层 **3.18.5 → 3.19.0**（R16 预警成真）；`dsh-cliworker-now` 保留**嵌套 3.18.5** 副本，互不影响 |
+| `@deepseek-ai/cosmokit` | 1.8.6 **未变** |
+| `dsh-remote-plugin` / `dsh-cliworker-now` | 0.8.0 / 0.8.7 **未变** |
+| 配置组合（别名 profile dump） | 出现 `subagent-codex`、`tool-subagent-codex`、`meetingstone` 三组行 |
+
+**结论**：装 codex provider 对现有插件的依赖影响是"顶层 schemastery 升一个小版本 + cliworker 保留嵌套旧版"，属于可接受范围；**但必须真机启动验证**（`--dump-config` 不能证明运行时）。
+
+### 顺带发现的一个真实隐患：linked 安装的 junction
+
+我们的插件当前以 `link:D:/MeetingStone` 装进 `desktop`，profile 里是 **junction** 指向仓库。演练时复制/删除 profile 目录会**顺着 junction 进入真实仓库**（本次删除尝试触发了对 `.git/objects` 的删除，因文件只读而失败；事后 `git fsck` 复核仓库完好）。
+
+处置建议：**真实 profile 改用 tarball 安装**（`pnpm pack` → `dsh plugin add ./dsh-meetingstone-0.0.1.tgz`），profile 里是副本而非链接，既避免递归删除风险，也消掉 pnpm 的 peer 警告。开发期可继续用 link，但**不要对 profile 目录做递归删除**。
