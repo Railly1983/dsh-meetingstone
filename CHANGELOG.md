@@ -22,6 +22,8 @@
   `permissionPreset`（角色与通道实例）、`READONLY_UNENFORCEABLE` / `READONLY_LIMIT`、只读并发计数与
   `limits.maxParallelReadonly` 全部删除。原因：宿主 subagent spec 没有权限字段，做不到绝对只读，就整个不提供。
   **不要再实现**；`docs/audit/14`、`docs/audit/15` 里保留的是历史记录。
+- **项目级 `limits` 死配置移除**：`.meetingstone.json` 不再解析/校验/导出 `limits`；`serializeWrites` 只在插件
+  全局配置（`src/config.js`）里生效。旧项目配置里写了 `limits` 会按未知字段忽略，不报错、不阻断派单。
 
 ### Added
 - **生命周期正确性（P0）**：取消改为「先 `dispose()`（默认 5s 超时兜底）再释放槽位」；
@@ -32,9 +34,19 @@
 - 项目级配置 `.meetingstone.json`：mtime 缓存、坏文件降级、与全局配置合并
 - 本机 CLI 探测：多源解析（PATH → Appx → npm 全局 → 常见目录），带版本试跑与缓存
 - 派单编排：同项目任务串行、按项目隔离、失败回滚、`onFinish` 幂等释放
-- DSH 接线层：`ctx.subagents` 适配器 + 三个工具（`meetingstone_list_roles` / `_dispatch` / `_cli_status`）
+- DSH 接线层：`ctx.subagents` 适配器 + 六个工具（`meetingstone_list_roles` / `_dispatch` / `_list_runs` / `_get_task` / `_cancel_task` / `_cli_status`）
 - 通道实例表 `channels`：模型/强度由 provider 行承载，角色声明必须一致（DD7 方案 B）
 - 发布门禁 `npm run verify`：全量测试 + 宿主/模型 API 契约校验
+- **工作树隔离（手动流程）**：`docs/worktree-isolation.md` + `examples/worktree-dispatch.jsonc`，说明用宿主
+  `create_worktree` 建隔离工作树、派单 `cwd` 指向它、人工 merge / cherry-pick / patch 合并与
+  `git worktree remove` / `prune` 清理。插件不自动建树/合并/清理；自动隔离与并行多任务仍在
+  `docs/plan/2026-11-11-parallel-plan.md` 设计中。
+
+### Changed
+- 当前开发线：6 个工具；`node scripts/run-tests.mjs` 178 项全绿；`node scripts/verify-host-schema.mjs` PASS。
+- 文档校准：`permissionPreset` / `readOnly` / `READONLY_*` / `maxParallelReadonly` 等只读旧表述统一标注
+  「已移除 / 不做（已移除）」；审计文档保留历史并加"已移除"声明；`docs/audit/15` 能力对照补
+  「并行多任务：设计中」；`docs/worktree-isolation.md` 链接进中英文 README。
 
 ### Fixed
 - **2026-11-10 事故**：工具 `parameters` 未编译成合法 JSON Schema，导致 DeepSeek 对全部会话每轮返回 400。

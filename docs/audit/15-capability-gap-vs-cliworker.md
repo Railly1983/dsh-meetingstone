@@ -14,11 +14,12 @@
 | 按"角色/别名"派活 | ✅ 有 persona | ✅ 角色 + 别名 + 冲突检测 |
 | 外部 CLI 通道 | ✅ codex/claude/codebuddy/kimi… | ✅ **codex 已端到端跑通**；in-process 已跑通 |
 | 指定模型/强度 | ✅ 每个 worker 选 | ✅ 由通道实例承载（DD7），派单校验一致 |
-| 只读约束 | ✅ read-only | ❌ **已移除，不要再实现**：宿主 subagent spec 无权限字段，做不到绝对只读 |
+| 只读约束 | ✅ read-only | ❌ **不做（已移除）**：宿主 subagent spec 无权限字段，做不到绝对只读 |
 | 任务状态查询 | ✅ status | ✅ `meetingstone_get_task`（running/completed/failed/cancelled） |
 | 取消任务 | ✅ stop | ✅ `meetingstone_cancel_task` |
 | 结果回读 | ✅ 读输出 | ✅ `get_task` 返回真实输出（已验 PONG） |
 | 并发纪律 | 由插件内部管理 | ✅ 同项目串行/按项目隔离（只读限流已随只读通道移除） |
+| 并行多任务 | ✅ 多 worker 并行 | 🔄 设计中（见 `docs/plan/2026-11-11-parallel-plan.md`）：当前同项目写任务默认串行；手动隔离流程见 `docs/worktree-isolation.md` |
 | 本机 CLI 状态 | ✅ | ✅ 多源探测（含商店应用 Appx 路径） |
 | 配置位置 | worker 配置/项目文件 | ✅ 插件 Config + 项目 `.meetingstone.json`（热读取） |
 

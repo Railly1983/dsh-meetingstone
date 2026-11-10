@@ -63,8 +63,7 @@
   "roles": [{ "roleId": "role-scout", "name": "斥候", "channel": { "kind": "in-process" } }],
   "roleOverrides": { "role-sashi": { "description": "本项目里负责主力开发" } },
   "dispatchNotes": "只改 src/；动 docs/ 前先问。",
-  "projectRules": ["未经确认不得修改数据库迁移文件"],
-  "limits": { "serializeWrites": true }
+  "projectRules": ["未经确认不得修改数据库迁移文件"]
 }
 ```
 
@@ -74,6 +73,7 @@
 2. `channel` 覆盖是**字段级合并**；但模型/强度仍要与实例一致。
 3. 文件坏了（JSON 非法、版本不认识、字段类型错）→ **降级为空配置 + 把错误暴露在工具返回里**，绝不打断派单链路。
 
+> 项目级配置**不提供 `limits`**：同项目串行开关 `serializeWrites` 只在插件全局配置（§1）里生效，项目文件里写 `limits` 会按未知字段忽略，不报错、不阻断派单。
 > `permissionPreset` 已随只读通道移除；旧配置里写了也会被忽略，不报错、不阻断派单。
 
 ## 5. 解析与校验
@@ -107,4 +107,5 @@
 
 - 全局五角色：[examples/meetingstone.desktop.yml](../examples/meetingstone.desktop.yml)
 - 项目覆盖：[examples/project.meetingstone.json](../examples/project.meetingstone.json)
-- 仓库自检角色：根目录 `.meetingstone.json`（`role-selftest`，in-process 通道）
+- 仓库自检角色：[examples/selftest.roles.json](../examples/selftest.roles.json)（`role-selftest*`，in-process / codex / acp 通道）
+- 本仓库项目配置：根目录 `.meetingstone.json`（五角色 + 通道引用）

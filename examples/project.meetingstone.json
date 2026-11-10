@@ -20,8 +20,5 @@
   "projectRules": [
     "未经确认不得修改数据库迁移文件",
     "同一项目的写任务默认串行"
-  ],
-  "limits": {
-    "serializeWrites": true
-  }
+  ]
 }

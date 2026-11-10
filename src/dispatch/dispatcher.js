@@ -93,7 +93,7 @@ export const DEFAULT_PROJECT_KEY = 'default'
 /**
  * @param {{ registry: { resolve: (ref: string) => any, list: () => any[] },
  *           adapter: DispatchAdapter,
- *           limits?: { serializeWrites?: boolean },
+ *           limits?: { serializeWrites?: boolean },  // 来自插件全局配置；项目级配置不提供
  *           now?: () => number }} deps
  */
 export function createDispatcher({ registry, adapter, limits = {}, now = () => Date.now() }) {
@@ -198,7 +198,7 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
     if (serializeWrites && writes > 0) {
       return fail(
         DISPATCH_ERRORS.WRITE_CONFLICT,
-        '同一项目已有任务在执行；写任务默认串行（可在项目配置里调整）',
+        '同一项目已有任务在执行；写任务默认串行（可在插件全局配置里调整）',
       )
     }
 

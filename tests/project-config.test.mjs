@@ -56,14 +56,12 @@ test('完整配置按字段解析', () => {
     roleOverrides: { 'role-sashi': { description: '项目内改为复核' } },
     dispatchNotes: '关键改动交悟空复核',
     projectRules: ['未经确认不得改迁移文件', 123, null],
-    limits: { serializeWrites: false },
   }
   const { config, errors } = normalizeProjectConfig(raw)
   assert.equal(config.defaultRoleId, 'role-sashi', 'defaultRoleId 应 trim')
   assert.equal(config.roles.length, 1)
   assert.deepEqual(config.roleOverrides, { 'role-sashi': { description: '项目内改为复核' } })
   assert.deepEqual(config.projectRules, ['未经确认不得改迁移文件'], '非字符串项丢弃')
-  assert.equal(config.limits.serializeWrites, false)
   assert.deepEqual(codes(errors), [PROJECT_CONFIG_ERRORS.BAD_FIELD], 'projectRules 丢弃项要报出来')
 })
 
@@ -74,19 +72,16 @@ test('字段类型不对 → 逐项降级并报 BAD_FIELD，其它字段照常�
     roleOverrides: ['nope'],
     dispatchNotes: {},
     projectRules: 'nope',
-    limits: 'nope',
   })
   assert.equal(config.defaultRoleId, undefined)
   assert.deepEqual(config.roles, [])
   assert.deepEqual(config.roleOverrides, {})
   assert.equal(config.dispatchNotes, '')
   assert.deepEqual(config.projectRules, [])
-  assert.deepEqual(config.limits, {})
   const fields = errors.map((e) => e.field)
   assert.deepEqual(fields.sort(), [
     'defaultRoleId',
     'dispatchNotes',
-    'limits',
     'projectRules',
     'roleOverrides',
     'roles',
@@ -111,11 +106,18 @@ test('roleOverrides 里非对象值被跳过', () => {
   assert.equal(errors[0].field, 'roleOverrides.role-b')
 })
 
-test('limits 边界：serializeWrites 必须是布尔值', () => {
-  const bad = normalizeProjectConfig({ limits: { serializeWrites: 'yes' } })
-  assert.equal(bad.config.limits.serializeWrites, undefined)
-  assert.equal(bad.errors.length, 1)
-  assert.equal(bad.errors[0].field, 'limits.serializeWrites')
+test('项目级 limits 已移除：旧配置里的 limits 按未知字段忽略，不报错、不产出', () => {
+  const { config, errors } = normalizeProjectConfig({ limits: { serializeWrites: false } })
+  assert.equal(config.limits, undefined, '项目配置不再产出 limits')
+  assert.deepEqual(errors, [], '未知字段不报错')
+  assert.deepEqual(emptyProjectConfig(), {
+    version: PROJECT_CONFIG_VERSION,
+    defaultRoleId: undefined,
+    roles: [],
+    roleOverrides: {},
+    dispatchNotes: '',
+    projectRules: [],
+  })
 })
 
 test('toRegistryInput：只搬移，不解释语义', () => {

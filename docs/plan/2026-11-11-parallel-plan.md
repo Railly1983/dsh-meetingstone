@@ -34,6 +34,26 @@
 **决策规则**：先实测路 1；若 cwd 恢复不可靠或服务不可注入，退回路 2，并在文档写明原因。
 （决策权：悟空）
 
+### 2026-11-11 01:12 证据补充（供悟空裁决）
+
+- `workingDirectory` 服务确实存在：`dsh/node_modules/@deepseek-ai/dsh-working-directory/lib/index.js`
+  - `WorkingDirectoryService extends Service`，服务名 `"workingDirectory"`
+  - `set(agent, path, signal)` → 只 `commit` 会话目录（追加 `working-directory/change` 事件），**不改已有进程、不改权限**，返回规范化绝对路径
+  - `get(session)` 可读当前目录
+- `worktrees.create(agent, request, signal)` 返回 `{ path, branch, baseCommit, repositoryRoot }`，内部调用 `workingDirectory.set(agent, path)`。
+
+因此路 1 的具体做法（待实现验证）：
+
+```text
+original = ctx.workingDirectory.get(agent.session)   // 或 agent.session.header.cwd
+wt = await ctx.worktrees.create(agent, { name: `meetingstone/<childId>` }, signal)  // 会切走 cwd
+await ctx.workingDirectory.set(agent, original, signal)  // 切回
+dispatch child with cwd = wt.path
+```
+
+残余风险：create→restore 之间父会话若同时执行 `working_directory` 工具会竞态；插件内需串行化这段（一个互斥锁）。
+
+
 ## 3. 冲突检测
 
 - 每个任务记录 `baseSha`（建树时的 commit）与完成时的改动文件列表（`git diff --name-only baseSha`）

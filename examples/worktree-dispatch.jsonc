@@ -1,0 +1,25 @@
+// 示例：把一次派单指向宿主 create_worktree 建好的隔离工作树。
+// 这是「meetingstone_dispatch 的入参片段」，照抄时把 <...> 占位符换成实际值。
+// 完整步骤（建树 → 依赖准备 → 派单 → 人工合并 → 清理）见 docs/worktree-isolation.md。
+//
+// 三条前提，务必先读：
+//  1) cwd 必须落在当前会话项目根之内，否则适配器以 PATH_OUTSIDE_PROJECT 拒绝启动；
+//     推荐工作树路径： <项目根>/.meetingstone/worktrees/<name>（已在 .gitignore）。
+//  2) 工作树不复制未跟踪/忽略文件（node_modules、.env、dist 等），
+//     需要构建或读本地配置的任务，进树后先自行安装/准备。
+//  3) 这是人工流程：插件不自动建树、不自动合并、不自动清理；
+//     同一项目根下派单仍默认串行（全局 serializeWrites 默认 true），建树不等于并行。
+{
+  // 角色可用名称 / 别名 / roleId
+  "role": "沙僧",
+
+  // 任务内容；建议写清「只改哪些文件」，便于合回时核对
+  "task": "在隔离工作树里重构 src/foo 模块并补单测，不要动 docs/",
+
+  // 宿主 create_worktree 返回的工作树路径，必须是绝对路径且在项目根内。
+  // Windows 路径用正斜杠或双反斜杠均可；下面这行按你的实际路径改。
+  "cwd": "D:/MeetingStone/.meetingstone/worktrees/issue-42",
+
+  // 可选：把上一次派单结果作为不可信上下文重放（不填就当新任务）
+  "continuesFrom": "<上一次的 childId>"
+}

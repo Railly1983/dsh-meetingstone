@@ -53,7 +53,7 @@ npm run verify
 
 ```powershell
 $node = "$env:USERPROFILE\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
-& $node --test "tests/**/*.test.mjs"     # 170 项
+& $node --test "tests/**/*.test.mjs"     # 178 项
 & $node scripts/verify-host-schema.mjs    # 工具 schema 契约门禁
 & $node scripts/verify-manifest.mjs       # manifest 自检
 ```
@@ -68,6 +68,8 @@ $node = "$env:USERPROFILE\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\nod
 | [任务清单](docs/任务清单.md) | WBS 与验收状态 |
 | [安装/卸载](docs/installation.md) | 门禁、安装、provider、配置、回滚 |
 | [安全与权限](docs/security.md) | 权限边界与"不提供只读通道"的原因（实测边界） |
+| [工作树隔离（手动流程）](docs/worktree-isolation.md) | 用宿主 `create_worktree` 建隔离工作树、派单 `cwd` 指向、人工合并/清理 |
+| [并行多任务方案（设计中）](docs/plan/2026-11-11-parallel-plan.md) | 任务级工作树隔离与自动并行的设计稿 |
 | [兼容性矩阵](docs/compatibility.md) | 宿主/provider/本机 CLI 的实测组合 |
 | [事故复盘](docs/audit/13-incident-tool-schema.md) | 2026-11-10 工具 schema 事故与门禁 |
 | [阶段 0 审计](docs/audit/00-summary.md) | A/B/C 分类、最小自研范围、9 条被推翻的结论 |

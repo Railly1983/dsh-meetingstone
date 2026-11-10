@@ -14,9 +14,11 @@
  *   "roles": [ ... 项目新增角色 ... ],
  *   "roleOverrides": { "role-sashi": { "model": "..." } },
  *   "dispatchNotes": "...",
- *   "projectRules": ["..."],
- *   "limits": { "serializeWrites": true }
+ *   "projectRules": ["..."]
  * }
+ *
+ * 注意：项目级配置**不提供 `limits`**（死配置已移除）。同项目串行开关 `serializeWrites`
+ * 只在插件全局配置（src/config.js）里生效；项目文件里写 `limits` 会按未知字段忽略。
  */
 
 export const PROJECT_CONFIG_FILENAME = '.meetingstone.json'
@@ -47,7 +49,6 @@ export const PROJECT_CONFIG_ERRORS = Object.freeze({
  * @property {Record<string, object>} roleOverrides
  * @property {string} dispatchNotes
  * @property {string[]} projectRules
- * @property {{ serializeWrites?: boolean }} limits
  */
 
 /** 空配置（文件不存在或不可用时使用）。 */
@@ -59,7 +60,6 @@ export function emptyProjectConfig() {
     roleOverrides: {},
     dispatchNotes: '',
     projectRules: [],
-    limits: {},
   })
 }
 
@@ -208,28 +208,6 @@ export function normalizeProjectConfig(raw) {
         code: PROJECT_CONFIG_ERRORS.BAD_FIELD,
         field: 'projectRules',
         message: 'projectRules 必须是字符串数组，已忽略',
-      })
-    }
-  }
-
-  // limits
-  if (input.limits !== undefined) {
-    if (input.limits && typeof input.limits === 'object' && !Array.isArray(input.limits)) {
-      const limits = /** @type {Record<string, unknown>} */ (input.limits)
-      if (typeof limits.serializeWrites === 'boolean') {
-        config.limits.serializeWrites = limits.serializeWrites
-      } else if (limits.serializeWrites !== undefined) {
-        errors.push({
-          code: PROJECT_CONFIG_ERRORS.BAD_FIELD,
-          field: 'limits.serializeWrites',
-          message: 'serializeWrites 必须是布尔值，已忽略',
-        })
-      }
-    } else {
-      errors.push({
-        code: PROJECT_CONFIG_ERRORS.BAD_FIELD,
-        field: 'limits',
-        message: 'limits 必须是对象，已忽略',
       })
     }
   }
