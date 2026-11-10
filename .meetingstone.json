@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "roles": [
+    {
+      "roleId": "role-selftest",
+      "name": "自检员",
+      "aliases": ["SELFTEST"],
+      "description": "仅用于验证派单链路的项目级自检角色：进程内子 Agent 通道，不做任何写操作",
+      "channel": {
+        "kind": "in-process"
+      },
+      "permissionPreset": "project-write",
+      "enabled": true,
+      "timeoutMs": 120000
+    }
+  ],
+  "dispatchNotes": "这是仓库自带的项目级配置，用于验证「角色解析 → 通道选择 → 原生派单」整条链路。",
+  "limits": {
+    "maxParallelReadonly": 2,
+    "serializeWrites": true
+  }
+}

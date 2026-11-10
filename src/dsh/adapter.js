@@ -134,6 +134,22 @@ function errorMessage(err) {
 }
 
 /**
+ * 安全读取宿主服务。
+ * Cordis 里访问**未 inject** 的属性会直接抛（`cannot get property "x" without inject`，
+ * optional chaining 也挡不住），所以必须 try/catch：拿不到返回 null，
+ * 由调用方按「未知/不可用」处理，而不是让整个工具调用崩掉。
+ * @param {any} ctx
+ * @param {string} name
+ */
+function safeService(ctx, name) {
+  try {
+    return ctx ? ctx[name] : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * 创建 DSH 适配器。
  *
  * @param {object} ctx 宿主 Context（需 `ctx.subagents`；可选 `ctx.effect` / `ctx.logger`）
@@ -169,7 +185,7 @@ export function createDshAdapter(ctx, options = {}) {
    */
   function canStart(role) {
     const provider = providerNameFor(role)
-    const subagents = ctx?.subagents
+    const subagents = safeService(ctx, 'subagents')
     if (!provider || !subagents || typeof subagents.getProvider !== 'function') {
       return { ok: false, reason: '无法确认 provider 是否注册' }
     }
@@ -193,7 +209,7 @@ export function createDshAdapter(ctx, options = {}) {
     // 字段（TODO(P2-readonly)），绝不塞进 spec 假装生效；只在结果/taskRef 上标 false。
     void readOnly
     const provider = providerNameFor(role)
-    const subagents = ctx?.subagents
+    const subagents = safeService(ctx, 'subagents')
 
     // 1. 失败关闭：重新查询，不依赖 canStart 是否被上层调用过。
     if (

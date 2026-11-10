@@ -60,7 +60,7 @@ const config = {
 }
 
 test('inject 声明了 tools 依赖', () => {
-  assert.deepEqual(inject, ['tools'])
+  assert.deepEqual(inject, ['tools', 'subagents'], 'tools 用于注册，subagents 用于派单与可用性')
 })
 
 test('apply 注册三个工具且不抛错（即便宿主没有 subagents）', () => {

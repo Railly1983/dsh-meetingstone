@@ -43,8 +43,10 @@ try {
 }
 
 export { Config }
-// 工具注册需要宿主注入 tools 服务（dsh-tools 的 defineTool 走这一层）
-export const inject = [...toolsInject]
+// 需要的宿主服务：
+// - tools：工具注册（dsh-tools 的 defineTool 走这一层）
+// - subagents：派单通道与可用性查询（Cordis 里不声明就访问会抛 "cannot get property ... without inject"）
+export const inject = [...toolsInject, 'subagents']
 
 /** 插件名，同时作为 Loader 行 id 的默认值。 */
 export const name = 'meetingstone'

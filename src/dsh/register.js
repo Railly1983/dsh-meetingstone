@@ -195,7 +195,12 @@ function toRoleView(role, ctx) {
 function availabilityOf(role, ctx) {
   if (role.enabled === false || role.disabled === true) return 'disabled'
   if (role.ambiguous === true) return 'ambiguous'
-  const subagents = ctx?.subagents
+  let subagents = null
+  try {
+    subagents = ctx?.subagents ?? null
+  } catch {
+    subagents = null // 未 inject 时访问会抛，按"未知"处理
+  }
   if (!subagents || typeof subagents.getProvider !== 'function') return 'unknown'
   const provider = providerNameFor(role)
   if (!provider) return 'unknown'
