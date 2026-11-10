@@ -51,7 +51,8 @@ export function apply(ctx, config = {}) {
   })
 
   // parent 由每次工具执行的 context.agent 传入（不再用全局 holder）
-  const adapter = createDshAdapter(ctx)
+  // 通道实例表承载模型/强度：宿主的启动 spec 不接收这两个字段（DD7 方案 B）
+  const adapter = createDshAdapter(ctx, { channels: cfg.channels ?? [] })
 
   const dispatcher = createDispatcher({
     registry,

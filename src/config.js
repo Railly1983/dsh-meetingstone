@@ -27,10 +27,28 @@ export const ChannelSchema = Schema.object({
   kind: Schema.union([...CHANNEL_KINDS]).default('in-process').description(
     '执行通道：in-process=DSH 原生子 Agent；acp-cli=配 command 驱动任意 ACP CLI；codex/claude-code=官方 provider',
   ),
+  channelId: Schema.string().description('引用 channels 表里的通道实例 ID（推荐；模型由该实例承载）'),
   provider: Schema.string().description('通道需要的 provider 名，如 acp / codex / claude-code'),
   cli: Schema.string().description('本机平台标识（仅用于展示与探测，不代表实际执行路径）'),
-  model: Schema.string().description('必须是 Provider 能力查询返回过的模型 ID'),
-  reasoning: Schema.string().description('必须是该模型实际支持的强度枚举'),
+  model: Schema.string().description('声明的模型 ID；必须与所引用的通道实例一致，否则派单被拒'),
+  reasoning: Schema.string().description('声明的思考强度；同样要与通道实例一致'),
+})
+
+/**
+ * 一个「通道实例」：一行 provider 配置。
+ *
+ * 为什么需要它（DD7，2026-11-10 定）：
+ * 官方 `SubagentActivationSpec` 没有 model / reasoning 字段，模型只能在**provider 行**上配置
+ * （例如 acp 的 `command` 带 `--model`）。角色不能凭空指定模型，只能**引用**一个实例并声明期望，
+ * 由派单层校验「角色声明 == 通道实例配置」——不一致就拒绝，避免"配置成功、执行没采用"。
+ */
+export const ChannelInstanceSchema = Schema.object({
+  channelId: Schema.string().required().description('通道实例 ID，如 ch-codex-dev'),
+  description: Schema.string().default('').description('人类可读说明'),
+  kind: Schema.union([...CHANNEL_KINDS]).default('in-process').description('执行通道类型'),
+  provider: Schema.string().description('对应的 provider 名（acp / codex / claude-code / spawn ...）'),
+  model: Schema.string().description('该 provider 行实际配置的模型（用于与角色声明比对）'),
+  reasoning: Schema.string().description('该 provider 行实际配置的思考强度'),
 })
 
 /** 角色定义。语义校验见 registry.js。 */
@@ -51,6 +69,9 @@ export const RoleSchema = Schema.object({
 /** 插件配置根。 */
 export const Config = Schema.object({
   roles: Schema.array(RoleSchema).default([]).description('全局角色表'),
+  channels: Schema.array(ChannelInstanceSchema).default([]).description(
+    '通道实例表：一行 = 一个已配置的 provider（模型/强度写在这里，因为宿主的启动 spec 不收它们）',
+  ),
   defaultRoleId: Schema.string().description('未指定角色时的默认角色'),
   dispatchNotes: Schema.string().default('').description('辅助调度提示，不覆盖权限规则'),
   projectConfigFile: Schema.string()

@@ -78,6 +78,40 @@ dependencies:
 
 > ⚠️ 装 provider 会带入 `cosmokit 1.9.0` / `schemastery 3.19.0`，而你的 `desktop` profile 里目前是 `1.8.6` / `3.18.5`（第三方插件带入）。装之前建议先在隔离 `DSH_HOME` 里试一遍，确认 pnpm 的去重升级不会打断现有插件。实测记录见 `docs/audit/10-provider-install.md`。
 
+## 配置角色与通道（第一版无 UI，改配置后重启生效）
+
+第一版没有图形界面，配置写在 profile 的 `cordis.patch.yml` 里。**关键是 `channels` 表**：
+
+```yaml
+- id: meetingstone
+  name: dsh-meetingstone
+  config:
+    # 通道实例：一行 = 一个已配置好的 provider（模型写在这里）
+    channels:
+      - channelId: ch-acp-flash
+        kind: acp-cli
+        provider: acp
+        model: deepseek-v4.1-flash      # 该 provider 行实际用的模型
+        reasoning: high
+    roles:
+      - roleId: role-sashi
+        name: 沙僧
+        aliases: [SS, 主力执行]
+        description: 主力开发和批量执行
+        channel:
+          kind: acp-cli
+          channelId: ch-acp-flash        # 引用上面的通道实例
+          model: deepseek-v4.1-flash     # 声明期望值，必须与实例一致
+          reasoning: high
+        permissionPreset: project-write  # read-only | restricted | project-write | approval
+        enabled: true
+    defaultRoleId: role-sashi
+```
+
+**为什么模型写在通道实例上**：DSH 的子任务启动 spec 不接收 model/reasoning，模型只能在 provider 行上配置。角色写了 model 就必须引用一个配置了同一模型的 `channelId`，否则派单会被拒绝（`MODEL_UNSUPPORTED`）——我们宁可报错，也不做"配置成功、执行没采用"的假象。
+
+> ⚠️ `project-write` 档位在 Windows 上目前是 **partial enforcement**（目录外普通文件被拒，但硬链接可越界）。别把它理解成"绝对只读"。详见 `docs/audit/08-sandbox.md`。
+
 ## 卸载
 
 ```powershell

@@ -486,3 +486,62 @@ test('context 没有 agent 时失败关闭（不做全局回退）', async () =>
   )
   assert.equal(subagents.calls.filter((c) => c.method === 'startActivation').length, 0)
 })
+
+// ─── DD7 方案 B：模型由通道实例承载，角色声明必须与之一致 ──────────────────────
+
+test('模型一致：角色声明 == 通道实例配置 → 允许启动', async () => {
+  const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { acp: {} } }), {
+    channels: [
+      { channelId: 'ch-acp-flash', kind: 'acp-cli', provider: 'acp', model: 'deepseek-v4.1-flash' },
+    ],
+  })
+  const res = await adapter.start({
+    role: role({
+      channel: { kind: 'acp-cli', channelId: 'ch-acp-flash', model: 'deepseek-v4.1-flash' },
+    }),
+    task: 'x',
+    readOnly: false,
+    timeoutMs: 0,
+    context: { projectRoot: 'D:/MeetingStone' },
+  })
+  assert.ok(res.taskRef, '一致时应正常启动')
+  assert.equal(subagents.calls.filter((c) => c.method === 'startActivation').length, 1)
+  // 模型不塞进 spec（官方 spec 没有该字段），而是由 provider 行承载
+  const spec = subagents.calls.find((c) => c.method === 'startActivation').spec
+  assert.equal(Object.hasOwn(spec, 'model'), false)
+})
+
+test('模型不一致：角色声明与通道实例冲突 → 拒绝并说明差异', async () => {
+  const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { acp: {} } }), {
+    channels: [{ channelId: 'ch-acp-flash', kind: 'acp-cli', provider: 'acp', model: 'other-model' }],
+  })
+  await assert.rejects(
+    () =>
+      adapter.start({
+        role: role({
+          channel: { kind: 'acp-cli', channelId: 'ch-acp-flash', model: 'deepseek-v4.1-flash' },
+        }),
+        task: 'x',
+        readOnly: false,
+        timeoutMs: 0,
+        context: { projectRoot: 'D:/MeetingStone' },
+      }),
+    /MODEL_UNSUPPORTED: 角色声明 model=deepseek-v4\.1-flash/,
+  )
+  assert.equal(subagents.calls.filter((c) => c.method === 'startActivation').length, 0)
+})
+
+test('引用了不存在的通道实例 → 拒绝', async () => {
+  const { adapter } = makeAdapter(fakeSubagents({ providers: { acp: {} } }), { channels: [] })
+  await assert.rejects(
+    () =>
+      adapter.start({
+        role: role({ channel: { kind: 'acp-cli', channelId: 'ch-missing', model: 'm' } }),
+        task: 'x',
+        readOnly: false,
+        timeoutMs: 0,
+        context: { projectRoot: 'D:/MeetingStone' },
+      }),
+    /通道实例 ch-missing 不存在/,
+  )
+})

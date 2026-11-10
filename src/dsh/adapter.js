@@ -139,7 +139,9 @@ function errorMessage(err) {
  * @param {object} ctx 宿主 Context（需 `ctx.subagents`；可选 `ctx.effect` / `ctx.logger`）
  * @param {object} [options]
  * @param {() => (object | undefined | null)} [options.getParent]
- *   返回 `SubagentActivationSpec.parent` 所需的 Agent。**必须注入**；见 TODO(P2-parent)。
+ *   返回 `SubagentActivationSpec.parent` 所需的 Agent；仅在拿不到 `context.agent` 时兜底。
+ * @param {Array<{ channelId: string, kind?: string, provider?: string, model?: string, reasoning?: string }>} [options.channels]
+ *   通道实例表（来自插件 Config 的 `channels`）。模型/强度只能由它承载（DD7 方案 B）。
  * @param {() => number} [options.now]
  * @returns {{ canStart: (role: object) => { ok: boolean, reason?: string },
  *            start: (input: object) => Promise<{ taskRef: MeetingstoneTaskRef,
@@ -149,6 +151,14 @@ function errorMessage(err) {
 export function createDshAdapter(ctx, options = {}) {
   const getParent = options.getParent ?? null
   const now = typeof options.now === 'function' ? options.now : () => Date.now()
+
+  /** @type {Map<string, any>} */
+  const channelsById = new Map()
+  for (const instance of options.channels ?? []) {
+    if (instance && typeof instance.channelId === 'string' && instance.channelId) {
+      channelsById.set(instance.channelId, instance)
+    }
+  }
 
   /** @type {Map<string, { activation: any, controller: AbortController, timer: any }>} */
   const handles = new Map()
@@ -218,13 +228,37 @@ export function createDshAdapter(ctx, options = {}) {
       )
     }
 
-    // (b) 模型/强度：官方 spec 不收 model/reasoning，写了也无法落实 → 拒绝，避免「配置成功、执行未采用」
-    if (role?.channel?.model || role?.channel?.reasoning) {
-      throw new Error(
-        'MODEL_UNSUPPORTED: 当前 provider 通道无法指定 model/reasoning（spec 无该字段），' +
-          `已拒绝启动。角色 ${role?.roleId ?? '?'} 配置的 model=${role?.channel?.model ?? '-'} / ` +
-          `reasoning=${role?.channel?.reasoning ?? '-'} 会被宿主忽略，静默忽略比报错更危险`,
-      )
+    // (b) 模型/强度：官方 spec 不收 model/reasoning，模型只能由 **provider 行**承载（DD7 方案 B）。
+    //     角色的声明必须与所引用通道实例的配置一致；不一致就拒绝，避免"配置成功、执行没采用"。
+    const declaredModel = role?.channel?.model
+    const declaredReasoning = role?.channel?.reasoning
+    if (declaredModel || declaredReasoning) {
+      const channelId = role?.channel?.channelId
+      if (!channelId) {
+        throw new Error(
+          'MODEL_UNSUPPORTED: 角色声明了 model/reasoning，但没有指定 channelId。' +
+            '宿主的启动 spec 不接收模型，请先在插件配置的 channels 表里配置一个通道实例，' +
+            '再让角色通过 channel.channelId 引用它',
+        )
+      }
+      const instance = channelsById.get(String(channelId))
+      if (!instance) {
+        throw new Error(
+          `MODEL_UNSUPPORTED: 角色引用的通道实例 ${channelId} 不存在，无法确认模型是否已配置`,
+        )
+      }
+      if (declaredModel && instance.model !== declaredModel) {
+        throw new Error(
+          `MODEL_UNSUPPORTED: 角色声明 model=${declaredModel}，但通道实例 ${channelId} 配置的是 ` +
+            `${instance.model ?? '(未配置)'}；两者必须一致（模型只能由 provider 行承载）`,
+        )
+      }
+      if (declaredReasoning && instance.reasoning !== declaredReasoning) {
+        throw new Error(
+          `MODEL_UNSUPPORTED: 角色声明 reasoning=${declaredReasoning}，但通道实例 ${channelId} 配置的是 ` +
+            `${instance.reasoning ?? '(未配置)'}；两者必须一致`,
+        )
+      }
     }
 
     // (c) 项目边界：cwd 必须在当前会话的项目根之内；拿不到项目根就失败关闭
