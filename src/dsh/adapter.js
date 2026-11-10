@@ -84,6 +84,18 @@ export const PROVIDER_BY_KIND = Object.freeze({
   'claude-code': 'claude-code',
 })
 
+/**
+ * 生命周期错误码（取消/卸载时宿主 dispose 的兜底）。
+ * 新增错误码必须进常量并写进 `docs/configuration.md`，不要在调用点散落字符串。
+ */
+export const ADAPTER_ERRORS = Object.freeze({
+  DISPOSE_TIMEOUT: 'ADAPTER_DISPOSE_TIMEOUT',
+  DISPOSE_FAILED: 'ADAPTER_DISPOSE_FAILED',
+})
+
+/** 等待宿主 `activation.dispose()` 的默认上限（毫秒）。 */
+export const DEFAULT_DISPOSE_TIMEOUT_MS = 5000
+
 /** provider 缺失时的统一提示片段（含各通道的安装前置条件，便于排障）。 */
 const PROVIDER_HINTS = Object.freeze({
   spawn: '需 dsh-base 的 dsh-subagent-spawn-in-process 行',
@@ -130,6 +142,66 @@ export function providerNameFor(role) {
 /** @param {unknown} err */
 function errorMessage(err) {
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * 带 code 的生命周期错误（dispose 超时/失败）。
+ * @param {string} code
+ * @param {string} message
+ * @param {unknown} [cause]
+ */
+function lifecycleError(code, message, cause) {
+  const err = new Error(`${code}: ${message}`)
+  // @ts-expect-error 自定义字段，run-store 会原样落盘 code/message
+  err.code = code
+  if (cause !== undefined) {
+    // @ts-expect-error 同上
+    err.cause = cause
+  }
+  return err
+}
+
+/**
+ * 等宿主 dispose 完成，但不无限等：超时按 `ADAPTER_DISPOSE_TIMEOUT` 兜底。
+ * 返回 `null` 表示成功（或没有 dispose 可调）；否则返回 `{ code, message }`，由调用方记录。
+ *
+ * 为什么不能直接 `await dispose()`：宿主 provider 卡死时，cancel 会永久挂住，
+ * 并发槽位永远不释放，整个项目被锁死。
+ *
+ * @param {any} activation
+ * @param {number} timeoutMs
+ * @returns {Promise<{ code: string, message: string } | null>}
+ */
+async function disposeActivation(activation, timeoutMs) {
+  if (!activation || typeof activation.dispose !== 'function') return null
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let timer = null
+  try {
+    await Promise.race([
+      Promise.resolve().then(() => activation.dispose()),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              lifecycleError(
+                ADAPTER_ERRORS.DISPOSE_TIMEOUT,
+                `activation.dispose 超过 ${timeoutMs}ms 未完成`,
+              ),
+            ),
+          timeoutMs,
+        )
+      }),
+    ])
+    return null
+  } catch (err) {
+    const code =
+      /** @type {any} */ (err)?.code === ADAPTER_ERRORS.DISPOSE_TIMEOUT
+        ? ADAPTER_ERRORS.DISPOSE_TIMEOUT
+        : ADAPTER_ERRORS.DISPOSE_FAILED
+    return { code, message: errorMessage(err) }
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 /**
@@ -208,7 +280,11 @@ function safeService(ctx, name) {
 export function createDshAdapter(ctx, options = {}) {
   const getParent = options.getParent ?? null
   const now = typeof options.now === 'function' ? options.now : () => Date.now()
-  /** 落盘钩子：start 成功后记 running，终态时记 completed/failed/cancelled（失败不影响真实结果） */
+  const disposeTimeoutMs =
+    Number.isFinite(options.disposeTimeoutMs) && options.disposeTimeoutMs > 0
+      ? options.disposeTimeoutMs
+      : DEFAULT_DISPOSE_TIMEOUT_MS
+  /** 落盘钩子：start 成功后记 running，终态时记 completed/failed/cancelled/interrupted（失败不影响真实结果） */
   const onRunStart = typeof options.onRunStart === 'function' ? options.onRunStart : null
   const onRunFinish = typeof options.onRunFinish === 'function' ? options.onRunFinish : null
 
@@ -216,19 +292,24 @@ export function createDshAdapter(ctx, options = {}) {
   function emitRunStart(record) {
     if (!onRunStart) return
     try {
-      onRunStart(record)
+      // 允许返回 promise（落盘串行化）；启动路径不等盘，绝不阻断派单
+      void Promise.resolve(onRunStart(record)).catch(() => {})
     } catch {
       /* 落盘是尽力而为，绝不阻断派单 */
     }
   }
 
-  /** @param {any} record */
-  function emitRunFinish(record) {
+  /**
+   * 发送终态记录。调用方可以 await（取消/卸载要保证终态落盘后才结束）。
+   * @param {any} record
+   * @returns {Promise<void>}
+   */
+  async function emitRunFinish(record) {
     if (!onRunFinish) return
     try {
-      onRunFinish(record)
+      await onRunFinish(record)
     } catch {
-      /* 同上 */
+      /* 同上：落盘失败不改变真实终态 */
     }
   }
 
@@ -477,6 +558,10 @@ export function createDshAdapter(ctx, options = {}) {
     if (activation.result && typeof activation.result.then === 'function') {
       void activation.result.then(
         (result) => {
+          const handleForResult = handles.get(childId)
+          // 取消/卸载已经开始收尾时，由那条路径写终态，避免"先 cancelled、又被 completed 覆盖"
+          if (!handleForResult || handleForResult.cancelling) return
+          if (!claimSettlement(handleForResult)) return
           const settled = {
             status: 'completed',
             stopReason: result?.stopReason ?? 'completed',
@@ -485,7 +570,7 @@ export function createDshAdapter(ctx, options = {}) {
             at: now(),
           }
           rememberFinished(childId, settled)
-          emitRunFinish({
+          void emitRunFinish({
             ...runBase,
             ...settled,
             // 落盘字段叫 result：这里显式映射，否则磁盘记录会是空串（真机踩过）
@@ -495,6 +580,9 @@ export function createDshAdapter(ctx, options = {}) {
           cleanup(childId)
         },
         (err) => {
+          const handleForResult = handles.get(childId)
+          if (!handleForResult || handleForResult.cancelling) return
+          if (!claimSettlement(handleForResult)) return
           const settled = {
             status: 'failed',
             stopReason: 'error',
@@ -503,7 +591,7 @@ export function createDshAdapter(ctx, options = {}) {
             at: now(),
           }
           rememberFinished(childId, settled)
-          emitRunFinish({
+          void emitRunFinish({
             ...runBase,
             ...settled,
             result: settled.output,
@@ -516,6 +604,17 @@ export function createDshAdapter(ctx, options = {}) {
     }
 
     return { taskRef }
+  }
+
+  /**
+   * 认领终态：一个任务只允许写一次终态，防止 cancel/unload 与 result 回调互相覆盖。
+   * @param {any} handle
+   * @returns {boolean}
+   */
+  function claimSettlement(handle) {
+    if (!handle || handle.settled) return false
+    handle.settled = true
+    return true
   }
 
   /** @param {string} childId */
@@ -556,45 +655,123 @@ export function createDshAdapter(ctx, options = {}) {
     }
   }
 
-  /** 取消：先 abort，再让宿主 dispose 这个 activation。重复调用无害。 */
+  /**
+   * 取消：先 abort，再让宿主 dispose 这个 activation。
+   *
+   * 顺序是**先 dispose、后 cleanup**：dispose 成功（或超时兜底）之前绝不释放并发槽位，
+   * 否则旧进程还没退干净就能再派写任务，串行纪律被绕过（P0）。
+   * dispose 抛错也必须释放槽位并记录错误，不能让项目永久锁死。
+   * 重复调用无害：并发的第二次调用复用同一个 cancelPromise。
+   */
   async function cancel(taskRef) {
     const childId = typeof taskRef === 'string' ? taskRef : taskRef?.childId
     if (!childId) return
-    const handle = handles.get(String(childId))
+    const id = String(childId)
+    const handle = handles.get(id)
     if (!handle) return
-    cleanup(String(childId))
-    handle.controller.abort(new Error('meetingstone: cancelled'))
-    if (typeof handle.activation?.dispose === 'function') {
-      await handle.activation.dispose()
-    }
-    const settled = {
-      status: 'cancelled',
-      output: '',
-      at: now(),
-    }
-    rememberFinished(String(childId), settled)
-    // 只在底层结算之后写终态：避免"记录已取消、进程其实又成功完成"
-    emitRunFinish({ ...handle.runBase, ...settled, result: settled.output, finishedAt: settled.at })
+    if (handle.cancelPromise) return handle.cancelPromise
+
+    handle.cancelPromise = (async () => {
+      handle.cancelling = true
+      if (handle.timer) {
+        clearTimeout(handle.timer)
+        handle.timer = null
+      }
+      handle.controller.abort(new Error('meetingstone: cancelled'))
+      // 1) 先等宿主真正释放 activation（带超时兜底）
+      const disposeError = await disposeActivation(handle.activation, disposeTimeoutMs)
+      if (disposeError && typeof ctx?.logger?.warn === 'function') {
+        ctx.logger.warn(
+          `[meetingstone] cancel: activation dispose ${disposeError.code}: ${disposeError.message}`,
+        )
+      }
+      try {
+        // 2) 再写终态（claim 失败说明结果回调已先结算，不重复覆盖）
+        if (claimSettlement(handle)) {
+          const settled = {
+            status: 'cancelled',
+            stopReason: 'cancelled',
+            output: '',
+            at: now(),
+            ...(disposeError
+              ? { diagnostic: `activation.dispose 失败（${disposeError.code}）：${disposeError.message}` }
+              : {}),
+          }
+          rememberFinished(id, settled)
+          // 只在底层结算之后写终态：避免"记录已取消、进程其实又成功完成"
+          await emitRunFinish({
+            ...handle.runBase,
+            ...settled,
+            result: settled.output,
+            ...(disposeError ? { error: disposeError } : {}),
+            finishedAt: settled.at,
+          })
+        }
+      } finally {
+        // 3) 最后才释放并发槽位
+        cleanup(id)
+      }
+    })()
+    return handle.cancelPromise
   }
 
   // 插件卸载：单一 disposer 内串行 await 全部收尾（02-plugin-spec.md §2.4 的硬要求，
   // 不拆成多个并列 ctx.effect，避免异步 disposer 并发导致子进程清理顺序不确定）。
+  // 必须给每个存活任务写终态（interrupted），否则重启后磁盘里会留下假 running。
   if (typeof ctx?.effect === 'function') {
     ctx.effect(() => {
       return async () => {
         const pending = [...handles.values()]
+        // 先摘掉句柄：卸载期间结算的 result 回调会因找不到 handle 而让位给这里写终态
         handles.clear()
         for (const handle of pending) {
+          // 取消流程已经在收尾：复用同一个 promise，避免对同一个 activation 调两次 dispose
+          if (handle.cancelPromise) {
+            try {
+              await handle.cancelPromise
+            } catch {
+              /* cancel 自己会记录错误 */
+            }
+            if (typeof handle.onFinish === 'function') {
+              try {
+                handle.onFinish()
+              } catch {
+                /* 释放回调失败不影响清理 */
+              }
+            }
+            continue
+          }
           if (handle.timer) clearTimeout(handle.timer)
           handle.controller.abort(new Error('meetingstone: plugin disposed'))
+          let disposeError = null
           try {
-            if (typeof handle.activation?.dispose === 'function') {
-              await handle.activation.dispose()
+            disposeError = await disposeActivation(handle.activation, disposeTimeoutMs)
+            if (disposeError) {
+              // 清理失败不阻断其余任务的收尾；只记日志，不静默吞掉成「成功」。
+              if (typeof ctx?.logger?.warn === 'function') {
+                ctx.logger.warn(
+                  `[meetingstone] activation dispose ${disposeError.code}: ${disposeError.message}`,
+                )
+              }
             }
-          } catch (err) {
-            // 清理失败不阻断其余任务的收尾；只记日志，不静默吞掉成「成功」。
-            if (typeof ctx?.logger?.warn === 'function') {
-              ctx.logger.warn(`[meetingstone] activation dispose failed: ${errorMessage(err)}`)
+            if (claimSettlement(handle)) {
+              const settled = {
+                status: 'interrupted',
+                stopReason: 'plugin-disposed',
+                output: '',
+                diagnostic: disposeError
+                  ? `插件卸载：任务被中断（activation.dispose 失败 ${disposeError.code}：${disposeError.message}）`
+                  : '插件卸载：任务被中断',
+                at: now(),
+              }
+              rememberFinished(handle.runBase.childId, settled)
+              await emitRunFinish({
+                ...handle.runBase,
+                ...settled,
+                result: settled.output,
+                ...(disposeError ? { error: disposeError } : {}),
+                finishedAt: settled.at,
+              })
             }
           } finally {
             if (typeof handle.onFinish === 'function') {

@@ -418,7 +418,8 @@ export function registerTools(ctx, deps) {
       name: TOOL_NAMES.LIST_RUNS,
       description:
         '列出当前项目最近的派单记录（新的在前）：childId、角色、通道、模型、状态、耗时与 200 字预览。' +
-        '数据来自 `.meetingstone/runs/`，DSH 重启后仍可查；用于回答"我派过哪些任务、现在什么状态"。',
+        '数据来自 `.meetingstone/runs/`，DSH 重启后仍可查；上一个进程遗留的 running 会显示为 interrupted。' +
+        '用于回答"我派过哪些任务、现在什么状态"。',
       parameters: {
         limit: { type: 'number', description: '最多返回多少条（默认 20，上限 200）' },
       },
@@ -434,8 +435,9 @@ export function registerTools(ctx, deps) {
     {
       name: TOOL_NAMES.GET_TASK,
       description:
-        '按 childId 查询一次派发的结果：status（running/completed/failed/cancelled/unknown）、输出文本、停止原因。' +
-        '先查本进程内存（最近 20 条），查不到再读项目内 `.meetingstone/runs/<childId>.json`，因此 DSH 重启后仍可查到终态。',
+        '按 childId 查询一次派发的结果：status（running/completed/failed/cancelled/interrupted/unknown）、输出文本、停止原因。' +
+        '先查本进程内存（最近 20 条），查不到再读项目内 `.meetingstone/runs/<childId>.json`，因此 DSH 重启后仍可查到终态；' +
+        '上一个进程留下的 running 会投影为 interrupted。',
       parameters: {
         childId: { type: 'string', required: true, description: 'meetingstone_dispatch 返回的 taskRef.childId' },
       },

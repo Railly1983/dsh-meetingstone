@@ -30,6 +30,15 @@ export const DEFAULT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
 const MAX_FILE_BYTES = 1024 * 1024
 const CHILD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 
+/** 任务状态常量（`interrupted` 只出现在读取投影里，不会写回磁盘）。 */
+export const RUN_STATUS = Object.freeze({
+  RUNNING: 'running',
+  COMPLETED: 'completed',
+  FAILED: 'failed',
+  CANCELLED: 'cancelled',
+  INTERRUPTED: 'interrupted',
+})
+
 /** 带错误码的失败，便于工具层如实返回。 */
 export class RunStoreError extends Error {
   /**
@@ -95,6 +104,7 @@ function sliceUtf8(buffer, start, end) {
  * @param {number} [options.maxRuns]
  * @param {number} [options.maxAgeMs]
  * @param {number} [options.maxResultBytes]
+ * @param {string} [options.runtimeId] 本次插件启动的运行时 ID；读取时用于识别"上一个进程留下的 running"
  * @param {() => number} [options.now]
  */
 export function createRunStore(options) {
@@ -104,6 +114,7 @@ export function createRunStore(options) {
   const maxRuns = options.maxRuns ?? DEFAULT_MAX_RUNS
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS
   const maxResultBytes = options.maxResultBytes ?? MAX_RESULT_BYTES
+  const runtimeId = typeof options.runtimeId === 'string' && options.runtimeId ? options.runtimeId : null
   const now = options.now ?? Date.now
 
   /** @param {string} childId */
@@ -133,12 +144,16 @@ export function createRunStore(options) {
     return {
       schemaVersion: 1,
       childId: String(record.childId),
+      runtimeId: record.runtimeId ?? runtimeId,
       role: record.role ?? null,
       channel: record.channel ?? null,
       provider: record.provider ?? null,
       model: record.model ?? null,
       status: record.status,
       stopReason: record.stopReason ?? null,
+      diagnostic: record.diagnostic
+        ? truncateUtf8(record.diagnostic, MAX_ERROR_BYTES).text
+        : null,
       createdAt: record.createdAt ?? now(),
       startedAt: record.startedAt ?? null,
       finishedAt: record.finishedAt ?? null,
@@ -149,6 +164,21 @@ export function createRunStore(options) {
       continuation: record.continuation ?? null,
       worktree: record.worktree ?? null,
     }
+  }
+
+  /**
+   * 读取时的「假 running」投影：磁盘上 status=running，但记录的 runtimeId 不是当前进程，
+   * 说明那次启动已经结束（或进程崩了），任务不可能还在跑。
+   *
+   * 只改返回值，**不回写磁盘**：真值保持原样，便于排查；下次真正写入时才会带新的 runtimeId。
+   * @param {any} record
+   */
+  function projectInterrupted(record) {
+    if (!runtimeId || !record || typeof record !== 'object') return record
+    if (record.status === RUN_STATUS.RUNNING && record.runtimeId !== runtimeId) {
+      return { ...record, status: RUN_STATUS.INTERRUPTED, interrupted: true }
+    }
+    return record
   }
 
   /**
@@ -205,7 +235,7 @@ export function createRunStore(options) {
     try {
       const parsed = JSON.parse(text)
       if (!parsed || typeof parsed !== 'object') throw new Error('not an object')
-      return parsed
+      return projectInterrupted(parsed)
     } catch (error) {
       throw new RunStoreError('RUN_CORRUPT', `记录文件不是合法 JSON：${childId}`, error)
     }
@@ -231,16 +261,20 @@ export function createRunStore(options) {
       if (!name.endsWith('.json')) continue
       try {
         const text = await fs.readFile(join(dir, name), 'utf8')
-        const parsed = JSON.parse(text)
+        const parsed = projectInterrupted(JSON.parse(text))
         if (!parsed || typeof parsed !== 'object') continue
         records.push({
           childId: parsed.childId ?? name.replace(/\.json$/, ''),
+          runtimeId: parsed.runtimeId ?? null,
           role: parsed.role ?? null,
           channel: parsed.channel ?? null,
           provider: parsed.provider ?? null,
           model: parsed.model ?? null,
           status: parsed.status ?? 'unknown',
+          ...(parsed.interrupted === true ? { interrupted: true } : {}),
           stopReason: parsed.stopReason ?? null,
+          // 诊断摘要：同样只取前 200 字符（与 preview 一致），避免列表膨胀
+          diagnostic: typeof parsed.diagnostic === 'string' ? parsed.diagnostic.slice(0, 200) : '',
           createdAt: parsed.createdAt ?? null,
           finishedAt: parsed.finishedAt ?? null,
           resultBytes: parsed.resultBytes ?? 0,

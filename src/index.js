@@ -18,6 +18,7 @@ import { createDefaultResolvers, runCommand } from './cli/resolvers.js'
 import { createDshAdapter } from './dsh/adapter.js'
 import { inject as toolsInject, registerTools } from './dsh/register.js'
 import { createRequire } from 'node:module'
+import { randomUUID } from 'node:crypto'
 import { toRegistryInput } from './project/config-file.js'
 import { createNodeProjectConfigStore } from './project/load.js'
 import { createRunStore } from './run-store.js'
@@ -118,7 +119,11 @@ export function apply(ctx, config = {}) {
   // 通道实例表承载模型/强度：宿主的启动 spec 不接收这两个字段（DD7 方案 B）
   //
   // 派单结果落盘（P0）：一个项目根一个 store，按需创建并缓存。
-  // 写盘失败**不篡改**真实结果——失败的 store 记在这里，工具层把它作为 persistenceWarning 返回。
+  // 写盘失败**不篡改**真实结果——失败的 store 记在工具层，作为 persistenceWarning 返回。
+  //
+  // runtimeId：每次插件启动生成一次。磁盘里 status=running 但 runtimeId 不是当前值的记录，
+  // 读取时投影成 interrupted（见 run-store.projectInterrupted），不把上一进程的假 running 当真。
+  const runtimeId = randomUUID()
   /** @type {Map<string, any>} */
   const runStores = new Map()
 
@@ -127,7 +132,7 @@ export function apply(ctx, config = {}) {
     if (typeof projectRoot !== 'string' || !projectRoot) return null
     let store = runStores.get(projectRoot)
     if (!store) {
-      store = createRunStore({ root: projectRoot })
+      store = createRunStore({ root: projectRoot, runtimeId })
       runStores.set(projectRoot, store)
     }
     return store
@@ -135,29 +140,60 @@ export function apply(ctx, config = {}) {
 
   /** @type {Map<string, { code: string, message: string }>} */
   const persistenceWarnings = new Map()
+  /**
+   * 每个 childId 一条 promise 链：保证 running 先写、终态后写，终态不会被慢的 running 覆盖。
+   * @type {Map<string, Promise<void>>}
+   */
+  const persistQueues = new Map()
 
   /**
-   * 把记录写到项目目录。失败时记一条警告（按 childId），不影响任务本身。
+   * 真正写一次盘。永不 reject：失败只记 `persistenceWarning`，不影响任务真实结果。
    * @param {any} record
+   * @returns {Promise<void>}
    */
-  async function persistRun(record) {
+  async function writeRunNow(record) {
     const store = storeFor(record?.projectRoot)
     if (!store) return
+    const childId = String(record?.childId ?? '')
     try {
       await store.writeRun(record)
-      persistenceWarnings.delete(String(record?.childId ?? ''))
+      persistenceWarnings.delete(childId)
     } catch (err) {
-      persistenceWarnings.set(String(record?.childId ?? ''), {
+      persistenceWarnings.set(childId, {
         code: err?.code ?? 'RUN_WRITE_FAILED',
         message: err instanceof Error ? err.message : String(err),
       })
     }
   }
 
+  /**
+   * 把记录写到项目目录，按 childId 串行。
+   *
+   * 为什么必须串行：`onRunStart` / `onRunFinish` 原来各自由 `void persistRun()` 触发，
+   * 两个 `fs.writeFile` 并发时完成顺序不确定；快速任务的 running 可能晚于 completed 落地，
+   * 磁盘最终变成 running。这里用 promise 链把同一 childId 的写入排成 FIFO。
+   *
+   * @param {any} record
+   * @returns {Promise<void>}
+   */
+  function persistRun(record) {
+    const childId = String(record?.childId ?? '')
+    if (!childId) return Promise.resolve()
+    const previous = persistQueues.get(childId) ?? Promise.resolve()
+    const next = previous.then(() => writeRunNow(record))
+    persistQueues.set(childId, next)
+    const forget = () => {
+      if (persistQueues.get(childId) === next) persistQueues.delete(childId)
+    }
+    void next.then(forget, forget)
+    return next
+  }
+
   const adapter = createDshAdapter(ctx, {
     channels: cfg.channels ?? [],
-    onRunStart: (record) => void persistRun(record),
-    onRunFinish: (record) => void persistRun(record),
+    // 返回 promise：适配器在 cancel/卸载时会 await，确保终态真正写盘后才结束
+    onRunStart: (record) => persistRun(record),
+    onRunFinish: (record) => persistRun(record),
   })
 
   /**
@@ -227,6 +263,12 @@ export function apply(ctx, config = {}) {
       projectStore.invalidate()
       if (typeof ctx.logger?.info === 'function') ctx.logger.info(`[${name}] disposed`)
       else console.log(`[${name}] disposed`)
+
+      // 刚落盘队列里可能还有刚结束任务的终态：等它们写完再真正卸载，
+      // 避免「任务已 completed、磁盘还停在 running」（与适配器的存活任务收尾互补）。
+      const pending = [...persistQueues.values()]
+      if (pending.length === 0) return
+      return Promise.all(pending).then(() => {})
     }
   }, `${name}: lifecycle`)
 }

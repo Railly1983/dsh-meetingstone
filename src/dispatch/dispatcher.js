@@ -240,11 +240,17 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
     return { ok: true, taskRef: started.taskRef, role, startedAt: now() }
   }
 
-  /** 取消：先让宿主取消，成功后释放槽位（适配器也可能回调 onFinish，release 幂等）。 */
+  /**
+   * 取消：先让宿主取消，成功或失败后都释放槽位（适配器也可能回调 onFinish，release 幂等）。
+   * 用 finally 保证适配器抛错时槽位不泄漏——项目不能被一次失败的取消永久锁死。
+   */
   async function cancel(taskRef) {
     if (!taskRef) return
-    if (adapter.cancel) await adapter.cancel(taskRef)
-    release(taskRef)
+    try {
+      if (adapter.cancel) await adapter.cancel(taskRef)
+    } finally {
+      release(taskRef)
+    }
   }
 
   /**

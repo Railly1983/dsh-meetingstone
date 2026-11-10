@@ -24,6 +24,10 @@
   **不要再实现**；`docs/audit/14`、`docs/audit/15` 里保留的是历史记录。
 
 ### Added
+- **生命周期正确性（P0）**：取消改为「先 `dispose()`（默认 5s 超时兜底）再释放槽位」；
+  落盘按 `childId` 串行（running 一定先于终态）；新增 `runtimeId`，重启后把旧 `running`
+  投影为 `interrupted`；插件卸载时为存活任务写 `interrupted` 终态
+- 新错误码 `ADAPTER_DISPOSE_TIMEOUT` / `ADAPTER_DISPOSE_FAILED`（见 `docs/configuration.md` §5）
 - 角色注册表：别名解析、冲突降级（标记 `ambiguous` 而非整表失败）
 - 项目级配置 `.meetingstone.json`：mtime 缓存、坏文件降级、与全局配置合并
 - 本机 CLI 探测：多源解析（PATH → Appx → npm 全局 → 常见目录），带版本试跑与缓存

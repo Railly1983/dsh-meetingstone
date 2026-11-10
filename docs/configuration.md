@@ -88,8 +88,22 @@
 | `cwd` 越出项目根 | `PATH_OUTSIDE_PROJECT` |
 | 拿不到项目根却指定 `cwd` | `PROJECT_ROOT_UNKNOWN` |
 | 同项目已有任务 | `WRITE_CONFLICT`（`serializeWrites` 默认开） |
+| 取消/卸载时宿主 `dispose()` 超时 | `ADAPTER_DISPOSE_TIMEOUT`：按超时兜底，记录后仍然释放并发槽位并写终态 |
+| 取消/卸载时宿主 `dispose()` 抛错 | `ADAPTER_DISPOSE_FAILED`：记录错误后仍然释放并发槽位并写终态 |
 
-## 6. 示例
+## 6. 生命周期、runtimeId 与 interrupted
+
+- 每次插件启动生成一个 `runtimeId`，写进每一条落盘记录（`.meetingstone/runs/<childId>.json`）。
+- **取消顺序**：先 `abort` → `await activation.dispose()`（默认最多等 5 秒）→ 释放并发槽位。
+  dispose 成功、超时或抛错都会释放，区别只在于终态记录里的 `error` / `diagnostic`。
+  这样旧进程没退干净之前，同项目不可能再派新的写任务。
+- **落盘顺序**：同一 `childId` 的写入按 FIFO 串行，`running` 一定先于终态落地，终态不会被覆盖。
+- **重启后的假 running**：读取时若 `status === 'running'` 且 `runtimeId` 不是当前进程的，投影为
+  `status: 'interrupted'` + `interrupted: true`；只改返回值，不回写磁盘。
+- **插件卸载**：对内存中仍存活的任务写 `interrupted` 终态（`stopReason: 'plugin-disposed'`），
+  不会在磁盘留下假 `running`。
+
+## 7. 示例
 
 - 全局五角色：[examples/meetingstone.desktop.yml](../examples/meetingstone.desktop.yml)
 - 项目覆盖：[examples/project.meetingstone.json](../examples/project.meetingstone.json)
