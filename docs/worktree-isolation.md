@@ -305,3 +305,16 @@ git -C $PROJ worktree list    # 确认已清干净
 - [配置参考：`limits`、`isolation`、错误码](configuration.md)
 - [安全与权限边界](security.md)
 - [可照抄的派单片段](../examples/worktree-dispatch.jsonc)
+
+## 已知限制（2026-11-11 复核后）
+
+1. **overlap 回写是异步的**：两份记录都显示 `completed` 之后，交叉回写可能还有一个很短的可见性窗口；
+   查询接口（`get_task`/`list_runs`）会在读取时重算，因此查询结果不受影响，但如果直接读原始 JSON，
+   需要稍等或轮询。测试里用 `waitForOverlap` 显式等待。
+2. **诊断字段不完整**：建树/工作树错误的 `path/branch/phase` 会透传；但普通启动异常或没有 taskRef 时，
+   结果里可能只有 `path/branch/residualPath`，`phase` 缺失（不伪造）。
+3. **跨进程并发未验证**：工作树创建锁与 overlap 写锁都是**进程内**的；多个 DSH 进程同时操作同一仓库
+   或同一 `.meetingstone/runs` 未压测。
+4. **真实 provider 并行未真机验证**：单测使用假 provider + 真实 git 工作树；真实 codex/acp/spawn
+   的并行执行、限流与 Windows 文件锁仍需在真机会话验收。
+5. **文件布局隔离 ≠ 权限沙箱**：工作树共享 git 元数据，`cwd` 不能阻止越界写。

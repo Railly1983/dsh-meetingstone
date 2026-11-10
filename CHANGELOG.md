@@ -17,6 +17,11 @@
 
 ## [Unreleased]
 
+### Fixed
+- 并行多任务经悟空三轮独立复核，修复：停止未确认仍释放槽位、启动中卸载漏追踪、同目录别名绕过额度、
+  超大记录失去淘汰保护、并发 overlap 未落盘、overlap 撑爆记录、错误上下文未贯通、两个可假通过的弱断言
+- 已知限制见 docs/worktree-isolation.md「已知限制」
+
 ### Added
 - **并行多任务（任务级工作树隔离）**（2026-11-11 悟空裁决，路 2）：
   - 新增 `src/worktree.js`：自建 `git worktree`（literal argv、清 `GIT_*`、`GIT_TERMINAL_PROMPT=0`、

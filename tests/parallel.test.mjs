@@ -465,6 +465,38 @@ async function readRun(root, childId) {
 }
 
 /**
+ * 等到两份原始 JSON 都记录到对方的交集文件才返回。
+ *
+ * 为什么需要：overlap 回写是**异步持久化队列**的一部分，"两份记录都 completed"
+ * 只代表任务终态写完，不代表交叉回写已完成（悟空复核发现的可见性窗口）。
+ * 直接断言会偶发失败；这里轮询磁盘、给有限窗口，超时后由调用方断言并打印现状。
+ *
+ * @param {string} root
+ * @param {string} a
+ * @param {string} b
+ * @param {string} file
+ * @param {number} [timeoutMs]
+ */
+async function waitForOverlap(root, a, b, file, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    try {
+      const rawA = await readRun(root, a)
+      const rawB = await readRun(root, b)
+      const hasA = (rawA.overlapWarnings ?? []).some((w) => w.childId === b && (w.files ?? []).includes(file))
+      const hasB = (rawB.overlapWarnings ?? []).some((w) => w.childId === a && (w.files ?? []).includes(file))
+      if (hasA && hasB) return { rawA, rawB }
+      last = { rawA, rawB }
+    } catch {
+      /* 记录可能尚未落盘，继续等 */
+    }
+    await new Promise((r) => setTimeout(r, 25))
+  }
+  return last
+}
+
+/**
  * 真实执行区间是否重叠：`A.start < B.end && B.start < A.end`。
  * 必须用落盘记录的 startedAt/finishedAt（真实执行区间），
  * 不能用“检查时的 Date.now()”——悟空已用变异证明那种写法可假通过。
@@ -1012,11 +1044,15 @@ test('并发 overlap：两棵真实工作树同时改 shared.txt，并发落盘�
     await waitCompleted(root, a.taskRef.childId)
     await waitCompleted(root, b.taskRef.childId)
 
+    // overlap 交叉回写属于异步持久化：等两份原始 JSON 都落定再断言。
+    // 只等 completed 会偶发失败（悟空复核指出的可见性窗口）。
+    const settled = await waitForOverlap(root, a.taskRef.childId, b.taskRef.childId, 'shared.txt')
+    assert.ok(settled, '两份原始记录都必须在窗口内记录交集')
     for (const [own, other] of [
       [a, b],
       [b, a],
     ]) {
-      const raw = await readRun(root, own.taskRef.childId)
+      const raw = own === a ? settled.rawA : settled.rawB
       const warning = raw.overlapWarnings.find((w) => w.childId === other.taskRef.childId)
       assert.ok(
         warning,
