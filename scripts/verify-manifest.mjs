@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+// 容忍 BOM：Windows 侧工具写文件时可能带 U+FEFF，JSON.parse 会因此失败
+const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8').replace(/^\uFEFF/, ''))
 
 const failures = []
 const ok = (cond, msg) => {

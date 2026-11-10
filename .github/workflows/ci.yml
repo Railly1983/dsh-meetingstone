@@ -41,6 +41,9 @@ jobs:
       - name: manifest 自检
         run: node scripts/verify-manifest.mjs
 
+      - name: 发布包内容校验
+        run: node scripts/verify-package.mjs
+
   no-deps:
     name: 零运行时依赖检查
     runs-on: ubuntu-latest
