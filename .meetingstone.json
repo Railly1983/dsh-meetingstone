@@ -2,92 +2,19 @@
   "version": 1,
   "roles": [
     {
-      "roleId": "role-selftest",
-      "name": "自检员",
-      "aliases": [
-        "SELFTEST"
-      ],
-      "description": "进程内 spawn 通道的自检角色",
-      "channel": {
-        "kind": "in-process",
-        "provider": "spawn"
-      },
-      "permissionPreset": "project-write",
-      "enabled": true,
-      "timeoutMs": 120000
-    },
-    {
-      "roleId": "role-selftest-fork",
-      "name": "自检员B",
-      "aliases": [
-        "SELFTESTB"
-      ],
-      "description": "进程内 fork 通道的自检角色（对照实验）",
-      "channel": {
-        "kind": "in-process",
-        "provider": "fork"
-      },
-      "permissionPreset": "project-write",
-      "enabled": true,
-      "timeoutMs": 120000
-    },
-    {
-      "roleId": "role-selftest-ro",
-      "name": "自检员只读",
-      "aliases": [
-        "SELFTESTRO"
-      ],
-      "description": "只读档位但不引用通道实例：用于验证 READONLY_UNENFORCEABLE 拒绝路径",
-      "channel": {
-        "kind": "in-process",
-        "provider": "spawn"
-      },
-      "permissionPreset": "read-only",
-      "enabled": true,
-      "timeoutMs": 120000
-    },
-    {
-      "roleId": "role-selftest-codex",
-      "name": "自检员Codex",
-      "aliases": [
-        "SELFTESTCODEX"
-      ],
-      "description": "外部 CLI 通道自检：走官方 codex provider（需装 @deepseek-ai/dsh-subagent-codex）",
-      "channel": {
-        "kind": "codex",
-        "provider": "codex"
-      },
-      "permissionPreset": "project-write",
-      "enabled": true,
-      "timeoutMs": 300000
-    },
-    {
-      "roleId": "role-selftest-codebuddy",
-      "name": "自检员CodeBuddy",
-      "aliases": [
-        "SELFTESTCB"
-      ],
-      "description": "外部 CLI 通道自检：走官方 acp provider + 本机 CodeBuddy ACP",
-      "channel": {
-        "kind": "acp-cli",
-        "provider": "acp"
-      },
-      "permissionPreset": "project-write",
-      "enabled": true,
-      "timeoutMs": 300000
-    },
-    {
       "roleId": "role-tangtang",
       "name": "唐僧",
       "aliases": [
         "TT",
         "领导"
       ],
-      "description": "团队领导：架构、关键决策、最终质量把关",
-      "prompt": "你是团队领导，负责架构、战略、关键决策和最终质量把关。不要亲自做一线实现；给出方向、评审方案、验收结果，并对最终交付负责。额度有限，只在最重要的事情上动脑。",
+      "description": "团队领导：架构、战略、关键决策、最终质量把关",
+      "prompt": "你是团队领导，负责架构、战略、关键决策和最终质量把关。你的能力最强、额度有限，只在最重要的事上出场：给出方向与取舍、评审关键方案、对最终交付负责。不要亲自做一线实现，不要重复别人的工作。",
       "channel": {
         "kind": "codex",
-        "provider": "codex"
+        "channelId": "ch-codex-astra",
+        "provider": "codex",
+        "model": "gpt-6-astra"
       },
       "permissionPreset": "project-write",
       "enabled": true,
@@ -100,11 +27,31 @@
         "WK",
         "专家"
       ],
-      "description": "核心资深专家：疑难问题、审核验收、长时间任务",
-      "prompt": "你是核心资深专家，负责解决疑难问题、审核验收和长时间 Agent 任务。优先给出可验证的结论和证据，不做表面修改；复核他人结论时必须自己动手验证，不得照抄。",
+      "description": "核心资深专家：疑难问题、审核验收、长时间 Agent 任务",
+      "prompt": "你是核心资深专家，负责解决各种疑难问题、审核验收和长时间 Agent 任务。额度有限，高难任务优先给你。结论必须有证据，不做表面修改；复核他人结论时必须自己动手验证，不得照抄。",
       "channel": {
         "kind": "codex",
-        "provider": "codex"
+        "channelId": "ch-codex-sol",
+        "provider": "codex-sol",
+        "model": "gpt-6.1-sol"
+      },
+      "permissionPreset": "project-write",
+      "enabled": true,
+      "timeoutMs": 3600000
+    },
+    {
+      "roleId": "role-bajie",
+      "name": "八戒",
+      "aliases": [
+        "BJ",
+        "调度"
+      ],
+      "description": "技术主管：调度、监工、整合（主 Agent 本体，一般不自派）",
+      "prompt": "你是技术主管，负责调度、监工、整合。你的定位是组织与把关，一般不亲自干活：把任务拆给沙僧/小白，关键修改交悟空复核，重大取舍才找唐僧。只有在没有合适执行者时才自己动手。",
+      "channel": {
+        "kind": "in-process",
+        "channelId": "ch-inprocess",
+        "provider": "spawn"
       },
       "permissionPreset": "project-write",
       "enabled": true,
@@ -117,10 +64,11 @@
         "SS",
         "主力执行"
       ],
-      "description": "技术骨干：主力开发、常规实现、批量执行",
-      "prompt": "你是技术骨干，负责主力开发、常规实现和批量执行。按任务要求执行，只改被授权的文件；每个结论都要附证据，拿不到就写未验证，不要猜。",
+      "description": "技术骨干：主力干活、苦工、全能型（纯文字模型，快且质量稳）",
+      "prompt": "你是技术骨干，负责主力开发、苦工和各类实现任务。你是单纯的文字模型，干活快、质量稳。按任务要求执行，只改被授权的文件；每个结论都要附证据，拿不到就写未验证，不要猜。",
       "channel": {
         "kind": "acp-cli",
+        "channelId": "ch-acp-flash",
         "provider": "acp"
       },
       "permissionPreset": "project-write",
@@ -134,18 +82,19 @@
         "XB",
         "打杂"
       ],
-      "description": "牛马：主力开发、文档、测试辅助",
-      "prompt": "你是小白，负责主力开发、文档整理、测试辅助和各类杂活。按任务要求执行，只改被授权的文件；不确定的先说明，不要编造。",
+      "description": "牛马：主力干活、打杂、什么都会干（会的杂）",
+      "prompt": "你是小白，负责主力干活和各类杂活：开发、文档、测试、调研、脚本，什么都会干。按任务要求执行，只改被授权的文件；不确定的先说明，不要编造。",
       "channel": {
         "kind": "acp-cli",
-        "provider": "acp"
+        "channelId": "ch-acp-hy4",
+        "provider": "acp-hy4"
       },
       "permissionPreset": "project-write",
       "enabled": true,
       "timeoutMs": 3600000
     }
   ],
-  "dispatchNotes": "常规实现优先沙僧/小白；关键修改交悟空复核；重大取舍才找唐僧。",
+  "dispatchNotes": "分工原则：唐僧能力最强、额度有限，只有最重要的事（架构/战略/关键决策/最终把关）才找他；悟空处理高难任务与审核验收；沙僧与小白是干活主力，常规任务优先给他们；八戒负责调度、监工、整合，一般不亲自干活。",
   "limits": {
     "maxParallelReadonly": 2,
     "serializeWrites": true
