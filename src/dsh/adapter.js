@@ -135,6 +135,29 @@ function errorMessage(err) {
 }
 
 /**
+ * 把角色身份与任务拼成子 Agent 的提示词。
+ *
+ * 为什么要拼：子 Agent 默认不知道"自己是谁"。CLIWorker 时代靠 persona 的 prompt 注入，
+ * 我们替代它时必须保留这个语义，否则「沙僧」和「小白」派出去只是同一个裸模型。
+ *
+ * @param {any} role
+ * @param {string} task
+ * @returns {string}
+ */
+function composePrompt(role, task) {
+  const body = String(task ?? '')
+  const name = typeof role?.name === 'string' ? role.name : ''
+  const persona = typeof role?.prompt === 'string' && role.prompt.trim()
+    ? role.prompt.trim()
+    : typeof role?.description === 'string' && role.description.trim()
+      ? role.description.trim()
+      : ''
+  if (!name && !persona) return body
+  const head = [name ? `你是「${name}」。` : '', persona].filter(Boolean).join(' ')
+  return `${head}\n\n任务：${body}`
+}
+
+/**
  * 把宿主 `SubagentResult.output`（ContentBlock[]）压成人类可读文本。
  * @param {any} result
  * @returns {string}
@@ -356,7 +379,7 @@ export function createDshAdapter(ctx, options = {}) {
       signal: controller.signal,
       request: {
         parent,
-        prompt: [{ type: 'text', text: String(task ?? '') }],
+        prompt: [{ type: 'text', text: composePrompt(role, task) }],
         ...(typeof cwd === 'string' && cwd ? { cwd } : {}),
         // 不传 maxDepth：实现里 `resolveChildDepth(parent, undefined)` 自带默认上限；
         // 传了反而要求 provider 具备 depthLimit 能力。

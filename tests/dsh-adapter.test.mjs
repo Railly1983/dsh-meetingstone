@@ -184,7 +184,7 @@ test('start 成功：把 role/task/cwd 透传给宿主 startActivation', async (
   assert.equal(spec.provider, 'acp', 'role.channel.kind → provider')
   assert.match(spec.label, /role-sashi/, 'roleId 必须体现在 label 里')
   assert.equal(spec.request.prompt[0].type, 'text')
-  assert.equal(spec.request.prompt[0].text, '改个函数', 'task 必须透传')
+  assert.match(spec.request.prompt[0].text, /改个函数/, 'task 必须透传（允许带角色前缀）')
   assert.equal(spec.request.cwd, 'D:/MeetingStone', 'cwd 必须透传')
   assert.equal(spec.delivery, 'caller')
   assert.ok(spec.signal instanceof AbortSignal, '必须传 AbortSignal')
@@ -676,4 +676,49 @@ test('只读角色未引用通道实例 → 拒绝启动（无法确认）', asy
       }),
     /READONLY_UNENFORCEABLE/,
   )
+})
+
+// ─── 角色人设注入（替代 CLIWorker 的 persona prompt） ─────────────────────────
+
+test('派单提示词包含角色身份与人设', async () => {
+  const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { acp: {} } }))
+  await adapter.start({
+    role: role({
+      name: '沙僧',
+      prompt: '你是技术骨干，负责主力开发。',
+      channel: { kind: 'acp-cli' },
+    }),
+    task: '改个函数',
+    readOnly: false,
+    timeoutMs: 0,
+    context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
+  })
+  const spec = subagents.calls.find((c) => c.method === 'startActivation').spec
+  const text = spec.request.prompt[0].text
+  assert.match(text, /沙僧/, '必须带角色名')
+  assert.match(text, /技术骨干/, '必须带人设')
+  assert.match(text, /改个函数/, '任务正文必须保留')
+})
+
+test('没有 prompt 时回退用 description；两者都没有则只发任务', async () => {
+  const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { acp: {} } }))
+  await adapter.start({
+    role: role({ name: '甲', description: '负责文档', channel: { kind: 'acp-cli' } }),
+    task: '写 README',
+    readOnly: false,
+    timeoutMs: 0,
+    context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
+  })
+  const spec1 = subagents.calls.filter((c) => c.method === 'startActivation')[0].spec
+  assert.match(spec1.request.prompt[0].text, /负责文档/)
+
+  await adapter.start({
+    role: role({ name: '', description: '', channel: { kind: 'acp-cli' } }),
+    task: '裸任务',
+    readOnly: false,
+    timeoutMs: 0,
+    context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
+  })
+  const spec2 = subagents.calls.filter((c) => c.method === 'startActivation')[1].spec
+  assert.equal(spec2.request.prompt[0].text, '裸任务')
 })

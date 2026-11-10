@@ -66,7 +66,8 @@ export const RoleSchema = compile(
     roleId: S.string().required().description('稳定 ID，如 role-sashi；改名不变'),
     name: S.string().required().description('显示名称'),
     aliases: S.array(S.string()).default([]).description('简称/别名，全局唯一'),
-    description: S.string().default('').description('职责说明，作为提示词前缀'),
+    description: S.string().default('').description('职责说明（人类可读）'),
+    prompt: S.string().description('角色人设/工作守则；派单时作为前缀注入子 Agent 的提示词'),
     channel: ChannelSchema,
     permissionPreset: S.union([...PERMISSION_PRESETS])
       .default('read-only')

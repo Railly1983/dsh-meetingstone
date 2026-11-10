@@ -40,6 +40,7 @@ import { isValidRoleId, normalizeAlias } from './ids.js'
  * @property {string} name
  * @property {string[]} aliases
  * @property {string} description
+ * @property {string} [prompt] 人设/工作守则；派单时作为前缀注入
  * @property {RoleChannel} channel
  * @property {PermissionPreset} permissionPreset
  * @property {boolean} enabled
@@ -268,6 +269,7 @@ function readRole(raw, errors) {
     name,
     aliases: readAliases(input.aliases),
     description: typeof input.description === 'string' ? input.description : '',
+    ...(typeof input.prompt === 'string' && input.prompt.trim() ? { prompt: input.prompt } : {}),
     channel: readChannel(input.channel, errors, id),
     source: /** @type {const} */ ('global'),
     permissionPreset: preset,
@@ -321,6 +323,9 @@ function mergeRole(base, patch, errors) {
   if (Object.hasOwn(input, 'aliases')) next.aliases = readAliases(input.aliases)
   if (Object.hasOwn(input, 'description') && typeof input.description === 'string') {
     next.description = input.description
+  }
+  if (Object.hasOwn(input, 'prompt') && typeof input.prompt === 'string' && input.prompt.trim()) {
+    next.prompt = input.prompt
   }
   if (Object.hasOwn(input, 'channel')) {
     // 通道按字段合并：只改 model 时不该把 provider/cli/kind 抹掉
