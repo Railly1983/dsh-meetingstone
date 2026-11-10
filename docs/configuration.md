@@ -32,9 +32,12 @@
 | `provider` | string | | provider 名（`spawn` / `acp` / `codex` / `claude-code`），省略时按 kind 推断 |
 | `model` | string | | 该 provider 行实际使用的模型 |
 | `reasoning` | string | | 该 provider 行实际的思考强度 |
+| `permissionPreset` | 同角色四档 | `read-only` | 该 provider 行**实际强制**的权限档位；只读角色必须引用 `read-only` 的实例 |
 | `description` | string | | 人类可读说明 |
 
 **为什么要这层**（DD7 方案 B）：角色不能凭空指定模型。角色的声明必须与所引用实例一致，否则派单被拒（`MODEL_UNSUPPORTED`）——我们宁可报错，也不做"配置成功、执行没采用"。
+
+**同样适用于权限**：宿主的启动 spec 没有 permission 字段，只读能不能落实取决于 provider 行怎么配。只读角色必须引用 `permissionPreset: read-only` 的实例，否则 `READONLY_UNENFORCEABLE`。
 
 ## 3. `roles`（角色表）
 

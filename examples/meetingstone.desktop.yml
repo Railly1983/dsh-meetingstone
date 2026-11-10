@@ -24,6 +24,7 @@
             provider: codex
             model: gpt-6.1-sol
             reasoning: high
+            permissionPreset: read-only
 
           - channelId: ch-codex-astra
             description: Codex · gpt-6-astra · high（最贵，慎用）
@@ -31,6 +32,7 @@
             provider: codex
             model: gpt-6-astra
             reasoning: high
+            permissionPreset: read-only
 
           # ACP 通道（CodeBuddy 属此类）。需要：
           #   a) 装 @deepseek-ai/dsh-subagent-acp@0.2.2-rc.1（它**不是** bundle）
@@ -41,6 +43,7 @@
             provider: acp
             model: deepseek-v4.1-flash
             reasoning: high
+            permissionPreset: project-write
 
           - channelId: ch-acp-hy4
             description: CodeBuddy · hy4free · high
@@ -48,12 +51,14 @@
             provider: acp
             model: hy4free
             reasoning: high
+            permissionPreset: project-write
 
           # 进程内子 Agent（DSH 原生，不依赖任何外部 CLI，先拿它验证链路最稳）
           - channelId: ch-inprocess
             description: DSH 原生子 Agent
             kind: in-process
             provider: spawn
+            permissionPreset: read-only
 
         # ── 角色表 ────────────────────────────────────────────────────────────
         roles:

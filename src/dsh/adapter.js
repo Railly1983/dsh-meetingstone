@@ -60,7 +60,8 @@ import { relative, resolve } from 'node:path'
  * TODO(P2-readonly): 官方 `SubagentActivationSpec` / `SubagentStartRequest` **没有**
  *   permission / readOnly / sandbox 字段；provider 的 `permissionMode`（codex/claude-code）
  *   与 `permission`（acp）是**挂载时的行配置**（10-provider-install.md §8.1），不是每次
- *   start 的参数。因此本版**无法**把只读传到 provider，返回 `readOnlyEnforced:false`
+ *   start 的参数。只读只能由 provider 行（通道实例）保证：实例声明 read-only 时
+ *   返回 `readOnlyEnforced:true`，否则拒绝启动
  *   让上层显示「无保证」——这是 `docs/audit/08-sandbox.md` §「启动必须校验 backend 和实际
  *   限制，失败关闭 / 标无保证」的硬要求，绝不静默假装只读生效。
  * TODO(P2-jobs): 若将来改走后台 Job 路线，用上面的 `ctx.jobs.start(spec)`，把返回的
@@ -124,7 +125,7 @@ export function providerNameFor(role) {
  * @property {string} childId   `SubagentActivation.childId`（宿主 SessionId，可用
  *   `SubagentRuntime.listDescendants()` / `ctx.sessionQuery` 查询，出处 subagent.md）
  * @property {string} name      `SubagentActivation.name`（模型可见名）
- * @property {boolean} readOnlyEnforced 是否真的把只读传给了 provider；本版恒为 false
+ * @property {boolean} readOnlyEnforced 是否由通道实例保证了只读（仅当实例声明 read-only 时为 true）
  * @property {number} startedAt 本适配器记录的启动时间（Date.now()）
  */
 
@@ -237,11 +238,27 @@ export function createDshAdapter(ctx, options = {}) {
     //
     // (a) 只读：官方 SubagentActivationSpec 没有 readonly/permission 字段（TODO(P2-readonly)），
     //     无法强制时按 docs/audit/08-sandbox.md §8 的要求拒绝启动，而不是启动后标个 false。
+    //
+    // 只读由**通道实例**承载（与模型同理，DD7 方案 B 的延伸）：
+    // 宿主的启动 spec 没有 permission 字段，能不能只读取决于 provider 行怎么配。
+    // 角色是只读时必须引用一个声明 permissionPreset: 'read-only' 的实例，否则拒绝。
+    let readOnlyEnforced = false
     if (readOnly === true) {
-      throw new Error(
-        'READONLY_UNENFORCEABLE: 当前 provider 通道无法强制只读（spec 无 permission/readOnly 字段），' +
-          '已拒绝启动。需要只读请改用带原生只读沙箱的通道，或把角色降级为「无只读保证」后显式改用可写派单',
-      )
+      const channelId = role?.channel?.channelId
+      const instance = channelId ? channelsById.get(String(channelId)) : null
+      if (!instance) {
+        throw new Error(
+          'READONLY_UNENFORCEABLE: 角色是只读档位，但没有引用任何通道实例，无法确认该通道真的只读。' +
+            '请在配置的 channels 里声明一个 permissionPreset: read-only 的实例，让角色用 channelId 引用它',
+        )
+      }
+      if (instance.permissionPreset !== 'read-only') {
+        throw new Error(
+          `READONLY_UNENFORCEABLE: 通道实例 ${channelId} 声明的权限是 ` +
+            `${instance.permissionPreset ?? '(未声明)'}，不是 read-only，无法保证只读；已拒绝启动`,
+        )
+      }
+      readOnlyEnforced = true
     }
 
     // (b) 模型/强度：官方 spec 不收 model/reasoning，模型只能由 **provider 行**承载（DD7 方案 B）。
@@ -329,8 +346,8 @@ export function createDshAdapter(ctx, options = {}) {
       provider,
       childId,
       name: typeof activation.name === 'string' ? activation.name : childId,
-      // TODO(P2-readonly)：官方 spec 无 readonly/permission 字段，无法强制。
-      readOnlyEnforced: false,
+      // 只读是由通道实例保证的（实例声明 read-only 才允许走到这里）
+      readOnlyEnforced,
       startedAt: now(),
     }
 
@@ -351,7 +368,7 @@ export function createDshAdapter(ctx, options = {}) {
     }
 
     // readOnlyEnforced 同时在返回值与 taskRef 上标记，保证上层（dispatcher → tool）看得见。
-    return { taskRef, readOnlyEnforced: false }
+    return { taskRef, readOnlyEnforced }
   }
 
   /** @param {string} childId */

@@ -613,3 +613,55 @@ test('配置 → registry → adapter：channelId 保住，模型一致性校验
   })
   assert.ok(res.taskRef, '模型与实例一致时应启动成功')
 })
+
+// ─── 只读档位由通道实例承载（DD7 延伸） ─────────────────────────────────────
+
+test('只读角色 + 实例声明 read-only → 允许启动，且 readOnlyEnforced=true', async () => {
+  const { adapter, subagents } = makeAdapter(
+    fakeSubagents({ providers: { acp: {} } }),
+    { channels: [{ channelId: 'ch-ro', kind: 'acp-cli', provider: 'acp', permissionPreset: 'read-only' }] },
+  )
+  const res = await adapter.start({
+    role: role({ channel: { kind: 'acp-cli', channelId: 'ch-ro' }, permissionPreset: 'read-only' }),
+    task: '审一下',
+    readOnly: true,
+    timeoutMs: 0,
+    context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
+  })
+  assert.equal(res.readOnlyEnforced, true)
+  assert.equal(res.taskRef.readOnlyEnforced, true, '上层能看出只读确实落实')
+})
+
+test('只读角色 + 实例不是 read-only → 拒绝启动', async () => {
+  const { adapter, subagents } = makeAdapter(
+    fakeSubagents({ providers: { acp: {} } }),
+    { channels: [{ channelId: 'ch-rw', kind: 'acp-cli', provider: 'acp', permissionPreset: 'project-write' }] },
+  )
+  await assert.rejects(
+    () =>
+      adapter.start({
+        role: role({ channel: { kind: 'acp-cli', channelId: 'ch-rw' }, permissionPreset: 'read-only' }),
+        task: '审一下',
+        readOnly: true,
+        timeoutMs: 0,
+        context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
+      }),
+    /READONLY_UNENFORCEABLE.*project-write/,
+  )
+  assert.equal(subagents.calls.filter((c) => c.method === 'startActivation').length, 0)
+})
+
+test('只读角色未引用通道实例 → 拒绝启动（无法确认）', async () => {
+  const { adapter } = makeAdapter(fakeSubagents({ providers: { acp: {} } }), { channels: [] })
+  await assert.rejects(
+    () =>
+      adapter.start({
+        role: role({ permissionPreset: 'read-only' }),
+        task: 'x',
+        readOnly: true,
+        timeoutMs: 0,
+        context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
+      }),
+    /READONLY_UNENFORCEABLE/,
+  )
+})

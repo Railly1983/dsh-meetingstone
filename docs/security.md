@@ -16,7 +16,12 @@
 | `project-write` | 普通写入限制在所选工作区内 | ⚠️ Windows 当前 `enforcement="partial"`：**目录外硬链接 alias 写入已实测成功**。"绝不修改项目外路径"不承诺 | 同上 §4.3、§8 |
 | `approval` | 对启动、提权、额外目录、凭据注入分别设批准点 | 真实 session 的审批往返未验证；工作进程内部每次工具调用是否再批准需单独集成 | 同上 §8 |
 
-**关键实现细节**：官方子任务启动 spec **没有** permission/readOnly 字段，所以适配器不能把只读"传下去"。当前做法是**拒绝启动**（`READONLY_UNENFORCEABLE`），而不是启动后标一个 `readOnlyEnforced:false` 假装生效（2026-11-10 的 P2 Gate 复核要求）。
+**关键实现细节**：官方子任务启动 spec **没有** permission/readOnly 字段，所以只读只能由 **provider 行（通道实例）** 保证。
+
+现行规则：
+- 角色是 `read-only` → 必须引用 `permissionPreset: read-only` 的通道实例，否则 `READONLY_UNENFORCEABLE` 拒绝启动；
+- 实例声明只读且启动成功 → `taskRef.readOnlyEnforced = true`；
+- 没有实例、或实例不是只读 → **拒绝启动**，绝不启动后标 `readOnlyEnforced:false` 假装生效（2026-11-10 P2 Gate 结论）。
 
 ## 3. 凭据与环境变量
 

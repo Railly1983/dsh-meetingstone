@@ -49,6 +49,9 @@ export const ChannelInstanceSchema = Schema.object({
   provider: Schema.string().description('对应的 provider 名（acp / codex / claude-code / spawn ...）'),
   model: Schema.string().description('该 provider 行实际配置的模型（用于与角色声明比对）'),
   reasoning: Schema.string().description('该 provider 行实际配置的思考强度'),
+  permissionPreset: Schema.union([...PERMISSION_PRESETS])
+    .default('read-only')
+    .description('该 provider 行实际强制的权限档位；只读角色必须引用 read-only 的实例'),
 })
 
 /** 角色定义。语义校验见 registry.js。 */
