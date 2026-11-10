@@ -29,13 +29,21 @@
 路 2 只接管 git 工作树管理，不碰 `workingDirectory`，父会话 cwd 始终不变。
 代价是插件自己维护一段 git 调用代码；边界严格限定为 `worktree add` / `status` / `diff`。
 
-### 2.2 并发上限：两级额度，先预占再异步
+### 2.2 并发上限：宿主共享池 + 插件全局额度，先预占再异步（2026-11-11 修订）
 
-- `limits.maxParallelWritesPerProject` 默认 **2**
-- `limits.maxParallelWritesTotal` 默认 **4**
-- 两级额度在**首次异步操作之前一起预占**（包括建树）。否则两个并发请求会同时通过检查，
-  然后一起 `git worktree add`。
-- 所有 provider（spawn / acp / codex / claude-code）共用同一个 dispatcher 计数器。
+- **宿主容量交给宿主**：宿主 `maxActiveSubagents` 默认 **8**，是进程内共享池
+  （宿主自己的子 Agent 与本插件派单都计入）。池满时宿主直接抛 `ACTIVATION_LIMIT_REACHED`，
+  **没有等待/排队机制**；插件只做**原样透传**，不重复实现容量控制、不包成 `ADAPTER_FAILED`。
+- **本插件只保留全局额度**：`limits.maxParallelWritesTotal` 默认 **4**，只统计**本插件派发**
+  的在跑任务，不按通道/项目拆分。额度在**首次异步操作之前预占**（包括建树），否则两个并发请求
+  会同时通过检查，然后一起 `git worktree add`。超限**立即拒绝** `WRITE_LIMIT_TOTAL`，不排队。
+- **已删除** `maxParallelWritesPerProject` 与 `WRITE_LIMIT_PROJECT`（按项目额度模型）。
+- 同项目"隔离/未隔离互斥"保留，是**正确性保护，不是额度**；`serializeWrites` 在
+  `isolation:none` 时保护同一工作区串行。
+- **迟到结算回填 `stopConfirmed`**：取消/卸载时 dispose 超时或抛错，先写
+  `cancelled + stopConfirmed:false` 并保留槽位；等 `activation.result` 落定后再写一条终态把
+  `stopConfirmed` 回填为 `true`（`diagnostic` 追加 `late settlement`），`status` 保持 `cancelled`
+  不被覆盖，这时才释放槽位。
 
 ### 2.3 清理：一律不自动删除
 
@@ -62,8 +70,8 @@
 | 模块 | 职责 |
 | --- | --- |
 | `src/worktree.js` | 建树（literal argv、清理 `GIT_*`、禁交互、超时、输出上限）、按 common-dir 进程内互斥、`computeChangedFiles` |
-| `src/dispatch/dispatcher.js` | 两级额度预占、隔离/未隔离互斥、失败回滚、operationId → childId 记录 |
-| `src/dsh/adapter.js` | 用 `cwd=worktree.path` 启动；终态记录 `worktree` / `operationId` / `stopConfirmed` |
+| `src/dispatch/dispatcher.js` | 全局额度预占、`ACTIVATION_LIMIT_REACHED` 透传、隔离/未隔离互斥、失败回滚、operationId → childId 记录 |
+| `src/dsh/adapter.js` | 用 `cwd=worktree.path` 启动；终态记录 `worktree` / `operationId` / `stopConfirmed`；迟到结算回填 `stopConfirmed:true` |
 | `src/index.js` | 注入工作树管理器；终态落盘前计算 `changedFiles`（失败写 `changedFilesUnknown`） |
 | `src/run-store.js` | 记录字段、`overlapWarnings`、带 worktree 记录免淘汰 |
 
@@ -80,8 +88,9 @@
 
 | 错误码 | 场景 |
 | --- | --- |
-| `WRITE_LIMIT_PROJECT` | 同项目并行写任务达上限（可重试） |
-| `WRITE_LIMIT_TOTAL` | 全局并行写任务达上限（可重试） |
+| `ACTIVATION_LIMIT_REACHED` | 宿主子 Agent 共享池已满（默认 8）：原样透传，不排队，等现有任务结束 |
+| `WRITE_LIMIT_TOTAL` | 本插件并行写任务达全局上限（默认 4）：立即拒绝，不排队 |
+| `WRITE_CONFLICT` | 同项目隔离/未隔离互斥、`serializeWrites` 串行（正确性保护，不是额度） |
 | `WORKTREE_UNAVAILABLE` | 请求隔离但工作树服务未注入 |
 | `WORKTREE_NOT_GIT_REPOSITORY` | 项目根不是 git 工作区 |
 | `WORKTREE_BASE_INVALID` | `base` 无法解析为 commit |

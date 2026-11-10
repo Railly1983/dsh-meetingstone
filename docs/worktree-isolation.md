@@ -1,7 +1,9 @@
 # 工作树隔离（自动 + 手动）
 
 > 状态：2026-11-11。**`meetingstone_dispatch` 默认自动为每个任务创建独立 git 工作树**
-> （`limits.defaultIsolation: 'worktree'`），同一项目最多 2 个、全局最多 4 个并行写任务。
+> （`limits.defaultIsolation: 'worktree'`）。并发模型见 §3.1：**宿主 `maxActiveSubagents` 默认 8
+> （进程内共享池，宿主子 Agent + 本插件都算，池满立即抛 `ACTIVATION_LIMIT_REACHED`，不排队）**；
+> **本插件只保留全局额度 `maxParallelWritesTotal`（默认 4，仅统计本插件派发的任务，超限立即拒绝）**。
 > 本文同时保留**手动流程**：用于不想开自动隔离、或需要自己控制建树/合并/清理的场景。
 >
 > ⚠️ **隔离的准确含义：文件布局隔离，不是权限沙箱。**
@@ -18,7 +20,7 @@
 | 谁建树 | 插件（`src/worktree.js`，literal argv） | 宿主 `create_worktree` 工具或你手敲 git |
 | 路径 | `<projectRoot>/.meetingstone/worktrees/<operationId>` | 你指定（必须在项目根内） |
 | 分支 | `meetingstone/<operationId>` | 你指定 |
-| 并行 | 默认开（2/项目、4/全局；**仅当前插件实例**内的计数） | 需**同时**：① 手动建好独立工作树 ② 设 `isolation:'none'` ③ 关掉 `serializeWrites`（否则同项目仍串行） |
+| 并行 | 默认开（插件**全局**额度 4，仅本插件任务计数；宿主共享池默认 8） | 需**同时**：① 手动建好独立工作树 ② 设 `isolation:'none'` ③ 关掉 `serializeWrites`（正确性保护，否则同项目仍串行） |
 | 合并/清理 | 不自动，人工（§5） | 不自动，人工（§5） |
 | 记录 | `worktree` / `changedFiles` / `overlapWarnings` 自动落盘 | 插件不感知，记录里没有 worktree 字段 |
 
@@ -33,7 +35,7 @@ meetingstone_dispatch({
 
 会发生什么：
 
-1. 生成 `operationId`（UUID），在**任何异步操作之前**预占项目/全局两级额度；
+1. 生成 `operationId`（UUID），在**任何异步操作之前**预占本插件的全局额度；
 2. `git worktree add -b meetingstone/<operationId> .meetingstone/worktrees/<operationId> <baseSha>`；
 3. 用 `cwd = 工作树路径` 启动子 Agent；
 4. 终态时计算 `changedFiles` 并落盘；**不删除**工作树与分支。
@@ -59,9 +61,8 @@ meetingstone_dispatch({
 ```yaml
 limits:
   defaultIsolation: worktree    # worktree | none
-  maxParallelWritesPerProject: 2
-  maxParallelWritesTotal: 4
-  serializeWrites: true         # 仅 isolation:none 时生效
+  maxParallelWritesTotal: 4     # 本插件派发的并行写任务全局上限（仅本插件，超限立即拒绝）
+  serializeWrites: true         # 仅 isolation:none 时生效：同项目串行，正确性保护而非额度
 ```
 
 ### 1.2 手动流程（需要自己控制时）
@@ -119,17 +120,31 @@ limits:
 
 ## 3. 自动隔离的额度、错误与记录
 
-### 3.1 额度
+### 3.1 并发额度（新模型）
 
-- 同项目：`maxParallelWritesPerProject`，默认 2
-- 全局：`maxParallelWritesTotal`，默认 4（所有 provider 共用）
-- 超限返回**可重试**错误码：`WRITE_LIMIT_PROJECT` / `WRITE_LIMIT_TOTAL`
-- 项目键先归一化（Windows 大小写、尾斜杠），`D:/P` 与 `d:/p/` 不会绕过额度
+- **宿主共享池**：宿主 `maxActiveSubagents` 默认 **8**，进程内共享——宿主自己的子 Agent 与本插件
+  派单都计入。池满时宿主直接抛 `ACTIVATION_LIMIT_REACHED`，**没有等待/排队机制**；插件只做
+  **原样透传**（不归入 `ADAPTER_FAILED`），不重复实现容量控制。只能等现有任务结束再重试。
+- **本插件全局额度**：仅保留 `limits.maxParallelWritesTotal`（默认 **4**），只统计**本插件派发**
+  的在跑任务，不按通道/项目拆分。额度在**首次异步操作前**（含建树）预占；超限**立即拒绝**
+  `WRITE_LIMIT_TOTAL`，不排队。
+- 已删除按项目额度（`maxParallelWritesPerProject` / `WRITE_LIMIT_PROJECT`）：额度不再是"每项目几个"。
+- **隔离互斥是正确性保护，不是额度**：同项目 `isolation:'none'` 与隔离任务不得混跑
+  （`WRITE_CONFLICT`）；`serializeWrites` 在 `isolation:none` 时保护同一工作区串行。
+- 项目键先归一化（realpath + Windows 大小写/尾斜杠折叠），`D:/P` 与 `d:/p/`、`原路径/src/..`、
+  junction/symlink 都不会绕过同项目的隔离互斥判断。
+- **迟到结算回填 `stopConfirmed`**：取消/卸载时 dispose 超时或抛错，先写
+  `cancelled + stopConfirmed:false` 并保留槽位；等 `activation.result` 落定后再写一条终态，
+  把 `stopConfirmed` 回填为 `true`、`diagnostic` 追加 `late settlement`，`status` 保持
+  `cancelled` 不被覆盖，这时才释放槽位（见 [配置参考](configuration.md) §6）。
 
 ### 3.2 错误码
 
 | 错误码 | 含义 |
 | --- | --- |
+| `ACTIVATION_LIMIT_REACHED` | 宿主子 Agent 共享池已满（默认 8）：原样透传，不排队，等现有任务结束 |
+| `WRITE_LIMIT_TOTAL` | 本插件并行写任务达全局上限（默认 4）：立即拒绝，不排队 |
+| `WRITE_CONFLICT` | 同项目隔离/未隔离互斥或 `serializeWrites` 串行（正确性保护，不是额度） |
 | `WORKTREE_UNAVAILABLE` | 请求隔离但工作树服务缺失 |
 | `WORKTREE_NOT_GIT_REPOSITORY` | 项目根不是 git 工作区 |
 | `WORKTREE_BASE_INVALID` | `base` 无法解析为 commit |
@@ -148,7 +163,8 @@ limits:
 - `changedFiles: string[]`（已提交/暂存/未暂存/未跟踪/重命名的新旧路径）
 - `changedFilesUnknown: boolean`（计算失败时为 true；**不能当成无改动**）
 - `overlapWarnings: [{ childId, files }]`（同项目、带工作树、改动文件有交集的记录）
-- `stopConfirmed`（取消/卸载时是否确认进程已停）
+- `stopConfirmed`（取消/卸载时是否确认进程已停；dispose 超时/抛错先记 `false`，
+  `activation.result` 迟到落定后回填为 `true`，见 §3.1）
 
 **带 worktree 的记录不参与"100 条 / 30 天"自动清理**：元数据是人工合并/清理的唯一线索。
 代价是这类记录会一直保留，请在合并后人工删除。
@@ -293,7 +309,7 @@ git -C $PROJ worktree list    # 确认已清干净
 | 谁建树 | 插件 `src/worktree.js` | 宿主工具或你 |
 | 未跟踪/忽略文件 | 不复制 | 不复制，需人工准备 |
 | `cwd` 越界 | 拒绝（路径构造 + realpath 校验） | `PATH_OUTSIDE_PROJECT` 拒绝启动 |
-| 并行 | 默认 2/项目、4/全局 | 需 `isolation:'none'` 并调整 `serializeWrites` |
+| 并行 | 插件全局额度 4（宿主共享池默认 8） | 需 `isolation:'none'` 并调整 `serializeWrites` |
 | 合并 | 不自动，人工 merge / cherry-pick / patch | 同左 |
 | 清理 | 不自动，人工 `worktree remove` / `prune` | 同左 |
 | 结果落盘 | 项目根 `.meetingstone/runs/`，含 worktree/changedFiles | 仍在项目根，但没有 worktree 字段 |

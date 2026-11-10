@@ -28,7 +28,6 @@ test('空配置得到安全默认值', () => {
   assert.equal(cfg.projectConfigFile, '.meetingstone.json')
   assert.deepEqual(cfg.limits, {
     serializeWrites: true,
-    maxParallelWritesPerProject: 2,
     maxParallelWritesTotal: 4,
     defaultIsolation: 'worktree',
   })
@@ -38,7 +37,6 @@ test('limits 部分覆盖：其余字段回退默认值', () => {
   const cfg = normalizeConfig({ limits: { defaultIsolation: 'none' } })
   assert.deepEqual(cfg.limits, {
     serializeWrites: true,
-    maxParallelWritesPerProject: 2,
     maxParallelWritesTotal: 4,
     defaultIsolation: 'none',
   })

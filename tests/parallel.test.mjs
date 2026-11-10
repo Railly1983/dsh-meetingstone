@@ -3,7 +3,7 @@
  * 并行多任务（工作树隔离）的派单/额度/查询测试。
  *
  * 分两层：
- * - dispatcher 层：注入假适配器 + 假工作树服务，验证两级额度、失败关闭、混跑纪律
+ * - dispatcher 层：注入假适配器 + 假工作树服务，验证全局额度、失败关闭、混跑纪律
  * - 插件层：真实临时 git 仓库 + 假 subagents，验证建树、changedFiles、取消/卸载、重叠预警
  */
 import test, { afterEach } from 'node:test'
@@ -116,32 +116,29 @@ const req = (over = {}) => ({
 
 // ─── 额度 ────────────────────────────────────────────────────────────────────
 
-test('项目额度 2：第三个并行写请求被拒（WRITE_LIMIT_PROJECT），释放后可继续', async () => {
+test('全局额度 1：第二个并行写请求被拒（WRITE_LIMIT_TOTAL），释放后可继续', async () => {
   const { dispatcher, worktrees } = makeDispatcher({
     limits: {
       defaultIsolation: 'worktree',
-      maxParallelWritesPerProject: 2,
-      maxParallelWritesTotal: 10,
+      maxParallelWritesTotal: 1,
     },
   })
   const a = await dispatcher.dispatch(req({ task: 'a' }))
+  assert.equal(a.ok, true)
   const b = await dispatcher.dispatch(req({ task: 'b' }))
-  assert.equal(a.ok && b.ok, true)
-  const c = await dispatcher.dispatch(req({ task: 'c' }))
-  assert.equal(c.ok, false)
-  assert.equal(c.code, DISPATCH_ERRORS.WRITE_LIMIT_PROJECT)
-  assert.equal(worktrees.created.length, 2, '被额度拒绝的请求不得建树')
+  assert.equal(b.ok, false)
+  assert.equal(b.code, DISPATCH_ERRORS.WRITE_LIMIT_TOTAL)
+  assert.equal(worktrees.created.length, 1, '被额度拒绝的请求不得建树')
 
   dispatcher.release(a.taskRef)
-  const d = await dispatcher.dispatch(req({ task: 'd' }))
-  assert.equal(d.ok, true)
+  const c = await dispatcher.dispatch(req({ task: 'c' }))
+  assert.equal(c.ok, true, '释放后应能继续派单')
 })
 
 test('全局额度 4：跨项目合计超限被拒（WRITE_LIMIT_TOTAL）', async () => {
   const { dispatcher, worktrees } = makeDispatcher({
     limits: {
       defaultIsolation: 'worktree',
-      maxParallelWritesPerProject: 10,
       maxParallelWritesTotal: 4,
     },
   })
@@ -155,11 +152,10 @@ test('全局额度 4：跨项目合计超限被拒（WRITE_LIMIT_TOTAL）', asyn
   assert.equal(worktrees.created.length, 4)
 })
 
-test('跨项目可并行：不同 projectKey 各占各的项目额度', async () => {
+test('跨项目可并行：不同 projectKey 的任务共享同一个全局额度', async () => {
   const { dispatcher } = makeDispatcher({
     limits: {
       defaultIsolation: 'worktree',
-      maxParallelWritesPerProject: 2,
       maxParallelWritesTotal: 10,
     },
   })
@@ -169,40 +165,60 @@ test('跨项目可并行：不同 projectKey 各占各的项目额度', async ()
   assert.equal(dispatcher.stats().active, 2)
 })
 
-test('同仓库路径别名不绕限：尾斜杠/Windows 大小写折叠到同一项目键', async () => {
+test('同仓库路径别名不绕隔离互斥：尾斜杠/Windows 大小写/反斜杠均折到同一项目键', async () => {
   const { dispatcher } = makeDispatcher({
     limits: {
       defaultIsolation: 'worktree',
-      maxParallelWritesPerProject: 1,
       maxParallelWritesTotal: 10,
     },
   })
-  const first = await dispatcher.dispatch(req({ projectKey: 'D:/P', projectRoot: 'D:/P' }))
-  assert.equal(first.ok, true)
+  // 别名列表：尾斜杠在任意平台都等价；大小写/反斜杠折叠只在 Windows 成立
+  const aliases = ['D:/P/']
+  if (process.platform === 'win32') aliases.push('d:/p', 'D:\\P')
 
-  const trailing = await dispatcher.dispatch(req({ projectKey: 'D:/P/', projectRoot: 'D:/P/' }))
-  assert.equal(trailing.code, DISPATCH_ERRORS.WRITE_LIMIT_PROJECT, '尾斜杠别名不得绕过项目额度')
-
-  if (process.platform === 'win32') {
-    const lower = await dispatcher.dispatch(req({ projectKey: 'd:/p', projectRoot: 'd:/p' }))
-    assert.equal(lower.code, DISPATCH_ERRORS.WRITE_LIMIT_PROJECT, '大小写别名不得绕过项目额度')
-    const backslash = await dispatcher.dispatch(
-      req({ projectKey: 'D:\\P', projectRoot: 'D:\\P' }),
+  // 方向一：同项目一个 isolation:'none' 在跑 → 别名 cwd 的 isolation:'worktree' 必须 WRITE_CONFLICT
+  const plain = await dispatcher.dispatch(
+    req({ projectKey: 'D:/P', projectRoot: 'D:/P', cwd: 'D:/P', isolation: 'none', task: 'a' }),
+  )
+  assert.equal(plain.ok, true)
+  for (const alias of aliases) {
+    const blocked = await dispatcher.dispatch(
+      req({ projectKey: alias, projectRoot: alias, cwd: alias, isolation: 'worktree', task: 'b' }),
     )
-    assert.equal(backslash.code, DISPATCH_ERRORS.WRITE_LIMIT_PROJECT, '反斜杠别名不得绕过项目额度')
+    assert.equal(
+      blocked.code,
+      DISPATCH_ERRORS.WRITE_CONFLICT,
+      `${alias} 别名不得绕过隔离互斥（none 在跑）`,
+    )
   }
 
-  // 也可以只用 projectRoot（不传 projectKey）计数
-  dispatcher.release(first.taskRef)
-  const byRoot = await dispatcher.dispatch({
-    role: 'SS',
-    task: 'x',
-    projectRoot: 'D:/P',
-  })
-  assert.equal(byRoot.ok, true)
+  dispatcher.release(plain.taskRef)
+
+  // 方向二（反之亦然）：同项目一个 isolation:'worktree' 在跑 → 别名 cwd 的 isolation:'none' 必须 WRITE_CONFLICT
+  const isolated = await dispatcher.dispatch(
+    req({ projectKey: 'D:/P', projectRoot: 'D:/P', cwd: 'D:/P', isolation: 'worktree', task: 'c' }),
+  )
+  assert.equal(isolated.ok, true)
+  for (const alias of aliases) {
+    const blocked = await dispatcher.dispatch(
+      req({ projectKey: alias, projectRoot: alias, cwd: alias, isolation: 'none', task: 'd' }),
+    )
+    assert.equal(
+      blocked.code,
+      DISPATCH_ERRORS.WRITE_CONFLICT,
+      `${alias} 别名不得绕过隔离互斥（worktree 在跑）`,
+    )
+  }
+
+  dispatcher.release(isolated.taskRef)
+  // 释放后同一项目（用别名）仍能继续派单
+  const after = await dispatcher.dispatch(
+    req({ projectKey: 'D:/P/', projectRoot: 'D:/P/', isolation: 'worktree', task: 'e' }),
+  )
+  assert.equal(after.ok, true)
 })
 
-test('同目录别名（原路径 vs src/..）不绕项目额度与隔离互斥（realpath）', async () => {
+test('同目录别名（原路径 vs src/..）不绕隔离互斥（realpath）', async () => {
   const root = await mkdtemp(join(tmpdir(), 'mt-alias-'))
   // 注意：不能用 join(root,'src','..')——path.join 会把它规范化成 root，
   // 等于根本没测到别名（悟空复核指出）。必须保留 `..` 字面量。
@@ -218,44 +234,51 @@ test('同目录别名（原路径 vs src/..）不绕项目额度与隔离互斥�
     const { dispatcher } = makeDispatcher({
       limits: {
         defaultIsolation: 'worktree',
-        maxParallelWritesPerProject: 1,
         maxParallelWritesTotal: 10,
       },
     })
 
-    const first = await dispatcher.dispatch(
-      req({ projectKey: root, projectRoot: root, isolation: 'worktree', task: 'a' }),
+    // 方向一：none 在跑 → 别名 cwd 的 worktree 必须 WRITE_CONFLICT
+    const plain = await dispatcher.dispatch(
+      req({ projectKey: root, projectRoot: root, cwd: root, isolation: 'none', task: 'a' }),
     )
-    assert.equal(first.ok, true)
+    assert.equal(plain.ok, true)
     const byAlias = await dispatcher.dispatch(
-      req({ projectKey: alias, projectRoot: alias, isolation: 'worktree', task: 'b' }),
+      req({ projectKey: alias, projectRoot: alias, cwd: alias, isolation: 'worktree', task: 'b' }),
     )
     assert.equal(
       byAlias.code,
-      DISPATCH_ERRORS.WRITE_LIMIT_PROJECT,
-      '`原路径` 与 `原路径/src/..` 必须共享同一项目额度',
+      DISPATCH_ERRORS.WRITE_CONFLICT,
+      '`原路径` 与 `原路径/src/..` 指向同一仓库时，未隔离与隔离任务必须互斥',
     )
 
-    dispatcher.release(first.taskRef)
+    dispatcher.release(plain.taskRef)
+
+    // 方向二（反之亦然）：worktree 在跑 → 别名 cwd 的 none 必须 WRITE_CONFLICT
     const isolated = await dispatcher.dispatch(
-      req({ projectKey: root, projectRoot: root, isolation: 'worktree', task: 'c' }),
+      req({ projectKey: root, projectRoot: root, cwd: root, isolation: 'worktree', task: 'c' }),
     )
     assert.equal(isolated.ok, true)
-    // 同一仓库身份下，隔离与未隔离也不能借别名混跑
     const plainByAlias = await dispatcher.dispatch(
-      req({ projectKey: alias, projectRoot: alias, isolation: 'none', task: 'd' }),
+      req({ projectKey: alias, projectRoot: alias, cwd: alias, isolation: 'none', task: 'd' }),
     )
     assert.equal(
       plainByAlias.code,
       DISPATCH_ERRORS.WRITE_CONFLICT,
-      '别名指向同一仓库时，未隔离任务必须与隔离任务互斥',
+      '别名指向同一仓库时，隔离任务与未隔离任务也必须互斥',
     )
+
+    dispatcher.release(isolated.taskRef)
+    const after = await dispatcher.dispatch(
+      req({ projectKey: alias, projectRoot: alias, isolation: 'worktree', task: 'e' }),
+    )
+    assert.equal(after.ok, true, '释放后应能继续派单')
   } finally {
     await rm(root, { recursive: true, force: true })
   }
 })
 
-test('目录 symlink/junction 与真实路径共享同一额度键', async (t) => {
+test('目录 symlink/junction 与真实路径共享同一项目键（隔离互斥）', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'mt-real-'))
   const link = `${root}-link`
   try {
@@ -269,21 +292,20 @@ test('目录 symlink/junction 与真实路径共享同一额度键', async (t) =
     const { dispatcher } = makeDispatcher({
       limits: {
         defaultIsolation: 'worktree',
-        maxParallelWritesPerProject: 1,
         maxParallelWritesTotal: 10,
       },
     })
     const first = await dispatcher.dispatch(
-      req({ projectKey: root, projectRoot: root, isolation: 'worktree' }),
+      req({ projectKey: root, projectRoot: root, cwd: root, isolation: 'none' }),
     )
     assert.equal(first.ok, true)
     const viaLink = await dispatcher.dispatch(
-      req({ projectKey: link, projectRoot: link, isolation: 'worktree' }),
+      req({ projectKey: link, projectRoot: link, cwd: link, isolation: 'worktree' }),
     )
     assert.equal(
       viaLink.code,
-      DISPATCH_ERRORS.WRITE_LIMIT_PROJECT,
-      'junction/symlink 不得绕过项目额度',
+      DISPATCH_ERRORS.WRITE_CONFLICT,
+      'junction/symlink 指向同一仓库时，不得绕过隔离互斥',
     )
   } finally {
     await rm(link, { recursive: true, force: true })
@@ -347,7 +369,6 @@ test('隔离与未隔离不得混跑（双向）', async () => {
   const { dispatcher } = makeDispatcher({
     limits: {
       defaultIsolation: 'worktree',
-      maxParallelWritesPerProject: 2,
       maxParallelWritesTotal: 10,
     },
   })
@@ -369,7 +390,7 @@ test('隔离与未隔离不得混跑（双向）', async () => {
   assert.equal(isolatedAgain.ok, true)
 })
 
-test('isolation=none + serializeWrites：同项目仍互斥；关闭串行时按额度并行', async () => {
+test('isolation=none + serializeWrites：同项目仍互斥；关闭串行时按全局额度并行', async () => {
   const serial = makeDispatcher({
     limits: { defaultIsolation: 'none', serializeWrites: true },
   })
@@ -381,22 +402,20 @@ test('isolation=none + serializeWrites：同项目仍互斥；关闭串行时按
     limits: {
       defaultIsolation: 'none',
       serializeWrites: false,
-      maxParallelWritesPerProject: 2,
-      maxParallelWritesTotal: 4,
+      maxParallelWritesTotal: 2,
     },
   })
   assert.equal((await parallel.dispatcher.dispatch(req())).ok, true)
   assert.equal((await parallel.dispatcher.dispatch(req())).ok, true)
   const third = await parallel.dispatcher.dispatch(req())
-  assert.equal(third.code, DISPATCH_ERRORS.WRITE_LIMIT_PROJECT)
+  assert.equal(third.code, DISPATCH_ERRORS.WRITE_LIMIT_TOTAL)
 })
 
 test('取消只释放一次槽位：重复 cancel 不会把别人的额度也放掉', async () => {
   const { dispatcher } = makeDispatcher({
     limits: {
       defaultIsolation: 'worktree',
-      maxParallelWritesPerProject: 2,
-      maxParallelWritesTotal: 10,
+      maxParallelWritesTotal: 2,
     },
   })
   const a = await dispatcher.dispatch(req({ task: 'a' }))
@@ -410,7 +429,7 @@ test('取消只释放一次槽位：重复 cancel 不会把别人的额度也放
   const c = await dispatcher.dispatch(req({ task: 'c' }))
   assert.equal(c.ok, true, '空出的一个槽位应可用')
   const d = await dispatcher.dispatch(req({ task: 'd' }))
-  assert.equal(d.code, DISPATCH_ERRORS.WRITE_LIMIT_PROJECT, 'b+c 已占满 2 个')
+  assert.equal(d.code, DISPATCH_ERRORS.WRITE_LIMIT_TOTAL, 'b+c 已占满 2 个全局额度')
 })
 
 // ─── 插件层：真实 git 工作树 ─────────────────────────────────────────────────
@@ -764,30 +783,28 @@ test('主区保护：脏文件/未跟踪/索引/HEAD 在两个隔离任务前后
 })
 
 
-test('项目额度 2（插件层）：第三个被拒且不建树；完成后槽位释放', async () => {
+test('全局额度 1（插件层）：第二个被拒且不建树；完成后槽位释放', async () => {
   const { root } = await makeRepo()
   try {
     const subagents = controllableSubagents()
     const { tool } = applyPlugin(root, subagents, {
-      maxParallelWritesPerProject: 2,
-      maxParallelWritesTotal: 4,
+      maxParallelWritesTotal: 1,
     })
     const dispatch = tool('meetingstone_dispatch')
     const first = await dispatch.execute({ role: 'SS', task: 'a' }, execFor(root))
+    assert.equal(first.ok, true, JSON.stringify(first))
     const second = await dispatch.execute({ role: 'SS', task: 'b' }, execFor(root))
-    assert.equal(first.ok && second.ok, true)
-    const third = await dispatch.execute({ role: 'SS', task: 'c' }, execFor(root))
-    assert.equal(third.ok, false)
-    assert.equal(third.code, DISPATCH_ERRORS.WRITE_LIMIT_PROJECT)
+    assert.equal(second.ok, false)
+    assert.equal(second.code, DISPATCH_ERRORS.WRITE_LIMIT_TOTAL)
 
     const worktreeNames = await readdir(join(root, '.meetingstone', 'worktrees'))
-    assert.equal(worktreeNames.length, 2, '被拒的请求不得创建第三棵树')
+    assert.equal(worktreeNames.length, 1, '被拒的请求不得创建第二棵树')
 
     subagents.pending[0].resolve({ stopReason: 'completed', output: [] })
     await waitCompleted(root, first.taskRef.childId)
     await delay(100) // 等 adapter 的 onFinish 释放槽位
-    const fourth = await dispatch.execute({ role: 'SS', task: 'd' }, execFor(root))
-    assert.equal(fourth.ok, true, JSON.stringify(fourth))
+    const third = await dispatch.execute({ role: 'SS', task: 'c' }, execFor(root))
+    assert.equal(third.ok, true, JSON.stringify(third))
 
     for (const pending of subagents.pending.slice(1)) {
       pending.resolve({ stopReason: 'completed', output: [] })
@@ -804,7 +821,6 @@ test('总额度 4（插件层）：跨项目合计超限被拒', async () => {
   try {
     const subagents = controllableSubagents()
     const { tool } = applyPlugin(repoA.root, subagents, {
-      maxParallelWritesPerProject: 2,
       maxParallelWritesTotal: 4,
     })
     const dispatch = tool('meetingstone_dispatch')
@@ -812,7 +828,7 @@ test('总额度 4（插件层）：跨项目合计超限被拒', async () => {
       const res = await dispatch.execute({ role: 'SS', task: 'x' }, execFor(root))
       assert.equal(res.ok, true, JSON.stringify(res))
     }
-    // 第五个放到第三个项目：项目额度没满，但全局额度已满
+    // 第五个放到第三个项目：前四个已占满全局额度 4，立即拒绝
     const fifth = await dispatch.execute({ role: 'SS', task: 'x' }, execFor(repoC.root))
     assert.equal(fifth.ok, false)
     assert.equal(fifth.code, DISPATCH_ERRORS.WRITE_LIMIT_TOTAL)
@@ -984,7 +1000,7 @@ test('重叠：两棵树改同一文件 → 双方 overlapWarnings 命中；未�
     )
 
     // 不同文件不误报
-    await delay(100) // 等 A/B 的 onFinish 释放项目额度
+    await delay(100) // 等 A/B 的 onFinish 释放全局额度
     const c = await dispatch.execute({ role: 'SS', task: 'c' }, execFor(root))
     const d = await dispatch.execute({ role: 'SS', task: 'd' }, execFor(root))
     assert.equal(c.ok && d.ok, true, JSON.stringify({ c, d }))

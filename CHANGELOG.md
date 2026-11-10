@@ -18,7 +18,7 @@
 ## [Unreleased]
 
 ### Fixed
-- 并行多任务经悟空三轮独立复核，修复：停止未确认仍释放槽位、启动中卸载漏追踪、同目录别名绕过额度、
+- 并行多任务经悟空三轮独立复核，修复：停止未确认仍释放槽位、启动中卸载漏追踪、同目录别名绕过同项目判定、
   超大记录失去淘汰保护、并发 overlap 未落盘、overlap 撑爆记录、错误上下文未贯通、两个可假通过的弱断言
 - 已知限制见 docs/worktree-isolation.md「已知限制」
 
@@ -28,8 +28,13 @@
     30s 超时、输出上限、按 git common-dir 进程内互斥）；路径
     `.meetingstone/worktrees/<operationId>`、分支 `meetingstone/<operationId>`
   - `meetingstone_dispatch` 新增 `isolation: 'none' | 'worktree'`，默认 `worktree`
-  - 两级额度 `maxParallelWritesPerProject`（默认 2）/ `maxParallelWritesTotal`（默认 4），
-    在首次异步操作前一起预占；超限返回可重试的 `WRITE_LIMIT_PROJECT` / `WRITE_LIMIT_TOTAL`
+  - 并发额度（2026-11-11 修订）：宿主 `maxActiveSubagents` 默认 **8**，进程内共享池
+    （宿主子 Agent + 本插件都算），池满直接抛 `ACTIVATION_LIMIT_REACHED`，**无等待/队列**；
+    本插件只保留**全局** `maxParallelWritesTotal`（默认 4，仅统计本插件任务），
+    在首次异步操作前预占，超限**立即拒绝** `WRITE_LIMIT_TOTAL`，不排队
+  - `ACTIVATION_LIMIT_REACHED` 原样透传（不归入 `ADAPTER_FAILED`）；删除
+    `maxParallelWritesPerProject` / `WRITE_LIMIT_PROJECT` 按项目额度模型
+  - 同项目"隔离/未隔离互斥"与 `serializeWrites` 保留为**正确性保护，不是并发额度**
   - 失败关闭：建树失败/服务缺失 → 拒绝派单，绝不退回主工作区；`isolation:none` 与隔离任务不得混跑
   - 工作树/分支**一律不自动删除**（完成/失败/取消/卸载都不删）
   - 记录新增 `worktree` / `changedFiles` / `changedFilesUnknown` / `operationId` / `stopConfirmed`；
@@ -39,7 +44,8 @@
   - 淘汰保护：带 `worktree` 的记录不参与 100 条/30 天清理
   - 新增测试 `tests/worktree.test.mjs`（真实 git 建树/冲突/超时/computeChangedFiles）与
     `tests/parallel.test.mjs`（额度、跨项目、失败关闭、取消/卸载、重叠、淘汰）
-- 新错误码 `WORKTREE_*` / `WRITE_LIMIT_*` / `INVALID_ISOLATION`（见 `docs/configuration.md` §5）
+- 新错误码 `WORKTREE_*` / `WRITE_LIMIT_TOTAL` / `INVALID_ISOLATION`（见 `docs/configuration.md` §5）；
+  宿主 `ACTIVATION_LIMIT_REACHED` 原样透传
 - `docs/plan/2026-11-11-parallel-plan.md` 写入悟空裁决；`docs/worktree-isolation.md` 改为
   「自动隔离 + 手动流程并列」，明确**文件布局隔离 ≠ 权限沙箱**
 - **生命周期正确性（P0）**：取消改为「先 `dispose()`（默认 5s 超时兜底）再释放槽位」；
@@ -49,7 +55,7 @@
 - 角色注册表：别名解析、冲突降级（标记 `ambiguous` 而非整表失败）
 - 项目级配置 `.meetingstone.json`：mtime 缓存、坏文件降级、与全局配置合并
 - 本机 CLI 探测：多源解析（PATH → Appx → npm 全局 → 常见目录），带版本试跑与缓存
-- 派单编排：同项目任务串行、按项目隔离、失败回滚、`onFinish` 幂等释放
+- 派单编排：同项目任务串行（`serializeWrites`）、工作树隔离、失败回滚、`onFinish` 幂等释放
 - DSH 接线层：`ctx.subagents` 适配器 + 六个工具（`meetingstone_list_roles` / `_dispatch` / `_list_runs` / `_get_task` / `_cancel_task` / `_cli_status`）
 - 通道实例表 `channels`：模型/强度由 provider 行承载，角色声明必须一致（DD7 方案 B）
 - 发布门禁 `npm run verify`：全量测试 + 宿主/模型 API 契约校验
@@ -58,6 +64,14 @@
   `git worktree remove` / `prune` 清理。
 
 ### Changed
+- **并发模型改为「宿主 8 共享 + 插件全局 4」**（2026-11-11 用户决策）：宿主池满直接抛
+  `ACTIVATION_LIMIT_REACHED`（无等待/队列），插件原样透传；插件只保留全局
+  `maxParallelWritesTotal`（默认 4，仅统计本插件任务），超限立即拒绝 `WRITE_LIMIT_TOTAL`；
+  删除按项目额度。同项目隔离互斥/`serializeWrites` 明确为正确性保护而非额度
+- **迟到结算回填 `stopConfirmed`**：取消/卸载时 dispose 超时或抛错先写
+  `cancelled + stopConfirmed:false` 并保留槽位；`activation.result` 落定后再写一条终态，
+  把 `stopConfirmed` 回填为 `true`、`diagnostic` 追加 `late settlement`，`status` 保持
+  `cancelled` 不被覆盖，这时才释放槽位
 - `limits` 新增 `defaultIsolation`（默认 `worktree`）；`serializeWrites` 仅在 `isolation:none` 时生效
 - 当前开发线：6 个工具；`node scripts/run-tests.mjs` 214 项全绿；`node scripts/verify-host-schema.mjs` PASS
 - `docs/configuration.md` / `docs/security.md` / `examples/worktree-dispatch.jsonc` 同步并行隔离与失败关闭语义

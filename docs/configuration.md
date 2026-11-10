@@ -15,9 +15,8 @@
     dispatchNotes: "常规实现优先沙僧；关键改动交悟空复核。"
     projectConfigFile: .meetingstone.json
     limits:
-      serializeWrites: true              # isolation:none 时同项目串行
-      maxParallelWritesPerProject: 2     # 同项目并行写任务上限
-      maxParallelWritesTotal: 4          # 全局并行写任务上限（所有 provider 共用）
+      serializeWrites: true              # isolation:none 时同项目串行（正确性保护，不是并发额度）
+      maxParallelWritesTotal: 4          # 本插件派发的并行写任务全局上限（仅本插件，默认 4）
       defaultIsolation: worktree         # worktree | none
 ```
 
@@ -32,14 +31,14 @@
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
 | `limits.defaultIsolation` | `worktree` | `worktree`=每任务独立工作树；`none`=主工作区 |
-| `limits.maxParallelWritesPerProject` | `2` | 同项目并行写任务上限；超限返回 `WRITE_LIMIT_PROJECT`（可重试） |
-| `limits.maxParallelWritesTotal` | `4` | 所有项目合计上限；超限返回 `WRITE_LIMIT_TOTAL`（可重试） |
-| `limits.serializeWrites` | `true` | 仅在 `isolation:none` 时生效：同项目串行 |
+| `limits.maxParallelWritesTotal` | `4` | 本插件派发的并行写任务全局上限（仅统计本插件任务）；超限立即返回 `WRITE_LIMIT_TOTAL`，**不排队** |
+| `limits.serializeWrites` | `true` | 仅在 `isolation:none` 时生效：同项目串行。这是同一工作区的**正确性保护，不是并发额度** |
 
-纪律：
+并发纪律（2026-11-11 用户决策后的新模型）：
 
-- 两级额度在**首次异步操作前**一起预占（含建树）；所有 provider 共用同一计数器。
-- `isolation:none` 与隔离任务**不得混跑**，同项目任一方向有活动任务就返回 `WRITE_CONFLICT`。
+- **宿主容量交给宿主**：宿主 `maxActiveSubagents` 默认 **8**，是**进程内共享池**——宿主自己的子 Agent 与本插件派单都计入。池满时宿主直接抛 `ACTIVATION_LIMIT_REACHED`，**没有等待/排队机制**；插件原样透传这个错误码，不重复实现容量控制，也不包成 `ADAPTER_FAILED`。
+- **插件只保留全局额度**：`limits.maxParallelWritesTotal`（默认 4）只统计**本插件派发**的在跑任务，不按通道/项目拆分。额度在**首次异步操作前**（含建树）预占；超限**立即拒绝** `WRITE_LIMIT_TOTAL`，不排队，调用方稍后重试。
+- `isolation:none` 与隔离任务**不得混跑**，同项目任一方向有活动任务就返回 `WRITE_CONFLICT`（正确性保护，不是额度）。
 - 请求隔离但建树失败 / 服务缺失 → **拒绝派单**，绝不退回主工作区。
 - 完成 / 失败 / 取消 / 卸载都**不删除**工作树与分支。
 - **隔离是文件布局隔离，不是权限沙箱**（同账号、同文件系统、共享 git 元数据）。
@@ -111,10 +110,10 @@
 | 模型与实例不一致 | `MODEL_UNSUPPORTED`，给出双方取值 |
 | `cwd` 越出项目根 | `PATH_OUTSIDE_PROJECT` |
 | 拿不到项目根却指定 `cwd` | `PROJECT_ROOT_UNKNOWN` |
-| 同项目已有任务（`isolation:none` + `serializeWrites`） | `WRITE_CONFLICT` |
+| 同项目已有任务（`isolation:none` + `serializeWrites`） | `WRITE_CONFLICT`（正确性保护，不是额度） |
 | 同项目已有未隔离任务，或隔离任务遇到未隔离任务 | `WRITE_CONFLICT`（不得混跑） |
-| 同项目并行写任务达上限 | `WRITE_LIMIT_PROJECT`（可重试） |
-| 全局并行写任务达上限 | `WRITE_LIMIT_TOTAL`（可重试） |
+| 本插件并行写任务达全局上限 | `WRITE_LIMIT_TOTAL`（立即拒绝，不排队，稍后重试） |
+| 宿主子 Agent 共享池已满（`maxActiveSubagents` 默认 8） | `ACTIVATION_LIMIT_REACHED`（原样透传，不排队，等现有任务结束） |
 | 请求隔离但工作树服务缺失 | `WORKTREE_UNAVAILABLE` |
 | 项目根不是 git 工作区 | `WORKTREE_NOT_GIT_REPOSITORY` |
 | `base` 无法解析为 commit | `WORKTREE_BASE_INVALID` |
@@ -132,8 +131,10 @@
 
 - 每次插件启动生成一个 `runtimeId`，写进每一条落盘记录（`.meetingstone/runs/<childId>.json`）。
 - **取消顺序**：先 `abort` → `await activation.dispose()`（默认最多等 5 秒）→ **确认停止后**才释放并发槽位。
-  dispose 超时或抛错时槽位与隔离互斥保留，终态写 `stopConfirmed:false`；等 `activation.result` 落定
-  （可验证的停止证据）后自动释放。重复取消复用同一个收尾 promise。
+  dispose 超时或抛错时槽位与隔离互斥保留，先写 `cancelled + stopConfirmed:false` 终态；等
+  `activation.result` 落定（可验证的停止证据）后**回填**：再写一条终态，把 `stopConfirmed` 改为 `true`、
+  `diagnostic` 追加 `late settlement`，`status` 保持 `cancelled` 不被改写成 `completed`，这时才自动释放槽位。
+  重复取消复用同一个收尾 promise。
 - **落盘顺序**：同一 `childId` 的写入按 FIFO 串行，`running` 一定先于终态落地，终态不会被覆盖。
 - **重启后的假 running**：读取时若 `status === 'running'` 且 `runtimeId` 不是当前进程的，投影为
   `status: 'interrupted'` + `interrupted: true`；只改返回值，不回写磁盘。

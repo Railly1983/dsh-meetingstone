@@ -156,7 +156,7 @@ test('A1：dispose 未完成前同项目再派写任务必须 WRITE_CONFLICT；�
   assert.ok(order.indexOf('dispose-end') < order.indexOf('slot-released'), '槽位释放必须在 dispose 之后')
 })
 
-test('A2：dispose 抛错时保留槽位（stopConfirmed:false），结果落定后才释放', async () => {
+test('A2：dispose 抛错先写 cancelled + stopConfirmed:false，迟到结算回填 true 后才释放槽位', async () => {
   /** @type {(value?: any) => void} */
   let settle
   const subagents = fakeSubagents({
@@ -189,7 +189,7 @@ test('A2：dispose 抛错时保留槽位（stopConfirmed:false），结果落定
 
   assert.equal(started.length, 1)
   assert.equal(outcome.stopConfirmed, false, 'dispose 失败不得报告已确认停止')
-  assert.equal(finished.length, 1, '取消必须写终态')
+  assert.equal(finished.length, 1, '取消先写一次终态')
   assert.equal(finished[0].status, 'cancelled')
   assert.equal(finished[0].error.code, ADAPTER_ERRORS.DISPOSE_FAILED)
   assert.equal(finished[0].stopConfirmed, false, 'dispose 失败不能视为已确认停止')
@@ -197,14 +197,18 @@ test('A2：dispose 抛错时保留槽位（stopConfirmed:false），结果落定
   assert.equal(released, 0, 'dispose 未确认时槽位必须保留（P1）')
   assert.ok(warns.some((l) => l.includes(ADAPTER_ERRORS.DISPOSE_FAILED)), '错误必须记录')
 
-  // 结果落定 = 可验证的停止证据：这时才允许释放槽位，且不得覆盖 cancelled 终态
+  // 迟到结算：result 落定后再写一次 stopConfirmed:true + diagnostic 含 late settlement，
+  // status 仍是 cancelled（不得被 completed 覆盖）；这时才释放槽位
   settle({ stopReason: 'completed', output: [{ type: 'text', text: 'late' }] })
   await delay(30)
-  assert.equal(released, 1, 'result 落定后才释放槽位')
-  assert.equal(finished.length, 1, '取消后的终态不能被 completed 覆盖')
+  assert.equal(finished.length, 2, '迟到结算必须再写一次终态')
+  assert.equal(finished[1].status, 'cancelled', '回填不得把 cancelled 改写成 completed')
+  assert.equal(finished[1].stopConfirmed, true, 'result 落定 = 可验证停止证据，回填 true')
+  assert.match(finished[1].diagnostic, /late settlement/)
+  assert.equal(released, 1, '槽位在迟到结算后才释放')
 })
 
-test('A3：dispose 超时按 ADAPTER_DISPOSE_TIMEOUT 兜底返回，槽位保留到结果落定', async () => {
+test('A3：dispose 超时按 ADAPTER_DISPOSE_TIMEOUT 兜底返回，迟到结算回填 true 后才释放槽位', async () => {
   /** @type {(value?: any) => void} */
   let settle
   const subagents = fakeSubagents({
@@ -238,13 +242,20 @@ test('A3：dispose 超时按 ADAPTER_DISPOSE_TIMEOUT 兜底返回，槽位保留
   const elapsed = Date.now() - t0
   assert.ok(elapsed < 1000, `超时兜底应立即返回，实际 ${elapsed}ms`)
   assert.equal(outcome.stopConfirmed, false)
+  assert.equal(finished.length, 1, '超时先写一次终态')
+  assert.equal(finished[0].status, 'cancelled')
   assert.equal(finished[0].error.code, ADAPTER_ERRORS.DISPOSE_TIMEOUT)
   assert.equal(finished[0].stopConfirmed, false, 'dispose 超时不能视为已确认停止')
   assert.equal(released, 0, '超时未确认停止时必须保留槽位（P1）')
 
+  // 迟到结算：回填 stopConfirmed:true + late settlement，status 仍 cancelled，才释放槽位
   settle({ stopReason: 'completed', output: [] })
   await delay(30)
-  assert.equal(released, 1, '结果落定后才释放保留的槽位')
+  assert.equal(finished.length, 2, '迟到结算必须再写一次终态')
+  assert.equal(finished[1].status, 'cancelled', '回填不得把 cancelled 改写成 completed')
+  assert.equal(finished[1].stopConfirmed, true, 'result 落定 = 可验证停止证据，回填 true')
+  assert.match(finished[1].diagnostic, /late settlement/)
+  assert.equal(released, 1, '槽位在迟到结算后才释放')
 })
 
 test('A5：dispose 未确认时 dispatcher 槽位与项目互斥保留，结果落定后才允许新派单', async () => {
@@ -261,7 +272,6 @@ test('A5：dispose 未确认时 dispatcher 槽位与项目互斥保留，结果�
     limits: {
       defaultIsolation: 'none',
       serializeWrites: true,
-      maxParallelWritesPerProject: 1,
       maxParallelWritesTotal: 10,
     },
   })
