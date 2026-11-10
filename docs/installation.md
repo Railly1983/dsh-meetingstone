@@ -234,3 +234,17 @@ $script = "const {createRequire}=require('node:module');const r=createRequire('f
 
 > 不要写 `pnpm-workspace.yaml` 的 overrides：profile 自带该文件（`nodeLinker: hoisted`），
 > 覆盖它会把 profile 当成 workspace 根，安装直接失败。
+
+
+### 必做：Codex 沙箱改 unelevated（2026-11-11 实测）
+
+若 Codex 子 Agent 一调用工具就报：
+
+```
+helper_sandbox_lock_failed: lock sandbox bin dir ...\.sandbox-bin failed:
+SetNamedSecurityInfoW sandbox dir failed: 5
+```
+
+把 `%USERPROFILE%\.codex\config.toml` 的 `[windows] sandbox` 从 `elevated` 改为 `unelevated`（先备份）。
+原因：elevated 模式要改 `.sandbox-bin` 的 ACL，而该目录属主是 Administrators，当前进程没有 WRITE_DAC。
+详见 `docs/audit/16-codex-sandbox-fix.md`。

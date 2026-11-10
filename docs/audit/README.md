@@ -23,3 +23,5 @@
 | `08-sandbox.md` | P0-08 | 沙箱与子进程权限边界 |
 | `09-release.md` | P0-09 | 发布规范与名称占用 |
 | `11-team-dispatch.md` | P0-11 | 团队 Worker 编队与派发协议验证 |
+
+- [16 · Codex 沙箱初始化失败与修复](./16-codex-sandbox-fix.md)
