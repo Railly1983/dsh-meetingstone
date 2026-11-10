@@ -12,6 +12,9 @@
  * - **由适配器回调释放**：`onFinish` 在任务终态（完成/失败/取消）时调用，幂等
  * - **按项目隔离计数**：不同项目互不误挡；同项目写任务默认串行
  *
+ * 本项目**不提供只读通道**：没有只读判定、没有只读限流，所有派单都按写任务串行。
+ * 宿主 subagent spec 没有权限字段，做不到绝对只读，就不要留半吊子承诺（2026-11-11）。
+ *
  * 依据：
  * - docs/开发计划.md §7.2（工具语义）
  * - docs/audit/03-native-capabilities.md（provider 通道）
@@ -25,11 +28,9 @@ export const DISPATCH_ERRORS = Object.freeze({
   ROLE_AMBIGUOUS: 'ROLE_AMBIGUOUS',
   PROVIDER_UNAVAILABLE: 'PROVIDER_UNAVAILABLE',
   WRITE_CONFLICT: 'WRITE_CONFLICT',
-  READONLY_LIMIT: 'READONLY_LIMIT',
   INVALID_TASK: 'INVALID_TASK',
   ADAPTER_FAILED: 'ADAPTER_FAILED',
   // 适配器的前置校验错误码：原样透传，便于调用方分支处理（而不是一律 ADAPTER_FAILED）
-  READONLY_UNENFORCEABLE: 'READONLY_UNENFORCEABLE',
   MODEL_UNSUPPORTED: 'MODEL_UNSUPPORTED',
   PATH_OUTSIDE_PROJECT: 'PATH_OUTSIDE_PROJECT',
   PROJECT_ROOT_UNKNOWN: 'PROJECT_ROOT_UNKNOWN',
@@ -38,7 +39,6 @@ export const DISPATCH_ERRORS = Object.freeze({
 
 /** 适配器抛错串里可透传的错误码前缀。 */
 const PASSTHROUGH_PREFIXES = [
-  'READONLY_UNENFORCEABLE',
   'MODEL_UNSUPPORTED',
   'PATH_OUTSIDE_PROJECT',
   'PROJECT_ROOT_UNKNOWN',
@@ -64,7 +64,6 @@ export const DEFAULT_PROJECT_KEY = 'default'
  * @property {string} task 任务内容
  * @property {string} [cwd] 目标目录；项目边界校验在适配器里做
  * @property {string} [projectKey] 并发计数键（通常传项目根路径）；省略视为 default
- * @property {boolean} [readOnly] 覆盖角色的只读判定（只能在更严方向覆盖）
  * @property {object} [context] 宿主上下文（如 exec.agent），原样透传给适配器
  * @property {object} [registry] 覆盖本次解析用的注册表（按项目上下文注入全局+项目覆盖）
  */
@@ -74,7 +73,6 @@ export const DEFAULT_PROJECT_KEY = 'default'
  * @property {object} role 已解析的角色
  * @property {string} task
  * @property {string} [cwd]
- * @property {boolean} readOnly
  * @property {number} timeoutMs
  * @property {object} [context] 由调用方透传的宿主上下文
  * @property {() => void} onFinish 任务终态回调（适配器必须在完成/失败/取消时调用一次）
@@ -88,35 +86,31 @@ export const DEFAULT_PROJECT_KEY = 'default'
  */
 
 /**
- * @typedef {{ ok: true, taskRef: object, role: object, readOnly: boolean, startedAt: number }
+ * @typedef {{ ok: true, taskRef: object, role: object, startedAt: number }
  *   | { ok: false, code: string, message: string, role?: object }} DispatchResult
  */
 
 /**
  * @param {{ registry: { resolve: (ref: string) => any, list: () => any[] },
  *           adapter: DispatchAdapter,
- *           limits?: { maxParallelReadonly?: number, serializeWrites?: boolean },
+ *           limits?: { serializeWrites?: boolean },
  *           now?: () => number }} deps
  */
 export function createDispatcher({ registry, adapter, limits = {}, now = () => Date.now() }) {
-  const maxParallelReadonly = Math.max(1, Math.floor(limits.maxParallelReadonly ?? 3))
   const serializeWrites = limits.serializeWrites !== false
 
-  /** @type {Map<object, { role: any, readOnly: boolean, projectKey: string, startedAt: number, ref: object | null }>} */
+  /** @type {Map<object, { role: any, projectKey: string, startedAt: number, ref: object | null }>} */
   const active = new Map()
   /** @type {Map<object, object>} taskRef -> token */
   const refToToken = new Map()
 
   /** @param {string} projectKey */
-  const countsFor = (projectKey) => {
+  const writesFor = (projectKey) => {
     let writes = 0
-    let readonly = 0
     for (const v of active.values()) {
-      if (v.projectKey !== projectKey) continue
-      if (v.readOnly) readonly += 1
-      else writes += 1
+      if (v.projectKey === projectKey) writes += 1
     }
-    return { writes, readonly }
+    return writes
   }
 
   /**
@@ -180,11 +174,7 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
       return fail(DISPATCH_ERRORS.ROLE_DISABLED, `角色「${role.name}」已停用，不能派单`)
     }
 
-    // 2. 只读判定：只允许往更严的方向覆盖
-    const roleReadonly = role.permissionPreset === 'read-only'
-    const readOnly = roleReadonly || req.readOnly === true
-
-    // 3. 通道可用性（provider 未安装时给出可诊断的错误，而不是崩）
+    // 2. 通道可用性（provider 未安装时给出可诊断的错误，而不是崩）
     if (adapter.canStart) {
       let probe
       try {
@@ -200,41 +190,33 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
       }
     }
 
-    // 4. 并发纪律：**先占槽再启动**，失败回滚
+    // 3. 并发纪律：**先占槽再启动**，失败回滚。所有派单都按写任务串行。
     const projectKey =
       typeof req.projectKey === 'string' && req.projectKey ? req.projectKey : DEFAULT_PROJECT_KEY
-    const { writes, readonly } = countsFor(projectKey)
+    const writes = writesFor(projectKey)
 
-    if (!readOnly) {
-      if (serializeWrites && writes > 0) {
-        return fail(
-          DISPATCH_ERRORS.WRITE_CONFLICT,
-          '同一项目已有写任务在执行；写任务默认串行（可在项目配置里调整）',
-        )
-      }
-    } else if (readonly >= maxParallelReadonly) {
+    if (serializeWrites && writes > 0) {
       return fail(
-        DISPATCH_ERRORS.READONLY_LIMIT,
-        `只读任务已达并发上限 ${maxParallelReadonly}，请等其中一个完成`,
+        DISPATCH_ERRORS.WRITE_CONFLICT,
+        '同一项目已有任务在执行；写任务默认串行（可在项目配置里调整）',
       )
     }
 
     /** @type {object} */
     const token = {}
-    active.set(token, { role, readOnly, projectKey, startedAt: now(), ref: null })
+    active.set(token, { role, projectKey, startedAt: now(), ref: null })
     /** @type {() => void} */
     const onFinish = () => {
       release(token)
     }
 
-    // 5. 交给宿主适配器
+    // 4. 交给宿主适配器
     let started
     try {
       started = await adapter.start({
         role,
         task: req.task,
         cwd: req.cwd,
-        readOnly,
         timeoutMs: role.timeoutMs,
         context: req.context,
         // 上下文重放块（P1）：由工具层解析好后透传，适配器只负责拼进提示词
@@ -255,7 +237,7 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
     if (entry) entry.ref = started.taskRef
     refToToken.set(started.taskRef, token)
 
-    return { ok: true, taskRef: started.taskRef, role, readOnly, startedAt: now() }
+    return { ok: true, taskRef: started.taskRef, role, startedAt: now() }
   }
 
   /** 取消：先让宿主取消，成功后释放槽位（适配器也可能回调 onFinish，release 幂等）。 */
@@ -283,22 +265,10 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
     getTask,
     stats: (projectKey) => {
       if (typeof projectKey === 'string') {
-        const c = countsFor(projectKey)
-        return { active: c.writes + c.readonly, ...c, maxParallelReadonly, serializeWrites }
+        const writes = writesFor(projectKey)
+        return { active: writes, writes, serializeWrites }
       }
-      let writes = 0
-      let readonly = 0
-      for (const v of active.values()) {
-        if (v.readOnly) readonly += 1
-        else writes += 1
-      }
-      return {
-        active: active.size,
-        writes,
-        readonly,
-        maxParallelReadonly,
-        serializeWrites,
-      }
+      return { active: active.size, writes: active.size, serializeWrites }
     },
   }
 }

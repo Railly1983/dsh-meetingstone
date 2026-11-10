@@ -20,7 +20,7 @@
 | 1 | **并发写任务能同时成功**：旧实现在 `await adapter.start()` **之后**才占槽 | P1 | 改为**先占槽再启动**，失败回滚 | `并发写请求：先占槽再启动…` |
 | 2 | **任务完成后槽位永不释放**：生产路径没人调 `release` | P1 | 适配器在任务终态回调 `onFinish`，dispatcher 幂等释放；引用按稳定 taskRef 管理 | `onFinish 释放槽位…` / `onFinish 幂等…` |
 | 3 | 不同项目共用一套并发计数 | P1 | 按 `projectKey` 隔离计数 | `跨项目隔离…` |
-| 4 | 只读「标记诚实但仍启动任务」 | P0 | 无法强制只读时**拒绝启动**（`READONLY_UNENFORCEABLE`），不再带病启动 | `readOnly 无法强制时拒绝启动…` |
+| 4 | 只读「标记诚实但仍启动任务」 | P0 | 当时改为无法强制只读时拒绝启动（`READONLY_UNENFORCEABLE`）；**该功能已于 2026-11-11 整体移除，不要再实现** | 历史记录 |
 | 5 | 角色配了 model/reasoning 但执行时被忽略 | P0 | 通道不收这两个字段时**拒绝启动**（`MODEL_UNSUPPORTED`） | `角色指定了 model → 拒绝启动` |
 | 6 | `cwd` 无项目边界校验 | P0 | 从 `context.projectRoot` 或 `agent.session.header.cwd` 取项目根，越界/未知都拒绝 | `cwd 越出项目根…` / `给不出项目根…` |
 | 7 | `holder.agent` 全局回退可能串会话 | P0 | 删除 holder，parent 只取 `context.agent`，缺失即失败 | `parent 优先取当次 context.agent…` |

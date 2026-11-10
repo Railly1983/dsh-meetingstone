@@ -11,7 +11,8 @@
 # 1) provider 自带的 Codex 是 0.153.4，ChatGPT 账号下**只有 gpt-5.6-sol** 可用，必须在 provider 行写死。
 # 2) CodeBuddy 的 ACP 入口要「保持 stdin 打开」才能起来；用 node + bin 脚本启动，不能用 .cmd。
 # 3) 用户补丁里**新增**行必须包在 insert: 下；裸的 "- id: xxx" 只用于覆盖已存在的行。
-# 4) 只读档位由通道实例保证：要真正的只读角色，得单独配一个 permissionMode: 只读的 provider 行。
+# 4) 本项目不提供只读通道：宿主 subagent spec 没有权限字段，做不到绝对只读。
+#    provider 行的 permissionMode / permission 由 profile 自己配，插件不做承诺。
 
 # ── Codex 通道（provider 行覆盖：模型必须写这里）─────────────────────────────
 - id: subagent-codex
@@ -44,19 +45,16 @@
             kind: codex
             provider: codex
             model: gpt-5.6-sol
-            permissionPreset: project-write
 
           - channelId: ch-acp
             description: CodeBuddy · ACP（模型由 CodeBuddy 自己决定）
             kind: acp-cli
             provider: acp
-            permissionPreset: project-write
 
           - channelId: ch-inprocess
             description: DSH 原生子 Agent
             kind: in-process
             provider: spawn
-            permissionPreset: read-only
 
         roles:
           - roleId: role-tangtang
@@ -67,7 +65,6 @@
               你是团队领导，负责架构、战略、关键决策和最终质量把关。不要亲自做一线实现；
               给出方向、评审方案、验收结果，并对最终交付负责。
             channel: { kind: codex, channelId: ch-codex, model: gpt-5.6-sol }
-            permissionPreset: project-write
             timeoutMs: 3600000
 
           - roleId: role-wukong
@@ -78,7 +75,6 @@
               你是核心资深专家，负责解决疑难问题、审核验收和长时间任务。
               优先给出可验证的结论和证据，不做表面修改；复核他人结论时必须自己动手验证。
             channel: { kind: codex, channelId: ch-codex, model: gpt-5.6-sol }
-            permissionPreset: project-write
             timeoutMs: 3600000
 
           - roleId: role-sashi
@@ -89,7 +85,6 @@
               你是技术骨干，负责主力开发与批量执行。按任务要求执行，只改被授权的文件；
               每个结论都要附证据，拿不到就写未验证，不要猜。
             channel: { kind: acp-cli, channelId: ch-acp }
-            permissionPreset: project-write
             timeoutMs: 1800000
 
           - roleId: role-xiaobai
@@ -100,7 +95,6 @@
               你是小白，负责主力开发、文档整理、测试辅助和各类杂活。
               按任务要求执行，只改被授权的文件；不确定的先说明，不要编造。
             channel: { kind: acp-cli, channelId: ch-acp }
-            permissionPreset: project-write
             timeoutMs: 1800000
 
           - roleId: role-bajie
@@ -108,9 +102,8 @@
             aliases: [BJ, 调度]
             description: 技术主管（调度/监工/整合，一般由主 Agent 自己承担）
             channel: { kind: in-process, channelId: ch-inprocess }
-            permissionPreset: read-only
             timeoutMs: 1800000
 
         defaultRoleId: role-sashi
         dispatchNotes: 常规实现优先沙僧/小白；关键修改交悟空复核；重大取舍才找唐僧。
-        limits: { maxParallelReadonly: 3, serializeWrites: true }
+        limits: { serializeWrites: true }

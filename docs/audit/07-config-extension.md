@@ -514,7 +514,8 @@ const project = await loadProjectConfig(projectPath)  // { kind: 'absent' | 'ok'
 
 if (project.kind === 'invalid') return error(project.error)   // fail-closed
 const merged = mergeRoles(globalRoles, project.kind === 'ok' ? project.value : undefined)
-// merge 规则：项目 > 全局；permissionPreset 只能收紧；别名冲突直接报错
+// merge 规则：项目 > 全局；别名冲突直接报错
+// （permissionPreset 只能收紧的规则已于 2026-11-11 随只读通道移除，不要再实现）
 ```
 
 ### 5.3 失败时的降级行为

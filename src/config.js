@@ -7,10 +7,12 @@
  * - patch 是**整值替换**，不是深合并：用户覆盖时要把整个 config 写全
  * - 第一版**不做 UI**；没有 `.volatile()` 热编辑
  *
- * 设计取舍：这里只声明「形状 + 默认值」，**语义校验（别名冲突、权限放宽、模型一致性）
+ * 设计取舍：这里只声明「形状 + 默认值」，**语义校验（别名冲突、模型一致性）
  * 放在 src/roles/registry.js 与 src/dsh/adapter.js**，那些规则需要被单测覆盖。
+ *
+ * 本项目**不提供只读通道**：宿主 subagent spec 没有权限字段，做不到绝对只读，
+ * 所以配置里没有 permissionPreset，也不要再实现（2026-11-11 用户决策）。
  */
-import { PERMISSION_PRESETS } from './roles/registry.js'
 import { S, ValidationError, compile } from './schema.js'
 
 /** 通道类型。见 docs/开发计划.md §3.4。 */
@@ -21,13 +23,13 @@ export const CHANNEL_KINDS = /** @type {const} */ ([
   'claude-code',
 ])
 
-export { PERMISSION_PRESETS, ValidationError }
+export { ValidationError }
 
 /**
  * 一个「通道实例」：一行 provider 配置。
  *
  * 为什么需要它（DD7，2026-11-10 定）：
- * 官方子任务启动 spec 没有 model / reasoning / permission 字段，这三样只能在 **provider 行**上配。
+ * 官方子任务启动 spec 没有 model / reasoning 字段，这两样只能在 **provider 行**上配。
  * 角色只能**引用**一个实例并声明期望，由派单层校验一致性——不一致就拒绝，避免"配置成功、执行没采用"。
  */
 export const ChannelInstanceSchema = compile(
@@ -38,9 +40,6 @@ export const ChannelInstanceSchema = compile(
     provider: S.string().description('对应的 provider 名（acp / codex / claude-code / spawn ...）'),
     model: S.string().description('该 provider 行实际配置的模型（用于与角色声明比对）'),
     reasoning: S.string().description('该 provider 行实际配置的思考强度'),
-    permissionPreset: S.union([...PERMISSION_PRESETS])
-      .default('read-only')
-      .description('该 provider 行实际强制的权限档位；只读角色必须引用 read-only 的实例'),
   }),
 )
 
@@ -52,7 +51,7 @@ export const ChannelSchema = compile(
       .description(
         '执行通道：in-process=DSH 原生子 Agent；acp-cli=配 command 驱动任意 ACP CLI；codex/claude-code=官方 provider',
       ),
-    channelId: S.string().description('引用 channels 表里的通道实例 ID（推荐；模型与权限由实例承载）'),
+    channelId: S.string().description('引用 channels 表里的通道实例 ID（推荐；模型由实例承载）'),
     provider: S.string().description('通道需要的 provider 名，如 acp / codex / claude-code / spawn'),
     cli: S.string().description('本机平台标识（仅用于展示与探测，不代表实际执行路径）'),
     model: S.string().description('声明的模型 ID；必须与所引用的通道实例一致，否则派单被拒'),
@@ -69,9 +68,6 @@ export const RoleSchema = compile(
     description: S.string().default('').description('职责说明（人类可读）'),
     prompt: S.string().description('角色人设/工作守则；派单时作为前缀注入子 Agent 的提示词'),
     channel: ChannelSchema,
-    permissionPreset: S.union([...PERMISSION_PRESETS])
-      .default('read-only')
-      .description('权限档位；项目覆盖只能收紧不能放宽'),
     enabled: S.boolean().default(true).description('停用后不得派单'),
     fallbackRoleId: S.string().description('备用角色（第一版只提示，不自动接替）'),
     timeoutMs: S.number().default(30 * 60 * 1000).description('单次派单超时'),
@@ -84,16 +80,15 @@ export const Config = compile(
     roles: S.array(RoleSchema).default([]).description('全局角色表'),
     channels: S.array(ChannelInstanceSchema)
       .default([])
-      .description('通道实例表：一行 = 一个已配置的 provider（模型/强度/权限写在这里）'),
+      .description('通道实例表：一行 = 一个已配置的 provider（模型/强度写在这里）'),
     defaultRoleId: S.string().description('未指定角色时的默认角色'),
-    dispatchNotes: S.string().default('').description('辅助调度提示，不覆盖权限规则'),
+    dispatchNotes: S.string().default('').description('辅助调度提示，不改变通道与并发规则'),
     projectConfigFile: S.string()
       .default('.meetingstone.json')
       .description('项目级配置文件（相对项目根）'),
     limits: S.object({
-      maxParallelReadonly: S.number().default(3).description('只读任务并发上限'),
-      serializeWrites: S.boolean().default(true).description('同项目写任务串行'),
-    }).default({ maxParallelReadonly: 3, serializeWrites: true }),
+      serializeWrites: S.boolean().default(true).description('同项目任务串行'),
+    }).default({ serializeWrites: true }),
   }),
 )
 

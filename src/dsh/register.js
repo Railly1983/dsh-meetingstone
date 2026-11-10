@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * DSH 接线层 · 工具注册（阶段 2，第一版只注册三个工具，别多加）。
+ * DSH 接线层 · 工具注册（阶段 2）。
  *
  * deps 一律由调用方注入：`{ registry, dispatcher, probe }`。本模块不创建它们、
  * 不 import 它们的实现，保持可用假 ctx 单测。
@@ -42,10 +42,10 @@
  *   获得 args 校验与 canonical 值校验。本模块**不静态 import 宿主包**：本地测试环境
  *   只装了 `@deepseek-ai/schemastery`，静态 import 会让 `node --test` 直接失败。
  *   拿不到宿主包时**不再原样注册**（那会把未编译的参数字典当 JSON Schema，
- *   触发 DeepSeek `Invalid schema ... readOnly is not of type "boolean"`），
+ *   触发 DeepSeek `Invalid schema ... writeOnly is not of type "boolean"`），
  *   改用下面的 compileToolSpec 做等价编译；该降级路径不含运行时 args 校验。
  *   另：官方 defineTool 要求 object 根显式声明 `additionalProperties`，
- *   故三个 `output.schema` 都带 `additionalProperties: true`。
+ *   故所有 `output.schema` 都带 `additionalProperties: true`。
  * TODO(P2-approval): 审批应挂在 `meetingstone_dispatch.execute` 里、`dispatcher.dispatch()`
  *   **之前**：`const outcome = await ctx.approval.request({ agent, toolName:
  *   'meetingstone_dispatch', callId, reason, signal })`；只有 `outcome === 'allowed-once'`
@@ -112,8 +112,8 @@ export function normalizeProjectKey(value) {
  * 字段字典 → `{ type:'object', properties, required? }`；字段只保留
  * type/description/title/default/examples/enum/const，`required:true` 提升到根级。
  *
- * 为什么必须编译：未编译的字典把 `readOnly` 等字段名暴露在 JSON Schema 根上；
- * `readOnly` 是 JSON Schema 保留注解（值必须是 boolean），DeepSeek API 校验直接报
+ * 为什么必须编译：未编译的字典把字段名暴露在 JSON Schema 根上；
+ * `writeOnly` 等是 JSON Schema 保留注解（值必须是 boolean），DeepSeek API 校验直接报
  * `Invalid schema for function ... is not of type "boolean"` 并拒掉整轮请求。
  * @param {object} spec
  */
@@ -189,7 +189,7 @@ function assertHostReadySchema(definition) {
 }
 
 /**
- * 角色 → 对外视图。只挑契约要求的字段，外加两个「如实标注」的派生字段。
+ * 角色 → 对外视图。只挑契约要求的字段，外加几个「如实标注」的派生字段。
  * @param {object} role
  * @param {object} ctx
  */
@@ -199,7 +199,6 @@ function toRoleView(role, ctx) {
     name: role.name,
     aliases: Array.isArray(role.aliases) ? [...role.aliases] : [],
     channel: { ...role.channel },
-    permissionPreset: role.permissionPreset,
     enabled: role.enabled !== false,
     availability: availabilityOf(role, ctx),
     // 配置透明性：不返回 prompt 全文（可能很长），只给"有没有人设"和摘要
@@ -255,7 +254,7 @@ function toCliView(r) {
 }
 
 /**
- * 注册三个工具。
+ * 注册六个工具。
  *
  * @param {object} ctx 宿主 Context（需 `ctx.tools.register`）
  * @param {object} deps
@@ -333,7 +332,7 @@ export function registerTools(ctx, deps) {
     {
       name: TOOL_NAMES.LIST_ROLES,
       description:
-        '列出集合石已配置的角色（roleId/名称/别名/通道/权限档位/启用状态/可用性/来源/职责说明/是否配置人设）与注册表的错误；不派单、不探测本机 CLI。',
+        '列出集合石已配置的角色（roleId/名称/别名/通道/启用状态/可用性/来源/职责说明/是否配置人设）与注册表的错误；不派单、不探测本机 CLI。',
       parameters: {},
       output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
       async execute(_args, exec) {
@@ -351,12 +350,11 @@ export function registerTools(ctx, deps) {
     {
       name: TOOL_NAMES.DISPATCH,
       description:
-        '按角色把一次任务派发给宿主 provider。只读无法强制时会在 taskRef.readOnlyEnforced 明确标记 false；不会假装只读生效。',
+        '按角色把一次任务派发给宿主 provider。同一项目的派单默认串行；本项目不提供只读通道。',
       parameters: {
         role: { type: 'string', required: true, description: '角色名、别名或 roleId' },
         task: { type: 'string', required: true, description: '任务内容' },
         cwd: { type: 'string', description: '目标目录；调用方须先校验在项目内' },
-        readOnly: { type: 'boolean', description: '只收紧、不放宽；无法强制时会明确标记' },
         continuesFrom: {
           type: 'string',
           description:
@@ -397,7 +395,6 @@ export function registerTools(ctx, deps) {
           role: args?.role,
           task: args?.task,
           ...(typeof args?.cwd === 'string' ? { cwd: args.cwd } : {}),
-          ...(typeof args?.readOnly === 'boolean' ? { readOnly: args.readOnly } : {}),
           ...(continuation ? { continuation } : {}),
           // 并发计数按项目隔离：不传的话 dispatcher 会把所有项目算成 default（真机审计发现）。
           // 必须归一化：Windows 大小写不敏感、尾斜杠等价，否则 'D:/P' 与 'd:/p/' 会被当成两个项目而绕过串行。
@@ -407,7 +404,7 @@ export function registerTools(ctx, deps) {
             ? { context: { ...(agent ? { agent } : {}), ...(projectRoot ? { projectRoot } : {}) } }
             : {}),
         }
-        // 直接用 dispatcher 的返回（成功 { ok:true, taskRef, role, readOnly, ... } /
+        // 直接用 dispatcher 的返回（成功 { ok:true, taskRef, role, startedAt } /
         // 失败 { ok:false, code, message, ... }），不二次包装；
         // 唯一附加字段是项目配置的解析错误，避免"配置有错但悄悄忽略"。
         const result = await dispatcher.dispatch(input)

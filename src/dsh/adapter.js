@@ -53,18 +53,16 @@ import { composePromptWithContinuation } from '../context-replay.js'
  *    `run(job: JobHandle): JobHooks`，且 `owner?: SessionId`。见下方 TODO。
  *
  * ── 明确未解决 / 待运行验证（不许假装已解决） ───────────────────────────────
+ * **本项目不提供只读通道**（2026-11-11 用户决策）：官方 `SubagentActivationSpec` /
+ *   `SubagentStartRequest` 没有 permission / readOnly / sandbox 字段，provider 的
+ *   `permissionMode`（codex/claude-code）与 `permission`（acp）是**挂载时的行配置**
+ *   （10-provider-install.md §8.1），不是每次 start 的参数。既然做不到绝对只读，
+ *   就整个不提供——不要再实现 `readOnly` 参数或 `readOnlyEnforced` 标记。
  * TODO(P2-parent): `startActivation` 的 `parent: Agent` 是**必填**，但 dispatcher 的
- *   `start({ role, task, cwd, readOnly, timeoutMs })` 接口没有 Agent。本版通过
+ *   `start({ role, task, cwd, timeoutMs })` 接口没有 Agent。本版通过
  *   `createDshAdapter(ctx, { getParent })` 注入；未注入时抛错失败关闭，不编造 Agent。
  *   `docs/cookbook/adding-a-tool.md` 提到 `exec.agent`，但「它能直接当 `parent`」**未验证**，
  *   需由工具调用方（src/index.js，并行工作面）在真实会话里确认后注入。
- * TODO(P2-readonly): 官方 `SubagentActivationSpec` / `SubagentStartRequest` **没有**
- *   permission / readOnly / sandbox 字段；provider 的 `permissionMode`（codex/claude-code）
- *   与 `permission`（acp）是**挂载时的行配置**（10-provider-install.md §8.1），不是每次
- *   start 的参数。只读只能由 provider 行（通道实例）保证：实例声明 read-only 时
- *   返回 `readOnlyEnforced:true`，否则拒绝启动
- *   让上层显示「无保证」——这是 `docs/audit/08-sandbox.md` §「启动必须校验 backend 和实际
- *   限制，失败关闭 / 标无保证」的硬要求，绝不静默假装只读生效。
  * TODO(P2-jobs): 若将来改走后台 Job 路线，用上面的 `ctx.jobs.start(spec)`，把返回的
  *   `JobId` 放进 taskRef；取消信号用该 Job 的 task-owned signal + `job_kill` / owner
  *   disposal（`docs/cookbook/adding-a-tool.md` §「Long-running work」），**不是** `exec.signal`。
@@ -126,7 +124,6 @@ export function providerNameFor(role) {
  * @property {string} childId   `SubagentActivation.childId`（宿主 SessionId，可用
  *   `SubagentRuntime.listDescendants()` / `ctx.sessionQuery` 查询，出处 subagent.md）
  * @property {string} name      `SubagentActivation.name`（模型可见名）
- * @property {boolean} readOnlyEnforced 是否由通道实例保证了只读（仅当实例声明 read-only 时为 true）
  * @property {number} startedAt 本适配器记录的启动时间（Date.now()）
  */
 
@@ -205,8 +202,7 @@ function safeService(ctx, name) {
  *   通道实例表（来自插件 Config 的 `channels`）。模型/强度只能由它承载（DD7 方案 B）。
  * @param {() => number} [options.now]
  * @returns {{ canStart: (role: object) => { ok: boolean, reason?: string },
- *            start: (input: object) => Promise<{ taskRef: MeetingstoneTaskRef,
- *                                               readOnlyEnforced: boolean }>,
+ *            start: (input: object) => Promise<{ taskRef: MeetingstoneTaskRef }>,
  *            cancel: (taskRef: object) => Promise<void> }}
  */
 export function createDshAdapter(ctx, options = {}) {
@@ -322,7 +318,7 @@ export function createDshAdapter(ctx, options = {}) {
     if (typeof declaredProvider === 'string' && declaredProvider.trim() && declaredProvider.trim() !== instanceProvider) {
       throw new Error(
         `CHANNEL_MISMATCH: 角色声明的 provider 是 ${declaredProvider}，但通道实例 ${channelId} 实际是 ${instanceProvider}；` +
-          '两者必须一致，否则会出现「只读校验通过、实际跑可写通道」。已拒绝启动',
+          '两者必须一致，否则会出现「配置写的是一个通道、实际跑的是另一个」。已拒绝启动',
       )
     }
     const declaredKind = role?.channel?.kind
@@ -335,13 +331,9 @@ export function createDshAdapter(ctx, options = {}) {
   }
 
   async function start(input) {
-    const { role, task, cwd, readOnly, timeoutMs } = input ?? {}
-    // readOnly 在这里被显式「不消费」：官方 SubagentActivationSpec 没有 permission/readOnly
-    // 字段（TODO(P2-readonly)），绝不塞进 spec 假装生效；只在结果/taskRef 上标 false。
-    void readOnly
+    const { role, task, cwd, timeoutMs } = input ?? {}
     // 执行路由**必须**以引用的通道实例为准，不能只信角色自己的声明。
-    // 否则：角色写 channelId=只读实例 + provider=可写 provider，就会通过只读校验、
-    // 却实际跑可写通道（沙僧审计发现，真实安全漏洞）。
+    // 否则：角色写 channelId=A 实例 + provider=B，配置与实际执行的通道会不一致。
     const route = resolveRoute(role)
     const provider = route.provider
     const subagents = safeService(ctx, 'subagents')
@@ -368,34 +360,9 @@ export function createDshAdapter(ctx, options = {}) {
       )
     }
 
-    // 2.5 启动前置校验（P2 Gate 复核 P0）：三项约束不满足就**不启动**，而不是带病启动。
+    // 2.5 启动前置校验（P2 Gate 复核 P0）：约束不满足就**不启动**，而不是带病启动。
     //
-    // (a) 只读：官方 SubagentActivationSpec 没有 readonly/permission 字段（TODO(P2-readonly)），
-    //     无法强制时按 docs/audit/08-sandbox.md §8 的要求拒绝启动，而不是启动后标个 false。
-    //
-    // 只读由**通道实例**承载（与模型同理，DD7 方案 B 的延伸）：
-    // 宿主的启动 spec 没有 permission 字段，能不能只读取决于 provider 行怎么配。
-    // 角色是只读时必须引用一个声明 permissionPreset: 'read-only' 的实例，否则拒绝。
-    let readOnlyEnforced = false
-    if (readOnly === true) {
-      const channelId = role?.channel?.channelId
-      const instance = route.instance
-      if (!instance) {
-        throw new Error(
-          'READONLY_UNENFORCEABLE: 角色是只读档位，但没有引用任何通道实例，无法确认该通道真的只读。' +
-            '请在配置的 channels 里声明一个 permissionPreset: read-only 的实例，让角色用 channelId 引用它',
-        )
-      }
-      if (instance.permissionPreset !== 'read-only') {
-        throw new Error(
-          `READONLY_UNENFORCEABLE: 通道实例 ${channelId} 声明的权限是 ` +
-            `${instance.permissionPreset ?? '(未声明)'}，不是 read-only，无法保证只读；已拒绝启动`,
-        )
-      }
-      readOnlyEnforced = true
-    }
-
-    // (b) 模型/强度：官方 spec 不收 model/reasoning，模型只能由 **provider 行**承载（DD7 方案 B）。
+    // (a) 模型/强度：官方 spec 不收 model/reasoning，模型只能由 **provider 行**承载（DD7 方案 B）。
     //     角色的声明必须与所引用通道实例的配置一致；不一致就拒绝，避免"配置成功、执行没采用"。
     const declaredModel = role?.channel?.model
     const declaredReasoning = role?.channel?.reasoning
@@ -428,7 +395,7 @@ export function createDshAdapter(ctx, options = {}) {
       }
     }
 
-    // (c) 项目边界：cwd 必须在当前会话的项目根之内；拿不到项目根就失败关闭
+    // (b) 项目边界：cwd 必须在当前会话的项目根之内；拿不到项目根就失败关闭
     if (typeof cwd === 'string' && cwd) {
       const projectRoot = input?.context?.projectRoot ?? readProjectRoot(parent)
       if (!projectRoot) {
@@ -480,8 +447,6 @@ export function createDshAdapter(ctx, options = {}) {
       provider,
       childId,
       name: typeof activation.name === 'string' ? activation.name : childId,
-      // 只读是由通道实例保证的（实例声明 read-only 才允许走到这里）
-      readOnlyEnforced,
       startedAt: now(),
     }
 
@@ -550,8 +515,7 @@ export function createDshAdapter(ctx, options = {}) {
       )
     }
 
-    // readOnlyEnforced 同时在返回值与 taskRef 上标记，保证上层（dispatcher → tool）看得见。
-    return { taskRef, readOnlyEnforced }
+    return { taskRef }
   }
 
   /** @param {string} childId */

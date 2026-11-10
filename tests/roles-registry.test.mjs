@@ -6,8 +6,6 @@ import { ROLE_ID_PATTERN, isValidRoleId, normalizeAlias } from '../src/roles/ids
 import {
   createRegistry,
   DEFAULT_TIMEOUT_MS,
-  PERMISSION_PRESETS,
-  PERMISSION_RANK,
 } from '../src/roles/registry.js'
 
 /**
@@ -23,7 +21,6 @@ function makeRole(patch) {
     aliases: [],
     description: '主力开发',
     channel: { kind: 'acp-cli', provider: 'acp', cli: 'codebuddy', model: 'deepseek-v4.1-flash', reasoning: 'high' },
-    permissionPreset: 'project-write',
     enabled: true,
     fallbackRoleId: null,
     timeoutMs: 1800000,
@@ -213,7 +210,6 @@ test('项目覆盖：改模型生效，且未提到的字段保持全局值', ()
   const role = registry.resolve('role-sashi')
   assert.equal(role?.channel.model, 'hy4free')
   assert.equal(role?.channel.cli, 'codebuddy', '通道其余字段保留')
-  assert.equal(role?.permissionPreset, 'project-write', '未覆盖的权限保持')
   assert.deepEqual(registry.errors, [])
 })
 
@@ -254,56 +250,16 @@ test('项目覆盖指向不存在的角色：记 UNKNOWN_ROLE_ID，不影响其�
   assert.equal(registry.resolve('沙僧')?.roleId, 'role-sashi')
 })
 
-// ------------------------------------------------------------ 权限收紧
+// ------------------------------------------------------------ 已移除的 permissionPreset
 
-test('权限增大被拒：PERMISSION_WIDENED 且保留全局值', () => {
+test('permissionPreset 已移除：旧配置字段被忽略，不产生错误也不出现在角色上', () => {
   const registry = createRegistry({
     globalRoles: [makeRole({ permissionPreset: 'read-only' })],
     projectOverrides: { 'role-sashi': { permissionPreset: 'approval' } },
   })
 
-  const error = registry.errors.find((item) => item.code === 'PERMISSION_WIDENED')
-  assert.ok(error, '必须记录 PERMISSION_WIDENED')
-  assert.equal(error?.roleId, 'role-sashi')
-  assert.equal(registry.resolve('role-sashi')?.permissionPreset, 'read-only')
-})
-
-test('权限增大被拒：projectRoles 的字段级覆盖同样受约束', () => {
-  const registry = createRegistry({
-    globalRoles: [makeRole({ permissionPreset: 'project-write' })],
-    projectRoles: [{ roleId: 'role-sashi', permissionPreset: 'approval' }],
-  })
-
-  assert.ok(codes(registry.errors).includes('PERMISSION_WIDENED'))
-  assert.equal(registry.resolve('role-sashi')?.permissionPreset, 'project-write')
-})
-
-test('权限收紧允许：数值变小生效，且不产生错误', () => {
-  const registry = createRegistry({
-    globalRoles: [makeRole({ permissionPreset: 'project-write' })],
-    projectOverrides: { 'role-sashi': { permissionPreset: 'read-only' } },
-  })
-
-  assert.deepEqual(registry.errors, [])
-  assert.equal(registry.resolve('role-sashi')?.permissionPreset, 'read-only')
-})
-
-test('权限不变：允许且不报错', () => {
-  const registry = createRegistry({
-    globalRoles: [makeRole({ permissionPreset: 'restricted' })],
-    projectRoles: [{ roleId: 'role-sashi', permissionPreset: 'restricted' }],
-  })
-
-  assert.deepEqual(registry.errors, [])
-  assert.equal(registry.resolve('role-sashi')?.permissionPreset, 'restricted')
-})
-
-test('权限档位顺序常量与实现一致', () => {
-  assert.deepEqual(PERMISSION_PRESETS, ['read-only', 'restricted', 'project-write', 'approval'])
-  assert.equal(PERMISSION_RANK['read-only'], 0)
-  assert.ok(PERMISSION_RANK['read-only'] < PERMISSION_RANK.restricted)
-  assert.ok(PERMISSION_RANK.restricted < PERMISSION_RANK['project-write'])
-  assert.ok(PERMISSION_RANK['project-write'] < PERMISSION_RANK.approval)
+  assert.deepEqual(registry.errors, [], '旧配置不应再触发 PERMISSION_WIDENED')
+  assert.equal(Object.hasOwn(registry.resolve('role-sashi') ?? {}, 'permissionPreset'), false)
 })
 
 // ------------------------------------------------------------ enabled
@@ -353,7 +309,7 @@ test('list 返回副本：外部修改不污染注册表', () => {
   assert.equal(registry.resolve('SS')?.roleId, 'role-sashi')
 })
 
-test('默认值：缺省 permissionPreset/timeoutMs 走内置默认', () => {
+test('默认值：缺省 timeoutMs 走内置默认', () => {
   const registry = createRegistry({
     globalRoles: [
       {
@@ -365,8 +321,6 @@ test('默认值：缺省 permissionPreset/timeoutMs 走内置默认', () => {
   })
 
   const role = registry.resolve('role-min')
-  // 与 Config schema 默认值一致：没写权限档位时按最严处理（P2 Gate 复核要求统一语义）
-  assert.equal(role?.permissionPreset, 'read-only')
   assert.equal(role?.timeoutMs, DEFAULT_TIMEOUT_MS)
   assert.deepEqual(role?.aliases, [])
   assert.equal(role?.fallbackRoleId, null)
@@ -390,7 +344,6 @@ test('channelId 与 source 被正确保留', () => {
         name: 'A',
         aliases: [],
         channel: { kind: 'acp-cli', channelId: 'ch-1', model: 'm', reasoning: 'high' },
-        permissionPreset: 'project-write',
         enabled: true,
       },
     ],
@@ -401,7 +354,6 @@ test('channelId 与 source 被正确保留', () => {
         name: 'B',
         aliases: [],
         channel: { kind: 'in-process' },
-        permissionPreset: 'read-only',
         enabled: true,
       },
     ],

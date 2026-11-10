@@ -4,10 +4,9 @@
  *
  * 覆盖（任务 C）：
  * - canStart 在 provider 缺失时返回 ok:false 且带原因
- * - start 成功时把 role/task/cwd/readOnly 正确透传给假 subagents
- * - readOnly 无法强制执行时返回/标记 readOnlyEnforced:false
+ * - start 成功时把 role/task/cwd 正确透传给假 subagents
  * - start 抛错时向上抛（不吞）
- * - registerTools 用假 ctx.tools.register 验证注册了三个工具、名字正确、描述非空
+ * - registerTools 用假 ctx.tools.register 验证注册了六个工具、名字正确、描述非空
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -82,7 +81,6 @@ const role = (over = {}) => ({
   name: '沙僧',
   aliases: ['SS'],
   channel: { kind: 'acp-cli' },
-  permissionPreset: 'read-only',
   enabled: true,
   timeoutMs: 1000,
   ...over,
@@ -171,7 +169,6 @@ test('start 成功：把 role/task/cwd 透传给宿主 startActivation', async (
     role: role(),
     task: '改个函数',
     cwd: 'D:/MeetingStone',
-    readOnly: false,
     timeoutMs: 0, // 不装定时器，避免测试进程被挂住
     // 项目根由宿主上下文给出；cwd 必须在其中（P2 Gate P0 的前置校验）
     context: { projectRoot: 'D:/MeetingStone' },
@@ -199,26 +196,12 @@ test('start 成功：把 role/task/cwd 透传给宿主 startActivation', async (
   assert.doesNotThrow(() => JSON.stringify(res.taskRef))
 })
 
-test('readOnly 无法强制时**拒绝启动**，而不是带病启动（P2 Gate P0）', async () => {
-  const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { acp: {} } }))
-  await assert.rejects(
-    () => adapter.start({ role: role(), task: '审一下', readOnly: true, timeoutMs: 0 }),
-    /READONLY_UNENFORCEABLE/,
-  )
-  // 关键：拒绝必须在调用宿主之前发生，不能先起任务再标「无保证」
-  assert.equal(
-    subagents.calls.filter((c) => c.method === 'startActivation').length,
-    0,
-    '前置校验失败时不得触达 startActivation',
-  )
-})
-
 test('start 抛错时向上抛，不吞、不降级成成功', async () => {
   const { adapter } = makeAdapter(
     fakeSubagents({ providers: { acp: {} }, startError: new Error('spawn ENOENT') }),
   )
   await assert.rejects(
-    () => adapter.start({ role: role(), task: 'x', readOnly: false, timeoutMs: 0 }),
+    () => adapter.start({ role: role(), task: 'x', timeoutMs: 0 }),
     /spawn ENOENT/,
   )
 })
@@ -226,7 +209,7 @@ test('start 抛错时向上抛，不吞、不降级成成功', async () => {
 test('start 失败关闭：provider 未注册时抛 PROVIDER_UNAVAILABLE', async () => {
   const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: {} }))
   await assert.rejects(
-    () => adapter.start({ role: role(), task: 'x', readOnly: false, timeoutMs: 0 }),
+    () => adapter.start({ role: role(), task: 'x', timeoutMs: 0 }),
     /PROVIDER_UNAVAILABLE/,
   )
   assert.equal(
@@ -240,7 +223,7 @@ test('start 失败关闭：未注入 getParent（拿不到必填的 parent Agent
   const { ctx } = fakeCtx({ subagents: fakeSubagents({ providers: { acp: {} } }) })
   const adapter = createDshAdapter(ctx, { now: () => 1 })
   await assert.rejects(
-    () => adapter.start({ role: role(), task: 'x', readOnly: false, timeoutMs: 0 }),
+    () => adapter.start({ role: role(), task: 'x', timeoutMs: 0 }),
     /PARENT_AGENT_UNAVAILABLE/,
   )
 })
@@ -250,14 +233,14 @@ test('startActivation 返回无效 activation 时抛 ADAPTER_FAILED', async () =
     fakeSubagents({ providers: { acp: {} }, activation: { name: 'agent-1' } }),
   )
   await assert.rejects(
-    () => adapter.start({ role: role(), task: 'x', readOnly: false, timeoutMs: 0 }),
+    () => adapter.start({ role: role(), task: 'x', timeoutMs: 0 }),
     /ADAPTER_FAILED/,
   )
 })
 
 test('cancel：abort 信号并调用宿主 activation.dispose()；重复取消无害', async () => {
   const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { acp: {} } }))
-  const res = await adapter.start({ role: role(), task: 'x', readOnly: false, timeoutMs: 0 })
+  const res = await adapter.start({ role: role(), task: 'x', timeoutMs: 0 })
   await adapter.cancel(res.taskRef)
   assert.equal(subagents.disposed.length, 1)
   // 再取消一次：内部句柄已清理，不应重复 dispose
@@ -278,7 +261,6 @@ function makeDeps(over = {}) {
           name: '沙僧',
           aliases: ['SS'],
           channel: { kind: 'acp-cli' },
-          permissionPreset: 'read-only',
           enabled: true,
         },
       ],
@@ -287,7 +269,7 @@ function makeDeps(over = {}) {
     dispatcher: {
       async dispatch(req) {
         dispatchCalls.push(req)
-        return { ok: true, taskRef: { kind: 'subagent-activation' }, role: '沙僧', readOnly: false }
+        return { ok: true, taskRef: { kind: 'subagent-activation' }, role: '沙僧' }
       },
     },
     probe: {
@@ -387,7 +369,6 @@ test('meetingstone_list_roles：返回角色视图 + registry.errors，来源与
   const r = out.roles[0]
   assert.equal(r.roleId, 'role-sashi')
   assert.deepEqual(r.aliases, ['SS'])
-  assert.equal(r.permissionPreset, 'read-only')
   assert.equal(r.enabled, true)
   assert.equal(r.source, 'unknown', 'registry 未暴露来源，不得编造')
   assert.equal(r.availability, 'unknown', '没有 ctx.subagents 查询能力，不得假装可用')
@@ -398,7 +379,7 @@ test('meetingstone_dispatch：直接返回 dispatcher 的结果，并把入参�
   const { ctx, registered } = fakeCtx()
   const { deps, dispatchCalls } = makeDeps()
   registerTools(ctx, deps)
-  const out = await registered[1].execute({ role: 'SS', task: '改个函数', cwd: 'D:/x', readOnly: true })
+  const out = await registered[1].execute({ role: 'SS', task: '改个函数', cwd: 'D:/x' })
   assert.equal(out.ok, true)
   // dispatcher 还会收到 registry（按项目上下文注入的注册表），这里只校验透传的业务字段
   assert.deepEqual(
@@ -406,10 +387,10 @@ test('meetingstone_dispatch：直接返回 dispatcher 的结果，并把入参�
       role: dispatchCalls[0].role,
       task: dispatchCalls[0].task,
       cwd: dispatchCalls[0].cwd,
-      readOnly: dispatchCalls[0].readOnly,
     },
-    { role: 'SS', task: '改个函数', cwd: 'D:/x', readOnly: true },
+    { role: 'SS', task: '改个函数', cwd: 'D:/x' },
   )
+  assert.equal(Object.hasOwn(dispatchCalls[0], 'readOnly'), false, '只读通道已移除，不得再传 readOnly')
   assert.ok(dispatchCalls[0].registry, '必须把按项目解析出的注册表传给 dispatcher')
 })
 
@@ -455,7 +436,6 @@ test('角色指定了 model → 拒绝启动（配置成功不等于执行采用
       adapter.start({
         role: role({ channel: { kind: 'acp-cli', model: 'deepseek-v4.1-flash' } }),
         task: 'x',
-        readOnly: false,
         timeoutMs: 0,
       }),
     /MODEL_UNSUPPORTED/,
@@ -475,7 +455,6 @@ test('cwd 越出项目根 → 拒绝启动', async () => {
         role: role(),
         task: 'x',
         cwd: 'D:/OtherProject',
-        readOnly: false,
         timeoutMs: 0,
         context: { projectRoot: 'D:/MeetingStone' },
       }),
@@ -492,7 +471,6 @@ test('给不出项目根却指定了 cwd → 失败关闭', async () => {
         role: role(),
         task: 'x',
         cwd: 'D:/MeetingStone',
-        readOnly: false,
         timeoutMs: 0,
       }),
     /PROJECT_ROOT_UNKNOWN/,
@@ -505,7 +483,6 @@ test('parent 优先取当次 context.agent，不回退成上个会话', async ()
   await adapter.start({
     role: role(),
     task: 'x',
-    readOnly: false,
     timeoutMs: 0,
     context: { agent: agentA },
   })
@@ -519,7 +496,7 @@ test('context 没有 agent 时失败关闭（不做全局回退）', async () =>
     getParent: undefined,
   })
   await assert.rejects(
-    () => adapter.start({ role: role(), task: 'x', readOnly: false, timeoutMs: 0 }),
+    () => adapter.start({ role: role(), task: 'x', timeoutMs: 0 }),
     /PARENT_AGENT_UNAVAILABLE/,
   )
   assert.equal(subagents.calls.filter((c) => c.method === 'startActivation').length, 0)
@@ -538,7 +515,6 @@ test('模型一致：角色声明 == 通道实例配置 → 允许启动', async
       channel: { kind: 'acp-cli', channelId: 'ch-acp-flash', model: 'deepseek-v4.1-flash' },
     }),
     task: 'x',
-    readOnly: false,
     timeoutMs: 0,
     context: { projectRoot: 'D:/MeetingStone' },
   })
@@ -560,7 +536,6 @@ test('模型不一致：角色声明与通道实例冲突 → 拒绝并说明差
           channel: { kind: 'acp-cli', channelId: 'ch-acp-flash', model: 'deepseek-v4.1-flash' },
         }),
         task: 'x',
-        readOnly: false,
         timeoutMs: 0,
         context: { projectRoot: 'D:/MeetingStone' },
       }),
@@ -576,7 +551,6 @@ test('引用了不存在的通道实例 → 拒绝', async () => {
       adapter.start({
         role: role({ channel: { kind: 'acp-cli', channelId: 'ch-missing', model: 'm' } }),
         task: 'x',
-        readOnly: false,
         timeoutMs: 0,
         context: { projectRoot: 'D:/MeetingStone' },
       }),
@@ -599,7 +573,6 @@ test('配置 → registry → adapter：channelId 保住，模型一致性校验
         name: '沙僧',
         aliases: ['SS'],
         channel: { kind: 'acp-cli', channelId: 'ch-acp-flash', model: 'deepseek-v4.1-flash' },
-        permissionPreset: 'project-write',
         enabled: true,
       },
     ],
@@ -617,7 +590,6 @@ test('配置 → registry → adapter：channelId 保住，模型一致性校验
   const res = await adapter.start({
     role,
     task: 'x',
-    readOnly: false,
     timeoutMs: 0,
     context: {
       projectRoot: 'D:/MeetingStone',
@@ -626,58 +598,6 @@ test('配置 → registry → adapter：channelId 保住，模型一致性校验
     },
   })
   assert.ok(res.taskRef, '模型与实例一致时应启动成功')
-})
-
-// ─── 只读档位由通道实例承载（DD7 延伸） ─────────────────────────────────────
-
-test('只读角色 + 实例声明 read-only → 允许启动，且 readOnlyEnforced=true', async () => {
-  const { adapter, subagents } = makeAdapter(
-    fakeSubagents({ providers: { acp: {} } }),
-    { channels: [{ channelId: 'ch-ro', kind: 'acp-cli', provider: 'acp', permissionPreset: 'read-only' }] },
-  )
-  const res = await adapter.start({
-    role: role({ channel: { kind: 'acp-cli', channelId: 'ch-ro' }, permissionPreset: 'read-only' }),
-    task: '审一下',
-    readOnly: true,
-    timeoutMs: 0,
-    context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
-  })
-  assert.equal(res.readOnlyEnforced, true)
-  assert.equal(res.taskRef.readOnlyEnforced, true, '上层能看出只读确实落实')
-})
-
-test('只读角色 + 实例不是 read-only → 拒绝启动', async () => {
-  const { adapter, subagents } = makeAdapter(
-    fakeSubagents({ providers: { acp: {} } }),
-    { channels: [{ channelId: 'ch-rw', kind: 'acp-cli', provider: 'acp', permissionPreset: 'project-write' }] },
-  )
-  await assert.rejects(
-    () =>
-      adapter.start({
-        role: role({ channel: { kind: 'acp-cli', channelId: 'ch-rw' }, permissionPreset: 'read-only' }),
-        task: '审一下',
-        readOnly: true,
-        timeoutMs: 0,
-        context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
-      }),
-    /READONLY_UNENFORCEABLE.*project-write/,
-  )
-  assert.equal(subagents.calls.filter((c) => c.method === 'startActivation').length, 0)
-})
-
-test('只读角色未引用通道实例 → 拒绝启动（无法确认）', async () => {
-  const { adapter } = makeAdapter(fakeSubagents({ providers: { acp: {} } }), { channels: [] })
-  await assert.rejects(
-    () =>
-      adapter.start({
-        role: role({ permissionPreset: 'read-only' }),
-        task: 'x',
-        readOnly: true,
-        timeoutMs: 0,
-        context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
-      }),
-    /READONLY_UNENFORCEABLE/,
-  )
 })
 
 // ─── 角色人设注入（替代 CLIWorker 的 persona prompt） ─────────────────────────
@@ -691,7 +611,6 @@ test('派单提示词包含角色身份与人设', async () => {
       channel: { kind: 'acp-cli' },
     }),
     task: '改个函数',
-    readOnly: false,
     timeoutMs: 0,
     context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
   })
@@ -707,7 +626,6 @@ test('没有 prompt 时回退用 description；两者都没有则只发任务', 
   await adapter.start({
     role: role({ name: '甲', description: '负责文档', channel: { kind: 'acp-cli' } }),
     task: '写 README',
-    readOnly: false,
     timeoutMs: 0,
     context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
   })
@@ -717,7 +635,6 @@ test('没有 prompt 时回退用 description；两者都没有则只发任务', 
   await adapter.start({
     role: role({ name: '', description: '', channel: { kind: 'acp-cli' } }),
     task: '裸任务',
-    readOnly: false,
     timeoutMs: 0,
     context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
   })
@@ -747,7 +664,6 @@ test('落盘钩子：终态记录的 result 字段必须有值（不能只传 ou
   await adapter.start({
     role: role({ channel: { kind: 'acp-cli' } }),
     task: 'x',
-    readOnly: false,
     timeoutMs: 0,
     context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
   })
@@ -761,13 +677,13 @@ test('落盘钩子：终态记录的 result 字段必须有值（不能只传 ou
   assert.equal(finished[0].role, 'role-sashi')
 })
 
-test('安全回归：channelId 指向只读实例但 provider 声明可写 → 拒绝（不能只读校验通过跑可写通道）', async () => {
+test('安全回归：channelId 指向的实例与角色声明的 provider 不一致 → 拒绝', async () => {
   const subagents = fakeSubagents({ providers: { acp: {}, 'acp-ro': {}, codex: {} } })
   const adapter = createDshAdapter(
     { subagents, effect: null },
     {
       channels: [
-        { channelId: 'ch-acp-ro', kind: 'acp-cli', provider: 'acp-ro', permissionPreset: 'read-only' },
+        { channelId: 'ch-acp-ro', kind: 'acp-cli', provider: 'acp-ro' },
       ],
     },
   )
@@ -776,15 +692,13 @@ test('安全回归：channelId 指向只读实例但 provider 声明可写 → �
       adapter.start({
         role: role({
           channel: { kind: 'acp-cli', channelId: 'ch-acp-ro', provider: 'acp' },
-          permissionPreset: 'read-only',
         }),
         task: 'review',
-        readOnly: true,
         timeoutMs: 0,
         context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
       }),
     /CHANNEL_MISMATCH/,
-    '声明 provider 与实例不一致必须拒绝（否则只读是假的）',
+    '声明 provider 与实例不一致必须拒绝，否则配置与实际执行的通道不一致',
   )
 })
 
@@ -792,12 +706,11 @@ test('安全回归：执行的 provider 取自通道实例，而不是角色声�
   const subagents = fakeSubagents({ providers: { 'codex-ro': {} } })
   const adapter = createDshAdapter(
     { subagents, effect: null },
-    { channels: [{ channelId: 'ch-ro', kind: 'codex', provider: 'codex-ro', permissionPreset: 'read-only' }] },
+    { channels: [{ channelId: 'ch-ro', kind: 'codex', provider: 'codex-ro' }] },
   )
   await adapter.start({
-    role: role({ channel: { kind: 'codex', channelId: 'ch-ro' }, permissionPreset: 'read-only' }),
+    role: role({ channel: { kind: 'codex', channelId: 'ch-ro' } }),
     task: 'review',
-    readOnly: true,
     timeoutMs: 0,
     context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
   })
@@ -809,7 +722,7 @@ test('安全回归：canStart 对实例与声明不一致给出可诊断原因',
   const subagents = fakeSubagents({ providers: { 'acp-ro': {} } })
   const adapter = createDshAdapter(
     { subagents, effect: null },
-    { channels: [{ channelId: 'ch-ro', kind: 'acp-cli', provider: 'acp-ro', permissionPreset: 'read-only' }] },
+    { channels: [{ channelId: 'ch-ro', kind: 'acp-cli', provider: 'acp-ro' }] },
   )
   const res = adapter.canStart(role({ channel: { kind: 'acp-cli', channelId: 'ch-ro', provider: 'acp' } }))
   assert.equal(res.ok, false)

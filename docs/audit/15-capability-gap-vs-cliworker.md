@@ -1,5 +1,8 @@
 # 15 · 与 CLIWorker 的能力对照（决定何时可以关停它）
 
+> **2026-11-11 移除声明**：只读通道已彻底移除（宿主 subagent spec 无权限字段，做不到绝对只读）。
+> 本文中相关行保留为历史对照，**不要再实现**。
+
 > 目的：用户计划在本插件稳定后关停 `dsh-cliworker-now`。本文只对照**功能与使用方式**，
 > 不涉及也不复制其任何实现（clean-room，见 `docs/CLEAN_ROOM.md`）。
 > 日期：2026-11-10
@@ -11,11 +14,11 @@
 | 按"角色/别名"派活 | ✅ 有 persona | ✅ 角色 + 别名 + 冲突检测 |
 | 外部 CLI 通道 | ✅ codex/claude/codebuddy/kimi… | ✅ **codex 已端到端跑通**；in-process 已跑通 |
 | 指定模型/强度 | ✅ 每个 worker 选 | ✅ 由通道实例承载（DD7），派单校验一致 |
-| 只读约束 | ✅ read-only | ✅ 只读角色必须引用 `permissionPreset: read-only` 的实例，否则拒绝启动 |
+| 只读约束 | ✅ read-only | ❌ **已移除，不要再实现**：宿主 subagent spec 无权限字段，做不到绝对只读 |
 | 任务状态查询 | ✅ status | ✅ `meetingstone_get_task`（running/completed/failed/cancelled） |
 | 取消任务 | ✅ stop | ✅ `meetingstone_cancel_task` |
 | 结果回读 | ✅ 读输出 | ✅ `get_task` 返回真实输出（已验 PONG） |
-| 并发纪律 | 由插件内部管理 | ✅ 写串行/只读限流/按项目隔离（真机验证） |
+| 并发纪律 | 由插件内部管理 | ✅ 同项目串行/按项目隔离（只读限流已随只读通道移除） |
 | 本机 CLI 状态 | ✅ | ✅ 多源探测（含商店应用 Appx 路径） |
 | 配置位置 | worker 配置/项目文件 | ✅ 插件 Config + 项目 `.meetingstone.json`（热读取） |
 

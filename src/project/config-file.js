@@ -12,10 +12,10 @@
  *   "version": 1,
  *   "defaultRoleId": "role-sashi",
  *   "roles": [ ... 项目新增角色 ... ],
- *   "roleOverrides": { "role-sashi": { "model": "...", "permissionPreset": "read-only" } },
+ *   "roleOverrides": { "role-sashi": { "model": "..." } },
  *   "dispatchNotes": "...",
  *   "projectRules": ["..."],
- *   "limits": { "maxParallelReadonly": 2, "serializeWrites": true }
+ *   "limits": { "serializeWrites": true }
  * }
  */
 
@@ -47,7 +47,7 @@ export const PROJECT_CONFIG_ERRORS = Object.freeze({
  * @property {Record<string, object>} roleOverrides
  * @property {string} dispatchNotes
  * @property {string[]} projectRules
- * @property {{ maxParallelReadonly?: number, serializeWrites?: boolean }} limits
+ * @property {{ serializeWrites?: boolean }} limits
  */
 
 /** 空配置（文件不存在或不可用时使用）。 */
@@ -216,15 +216,6 @@ export function normalizeProjectConfig(raw) {
   if (input.limits !== undefined) {
     if (input.limits && typeof input.limits === 'object' && !Array.isArray(input.limits)) {
       const limits = /** @type {Record<string, unknown>} */ (input.limits)
-      if (typeof limits.maxParallelReadonly === 'number' && limits.maxParallelReadonly >= 1) {
-        config.limits.maxParallelReadonly = Math.floor(limits.maxParallelReadonly)
-      } else if (limits.maxParallelReadonly !== undefined) {
-        errors.push({
-          code: PROJECT_CONFIG_ERRORS.BAD_FIELD,
-          field: 'limits.maxParallelReadonly',
-          message: 'maxParallelReadonly 必须是 ≥1 的数字，已忽略',
-        })
-      }
       if (typeof limits.serializeWrites === 'boolean') {
         config.limits.serializeWrites = limits.serializeWrites
       } else if (limits.serializeWrites !== undefined) {

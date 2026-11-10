@@ -9,14 +9,15 @@
  *
  * 合并规则（docs/开发计划.md §7.1）：
  * - 项目 > 全局；同 roleId 视为同一角色的字段级覆盖；
- * - permissionPreset 只能收紧不能放宽；
  * - 别名（含 name）跨角色唯一，冲突时降级为不可解析，而不是让整张表失败。
+ *
+ * 本项目**不提供只读通道**：宿主 subagent spec 没有权限字段，做不到绝对只读，
+ * 所以角色上不再有 permissionPreset，也不要再实现（2026-11-11 用户决策）。
  */
 
 import { isValidRoleId, normalizeAlias } from './ids.js'
 
 /**
- * @typedef {'read-only' | 'restricted' | 'project-write' | 'approval'} PermissionPreset
  * @typedef {'in-process' | 'acp-cli' | 'codex' | 'claude-code'} ChannelKind
  */
 
@@ -42,7 +43,6 @@ import { isValidRoleId, normalizeAlias } from './ids.js'
  * @property {string} description
  * @property {string} [prompt] 人设/工作守则；派单时作为前缀注入
  * @property {RoleChannel} channel
- * @property {PermissionPreset} permissionPreset
  * @property {boolean} enabled
  * @property {string | null} fallbackRoleId
  * @property {number} timeoutMs
@@ -53,8 +53,8 @@ import { isValidRoleId, normalizeAlias } from './ids.js'
 /**
  * 注册表错误码。前 5 个是 P2-01 要求必须覆盖的。
  *
- * @typedef {'INVALID_ROLE_ID' | 'DUPLICATE_ROLE_ID' | 'ALIAS_CONFLICT' | 'PERMISSION_WIDENED' | 'MISSING_NAME'
- *   | 'INVALID_ROLE' | 'INVALID_PERMISSION_PRESET' | 'INVALID_CHANNEL' | 'INVALID_CHANNEL_KIND'
+ * @typedef {'INVALID_ROLE_ID' | 'DUPLICATE_ROLE_ID' | 'ALIAS_CONFLICT' | 'MISSING_NAME'
+ *   | 'INVALID_ROLE' | 'INVALID_CHANNEL' | 'INVALID_CHANNEL_KIND'
  *   | 'UNKNOWN_ROLE_ID' | 'INVALID_OVERRIDE'} RegistryErrorCode
  */
 
@@ -80,21 +80,6 @@ import { isValidRoleId, normalizeAlias } from './ids.js'
  * @property {RegistryError[]} errors 合并与校验过程中累积的错误（只增不减）
  */
 
-/** 权限档位由严到宽；数组顺序即宽松度顺序。 */
-export const PERMISSION_PRESETS = Object.freeze(
-  /** @type {PermissionPreset[]} */ (['read-only', 'restricted', 'project-write', 'approval']),
-)
-
-/** 宽松度数值：越小越严。项目覆盖只允许把数值改小或不变。 */
-export const PERMISSION_RANK = Object.freeze(
-  /** @type {Record<string, number>} */ ({
-    'read-only': 0,
-    restricted: 1,
-    'project-write': 2,
-    approval: 3,
-  }),
-)
-
 /** 默认超时：30 分钟（与计划 §7.1 的示例值一致）。 */
 export const DEFAULT_TIMEOUT_MS = 1_800_000
 
@@ -113,10 +98,8 @@ export const ERROR_CODES = Object.freeze({
   INVALID_ROLE_ID: 'INVALID_ROLE_ID',
   DUPLICATE_ROLE_ID: 'DUPLICATE_ROLE_ID',
   ALIAS_CONFLICT: 'ALIAS_CONFLICT',
-  PERMISSION_WIDENED: 'PERMISSION_WIDENED',
   MISSING_NAME: 'MISSING_NAME',
   INVALID_ROLE: 'INVALID_ROLE',
-  INVALID_PERMISSION_PRESET: 'INVALID_PERMISSION_PRESET',
   INVALID_CHANNEL: 'INVALID_CHANNEL',
   INVALID_CHANNEL_KIND: 'INVALID_CHANNEL_KIND',
   UNKNOWN_ROLE_ID: 'UNKNOWN_ROLE_ID',
@@ -202,27 +185,6 @@ function readChannel(value, errors, roleId, opts = {}) {
 }
 
 /**
- * 校验权限档位。返回 null 表示「无效，调用方应跳过该字段」。
- *
- * @param {unknown} value
- * @param {RegistryError[]} errors
- * @param {string} roleId
- * @returns {PermissionPreset | null}
- */
-function readPermissionPreset(value, errors, roleId) {
-  if (typeof value === 'string' && PERMISSION_PRESETS.includes(/** @type {PermissionPreset} */ (value))) {
-    return /** @type {PermissionPreset} */ (value)
-  }
-  errors.push({
-    code: 'INVALID_PERMISSION_PRESET',
-    roleId,
-    field: 'permissionPreset',
-    message: `角色 ${roleId} 的 permissionPreset 非法：${String(value)}`,
-  })
-  return null
-}
-
-/**
  * 把一个原始条目读成完整角色；任何硬错误都会让该条目被丢弃。
  *
  * @param {unknown} raw
@@ -254,14 +216,7 @@ function readRole(raw, errors) {
     return null
   }
 
-  // permissionPreset 缺省时给 read-only：与 Config schema 的默认值一致，
-  // 且「没写清楚就别放开」比「默认可写」安全（docs/audit/08-sandbox.md §8）。
-  const preset =
-    input.permissionPreset === undefined
-      ? /** @type {PermissionPreset} */ ('read-only')
-      : readPermissionPreset(input.permissionPreset, errors, id) ??
-        /** @type {PermissionPreset} */ ('read-only')
-
+  // permissionPreset 已随只读通道一起移除（2026-11-11）：未知字段按 schema 约定忽略。
   const timeout = Number(input.timeoutMs)
 
   return {
@@ -272,7 +227,6 @@ function readRole(raw, errors) {
     ...(typeof input.prompt === 'string' && input.prompt.trim() ? { prompt: input.prompt } : {}),
     channel: readChannel(input.channel, errors, id),
     source: /** @type {const} */ ('global'),
-    permissionPreset: preset,
     enabled: input.enabled !== false,
     fallbackRoleId:
       typeof input.fallbackRoleId === 'string' && input.fallbackRoleId.trim()
@@ -284,8 +238,6 @@ function readRole(raw, errors) {
 
 /**
  * 在已有角色上做字段级覆盖；返回新对象，不改入参。
- *
- * 关键规则：permissionPreset 只允许收紧（rank 变小或不变），放宽则整字段拒绝。
  *
  * @param {Role} base
  * @param {unknown} patch
@@ -333,24 +285,7 @@ function mergeRole(base, patch, errors) {
     next.channel = { ...next.channel, ...overridden }
   }
 
-  if (Object.hasOwn(input, 'permissionPreset')) {
-    const preset = readPermissionPreset(input.permissionPreset, errors, base.roleId)
-    if (preset !== null) {
-      const current = PERMISSION_RANK[next.permissionPreset] ?? 0
-      const wanted = PERMISSION_RANK[preset]
-      if (wanted > current) {
-        errors.push({
-          code: 'PERMISSION_WIDENED',
-          roleId: base.roleId,
-          field: 'permissionPreset',
-          message: `角色 ${base.roleId} 的权限从 ${next.permissionPreset} 放宽到 ${preset} 被拒绝`,
-        })
-      } else {
-        next.permissionPreset = preset
-      }
-    }
-  }
-
+  // 未知字段（含已移除的 permissionPreset）按 schema 约定忽略，旧配置不会阻断派单。
   if (Object.hasOwn(input, 'enabled') && typeof input.enabled === 'boolean') {
     next.enabled = input.enabled
   }
@@ -438,7 +373,7 @@ function buildAliasIndex(roles, byId, errors, conflicted, conflicts) {
  * 创建角色注册表。
  *
  * 合并顺序：globalRoles（全量校验）→ projectRoles（同名 = 字段级覆盖，新 id = 新增）
- * → projectOverrides（按 roleId 的字段级覆盖）。后两步同样受「权限只能收紧」约束。
+ * → projectOverrides（按 roleId 的字段级覆盖）。
  *
  * @param {object} [options]
  * @param {unknown[]} [options.globalRoles]

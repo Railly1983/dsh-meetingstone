@@ -15,7 +15,6 @@
     dispatchNotes: "常规实现优先沙僧；关键改动交悟空复核。"
     projectConfigFile: .meetingstone.json
     limits:
-      maxParallelReadonly: 3
       serializeWrites: true
 ```
 
@@ -32,12 +31,11 @@
 | `provider` | string | | provider 名（`spawn` / `acp` / `codex` / `claude-code`），省略时按 kind 推断 |
 | `model` | string | | 该 provider 行实际使用的模型 |
 | `reasoning` | string | | 该 provider 行实际的思考强度 |
-| `permissionPreset` | 同角色四档 | `read-only` | 该 provider 行**实际强制**的权限档位；只读角色必须引用 `read-only` 的实例 |
 | `description` | string | | 人类可读说明 |
 
 **为什么要这层**（DD7 方案 B）：角色不能凭空指定模型。角色的声明必须与所引用实例一致，否则派单被拒（`MODEL_UNSUPPORTED`）——我们宁可报错，也不做"配置成功、执行没采用"。
 
-**同样适用于权限**：宿主的启动 spec 没有 permission 字段，只读能不能落实取决于 provider 行怎么配。只读角色必须引用 `permissionPreset: read-only` 的实例，否则 `READONLY_UNENFORCEABLE`。
+> **本项目不提供只读通道**：宿主 subagent 启动 spec 没有权限字段，做不到绝对只读。因此这里没有 `permissionPreset`，角色上也没有；不要再实现（2026-11-11 用户决策）。
 
 ## 3. `roles`（角色表）
 
@@ -50,7 +48,6 @@
 | `channel.kind` | 枚举 | `in-process` | 通道类型 |
 | `channel.channelId` | string | | 引用通道实例 |
 | `channel.model` / `channel.reasoning` | string | | 声明期望值，必须与实例一致 |
-| `permissionPreset` | `read-only`\|`restricted`\|`project-write`\|`approval` | `read-only` | 越权放宽会被拒 |
 | `enabled` | boolean | `true` | 停用后不得派单 |
 | `fallbackRoleId` | string | | 预留（第一版只提示，不自动接替） |
 | `timeoutMs` | number | `1800000` | 单次派单超时 |
@@ -63,20 +60,21 @@
 {
   "version": 1,
   "defaultRoleId": "role-sashi",
-  "roles": [{ "roleId": "role-scout", "name": "斥候", "channel": { "kind": "in-process" }, "permissionPreset": "read-only" }],
-  "roleOverrides": { "role-sashi": { "permissionPreset": "read-only" } },
+  "roles": [{ "roleId": "role-scout", "name": "斥候", "channel": { "kind": "in-process" } }],
+  "roleOverrides": { "role-sashi": { "description": "本项目里负责主力开发" } },
   "dispatchNotes": "只改 src/；动 docs/ 前先问。",
   "projectRules": ["未经确认不得修改数据库迁移文件"],
-  "limits": { "maxParallelReadonly": 2, "serializeWrites": true }
+  "limits": { "serializeWrites": true }
 }
 ```
 
 **合并规则**
 
 1. 项目 > 全局（`roleOverrides` 按 roleId 打补丁；`roles` 里同 roleId 也是覆盖）。
-2. `permissionPreset` **只能收紧**：`read-only(0) < restricted(1) < project-write(2) < approval(3)`，改大被拒并记 `PERMISSION_WIDENED`。
-3. `channel` 覆盖是**字段级合并**；但模型/强度仍要与实例一致。
-4. 文件坏了（JSON 非法、版本不认识、字段类型错）→ **降级为空配置 + 把错误暴露在工具返回里**，绝不打断派单链路。
+2. `channel` 覆盖是**字段级合并**；但模型/强度仍要与实例一致。
+3. 文件坏了（JSON 非法、版本不认识、字段类型错）→ **降级为空配置 + 把错误暴露在工具返回里**，绝不打断派单链路。
+
+> `permissionPreset` 已随只读通道移除；旧配置里写了也会被忽略，不报错、不阻断派单。
 
 ## 5. 解析与校验
 
@@ -86,12 +84,10 @@
 | 派单到歧义名字 | `ROLE_AMBIGUOUS`，提示里列出可选 roleId |
 | 派单到停用角色 | `ROLE_DISABLED` |
 | provider 未注册 | `PROVIDER_UNAVAILABLE`，附带原因 |
-| 只读无法强制 | `READONLY_UNENFORCEABLE`（拒绝启动，不是启动后标 false） |
 | 模型与实例不一致 | `MODEL_UNSUPPORTED`，给出双方取值 |
 | `cwd` 越出项目根 | `PATH_OUTSIDE_PROJECT` |
 | 拿不到项目根却指定 `cwd` | `PROJECT_ROOT_UNKNOWN` |
-| 同项目已有写任务 | `WRITE_CONFLICT`（`serializeWrites` 默认开） |
-| 只读并发超限 | `READONLY_LIMIT` |
+| 同项目已有任务 | `WRITE_CONFLICT`（`serializeWrites` 默认开） |
 
 ## 6. 示例
 

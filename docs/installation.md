@@ -113,14 +113,13 @@ dependencies:
           channelId: ch-acp-flash        # 引用上面的通道实例
           model: deepseek-v4.1-flash     # 声明期望值，必须与实例一致
           reasoning: high
-        permissionPreset: project-write  # read-only | restricted | project-write | approval
         enabled: true
     defaultRoleId: role-sashi
 ```
 
 **为什么模型写在通道实例上**：DSH 的子任务启动 spec 不接收 model/reasoning，模型只能在 provider 行上配置。角色写了 model 就必须引用一个配置了同一模型的 `channelId`，否则派单会被拒绝（`MODEL_UNSUPPORTED`）——我们宁可报错，也不做"配置成功、执行没采用"的假象。
 
-> ⚠️ `project-write` 档位在 Windows 上目前是 **partial enforcement**（目录外普通文件被拒，但硬链接可越界）。别把它理解成"绝对只读"。详见 `docs/audit/08-sandbox.md`。
+> **本项目不提供只读通道**：宿主 subagent 启动 spec 没有权限字段，做不到绝对只读，所以没有 `permissionPreset` / `readOnly` 参数，也不要再实现。实际权限由 provider 行（如 Codex 的 `permissionMode`）决定；Windows 上仍有边界（目录外硬链接可能越界），别把它理解成"绝对只读"。详见 `docs/audit/08-sandbox.md`。
 
 ## 安装前必做（发布门禁 · 2026-11-10 事故后新增）
 

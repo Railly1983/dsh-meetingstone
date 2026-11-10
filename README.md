@@ -6,7 +6,7 @@ DeepSeek Harness 多 CLI 智能体角色管理与派单插件。
 
 ---
 
-> **状态（2026-11-10）**：阶段 1（骨架）与阶段 2（角色映射 + 派单核心）已完成；插件已在本机 `desktop` profile 加载，三个工具在真实会话中可用。
+> **状态（2026-11-10）**：阶段 1（骨架）与阶段 2（角色映射 + 派单核心）已完成；插件已在本机 `desktop` profile 加载，六个工具在真实会话中可用。
 > 外部 CLI 派单需额外安装官方 provider bundle（见 [安装文档](docs/installation.md)）。
 > 第一版**无 UI**，配置改 profile 的 `cordis.patch.yml`，重启生效。
 
@@ -30,7 +30,7 @@ DSH 有完整的任务、子智能体、权限和统计体系，但"怎么把活
 
 1. **复用优先**：团队、项目、任务、子智能体、权限、用量统计全部用 DSH 原生的，不重建。
 2. **只补真缺口**：官方明确不做"本机 CLI 探测"，这是我们唯一的核心自研（`src/cli/`）。
-3. **不伪造**：模型/强度/用量只显示真实拿到的值；无法强制的权限**拒绝启动**而不是标个标记。
+3. **不伪造**：模型/强度/用量只显示真实拿到的值；做不到的能力就不提供——**本项目不提供只读通道**（宿主 subagent spec 没有权限字段），不标假标记。
 4. **薄**：不自研任务队列、不自建数据库、不做独立工作台、不自研 CLI 启动器。
 
 ## 快速开始
@@ -53,7 +53,7 @@ npm run verify
 
 ```powershell
 $node = "$env:USERPROFILE\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
-& $node --test "tests/**/*.test.mjs"     # 139 项
+& $node --test "tests/**/*.test.mjs"     # 170 项
 & $node scripts/verify-host-schema.mjs    # 工具 schema 契约门禁
 & $node scripts/verify-manifest.mjs       # manifest 自检
 ```
@@ -67,7 +67,7 @@ $node = "$env:USERPROFILE\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\nod
 | [开发计划](docs/开发计划.md) | 环境基线、架构、阶段路线、风险登记、决策记录 |
 | [任务清单](docs/任务清单.md) | WBS 与验收状态 |
 | [安装/卸载](docs/installation.md) | 门禁、安装、provider、配置、回滚 |
-| [安全与权限](docs/security.md) | 四档权限能承诺到什么程度（实测边界） |
+| [安全与权限](docs/security.md) | 权限边界与"不提供只读通道"的原因（实测边界） |
 | [兼容性矩阵](docs/compatibility.md) | 宿主/provider/本机 CLI 的实测组合 |
 | [事故复盘](docs/audit/13-incident-tool-schema.md) | 2026-11-10 工具 schema 事故与门禁 |
 | [阶段 0 审计](docs/audit/00-summary.md) | A/B/C 分类、最小自研范围、9 条被推翻的结论 |

@@ -1,27 +1,25 @@
 # 安全与权限边界
 
 > 本文只写**实测支持**的内容。所有结论都指向 `docs/audit/` 里的证据，不做超出证据的承诺。
-> 最后更新：2026-11-10
+> 最后更新：2026-11-11
 
 ## 1. 一句话
 
-本插件不自己造权限体系，而是把 DSH 原生的权限/审批/沙箱**显式**用起来；哪个档位无法真正强制，就报错或不承诺，不靠 Prompt 约束。
+本插件不自己造权限体系。**本项目不提供只读通道**：宿主 subagent 启动 spec 没有权限字段，做不到绝对只读，所以整个功能已移除，不做半吊子承诺。实际权限由 provider 行（profile 配置）决定，不由插件保证。
 
-## 2. 四档权限能诚实承诺到什么程度
+## 2. 为什么不提供只读通道
 
-| 档位 | 能承诺 | 不能承诺 | 依据 |
-| --- | --- | --- | --- |
-| `read-only` | **条件化**：在带原生只读沙箱的通道上，受控命令的普通文件写入会被拒 | 完整 CLI 初始化、插件代码、已登录模型执行、CodeBuddy 通道、网络边界都未验证 | `audit/08-sandbox.md` §3、§8 |
-| `restricted` | 启动前的 executable/argv 与受控工具名单可作为独立设计范围 | 外部 CLI 内部工具、后代执行命令及其解释器行为未验收 | 同上 §8 |
-| `project-write` | 普通写入限制在所选工作区内 | ⚠️ Windows 当前 `enforcement="partial"`：**目录外硬链接 alias 写入已实测成功**。"绝不修改项目外路径"不承诺 | 同上 §4.3、§8 |
-| `approval` | 对启动、提权、额外目录、凭据注入分别设批准点 | 真实 session 的审批往返未验证；工作进程内部每次工具调用是否再批准需单独集成 | 同上 §8 |
+官方 `SubagentActivationSpec` / `SubagentStartRequest` **没有** permission / readOnly / sandbox 字段；provider 的 `permissionMode`（codex/claude-code）与 `permission`（acp）是**挂载时的行配置**（`audit/10-provider-install.md` §8.1），不是每次 start 的参数。插件既无法在派单时强制只读，也无法验证 provider 行真的限制了写入。
 
-**关键实现细节**：官方子任务启动 spec **没有** permission/readOnly 字段，所以只读只能由 **provider 行（通道实例）** 保证。
+2026-11-11 用户决策：**彻底移除只读通道**——`readOnly` 参数、`readOnlyEnforced`、`permissionPreset`、`READONLY_*` 错误码与只读限流全部删除。**不要再实现**。
 
-现行规则：
-- 角色是 `read-only` → 必须引用 `permissionPreset: read-only` 的通道实例，否则 `READONLY_UNENFORCEABLE` 拒绝启动；
-- 实例声明只读且启动成功 → `taskRef.readOnlyEnforced = true`；
-- 没有实例、或实例不是只读 → **拒绝启动**，绝不启动后标 `readOnlyEnforced:false` 假装生效（2026-11-10 P2 Gate 结论）。
+派单时插件仍能保证的边界：
+
+- `cwd` 必须落在当前会话的项目根之内，否则 `PATH_OUTSIDE_PROJECT` 拒绝；拿不到项目根则失败关闭；
+- provider 未注册、parent 缺失、模型与通道实例不一致 → 拒绝启动；
+- 同一项目的派单默认串行（`serializeWrites`），避免并发写互相踩踏。
+
+权限本身请按 provider 行配置并自行验收；`audit/08-sandbox.md` 记录的实测边界仍然适用（例如 Windows 上目录外硬链接可能绕过工作区限制）。
 
 ## 3. 凭据与环境变量
 

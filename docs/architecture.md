@@ -9,7 +9,7 @@ src/index.js            装配层：读 Config → 建注册表/探测/适配器
 ├── src/config.js       Config schema（内置零依赖校验，见 src/schema.js）+ 通道实例表
 ├── src/roles/          C1 角色注册表（纯逻辑）
 │   ├── ids.js          roleId 规则、别名规范化
-│   └── registry.js     全局 + 项目合并、别名冲突降级、权限只收紧
+│   └── registry.js     全局 + 项目合并、别名冲突降级
 ├── src/project/        项目级配置（纯解析 + IO 缓存）
 │   ├── config-file.js  .meetingstone.json 解析，永不抛异常
 │   └── load.js         按 mtime 缓存读取
@@ -17,10 +17,10 @@ src/index.js            装配层：读 Config → 建注册表/探测/适配器
 │   ├── probe.js        多源编排 + 版本试跑 + 缓存（纯逻辑，可注入）
 │   └── resolvers.js    PATH / Appx / npm 全局 / 常见目录（IO）
 ├── src/dispatch/       C3 派单编排（纯逻辑 + 可注入适配器）
-│   └── dispatcher.js   角色解析、只读收紧、并发纪律、失败回滚
+│   └── dispatcher.js   角色解析、并发纪律、失败回滚
 └── src/dsh/            DSH 接线层
     ├── adapter.js      ctx.subagents 适配器（provider 查询、startActivation、parent）
-    └── register.js     三个工具的注册与返回值整形
+    └── register.js     六个工具的注册与返回值整形
 ```
 
 ## 2. 一次派单的数据流
@@ -33,13 +33,11 @@ src/index.js            装配层：读 Config → 建注册表/探测/适配器
       → createRegistry(全局 + 项目覆盖)          ← 每次调用重建，避免脏配置
   → dispatcher.dispatch({...})
       1. 解析角色（歧义只挡名称/别名，roleId 仍可用）
-      2. 只读判定只允许更严
-      3. adapter.canStart → ctx.subagents.getProvider(name) 真实查询
-      4. **先占并发槽**（写任务串行 / 只读限流），失败回滚
-      5. adapter.start({ role, task, cwd, readOnly, context, onFinish })
+      2. adapter.canStart → ctx.subagents.getProvider(name) 真实查询
+      3. **先占并发槽**（同项目派单默认串行），失败回滚
+      4. adapter.start({ role, task, cwd, context, onFinish })
   → adapter.start 前置校验（任一不满足即拒，不触达宿主）
       - parent 必须来自当次 exec.agent
-      - readOnly 无法强制 → READONLY_UNENFORCEABLE
       - model/reasoning 必须与引用的通道实例一致 → 否则 MODEL_UNSUPPORTED
       - cwd 必须在项目根内 → 否则 PATH_OUTSIDE_PROJECT / PROJECT_ROOT_UNKNOWN
   → ctx.subagents.startActivation(spec) → 返回 taskRef(childId/provider/name)
@@ -52,7 +50,7 @@ src/index.js            装配层：读 Config → 建注册表/探测/适配器
 | --- | --- | --- |
 | 1 | 不自研任务队列/会话/数据库 | 宿主已有；重造只会与原生状态不一致（`audit/00-summary.md` A 类） |
 | 2 | 不自研 CLI 启动器 | CodeBuddy 无头入口在非 TTY 下必崩；官方 provider 不解析本机 PATH（`audit/03` F2） |
-| 3 | 权限无法强制就**拒绝启动** | 2026-11-10 的 P2 Gate 结论；"标个标记然后照跑"是假安全（`audit/12`） |
+| 3 | 不提供做不到的权限承诺 | **本项目不提供只读通道**：宿主 subagent spec 没有权限字段，做不到绝对只读就整个移除，不标假标记（`audit/12`，2026-11-11 决策） |
 | 4 | 拿不到的服务/值一律 `unknown` 或报错 | 不猜、不伪造（探测结果、provider 可用性、版本） |
 | 5 | 注册工具前必须产出合法 JSON Schema | 一个坏 `parameters` 能让整个 profile 所有会话 400（`audit/13`） |
 | 6 | 纯逻辑层不 import 宿主包 | 保证 `node --test` 可测；宿主依赖只出现在 `src/dsh/` |

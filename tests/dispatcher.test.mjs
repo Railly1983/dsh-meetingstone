@@ -10,7 +10,6 @@ const role = (over = {}) => ({
   name: '沙僧',
   aliases: ['SS'],
   channel: { kind: 'acp-cli', cli: 'codebuddy' },
-  permissionPreset: 'project-write',
   enabled: true,
   timeoutMs: 1000,
   ...over,
@@ -18,7 +17,7 @@ const role = (over = {}) => ({
 
 const roles = [
   role(),
-  role({ roleId: 'role-reviewer', name: '审核员', aliases: ['RV'], permissionPreset: 'read-only' }),
+  role({ roleId: 'role-reviewer', name: '审核员', aliases: ['RV'] }),
   role({ roleId: 'role-off', name: '停用的', aliases: ['OFF'], enabled: false }),
 ]
 
@@ -52,7 +51,6 @@ test('正常派单：返回 taskRef 与角色', async () => {
   assert.ok(res.taskRef)
   assert.equal(res.role.roleId, 'role-sashi')
   assert.equal(adapter.calls.length, 1)
-  assert.equal(adapter.calls[0].readOnly, false)
   assert.equal(adapter.calls[0].timeoutMs, 1000)
 })
 
@@ -77,21 +75,6 @@ test('空任务/空角色被拒', async () => {
   assert.equal(adapter.calls.length, 0, '校验失败不应触达适配器')
 })
 
-test('只读角色自动走只读；写角色不能借 readOnly 反向放宽', async () => {
-  const { dispatcher, adapter } = makeDispatcher()
-
-  await dispatcher.dispatch({ role: 'RV', task: '审一下' })
-  assert.equal(adapter.calls[0].readOnly, true, '只读角色必须只读')
-
-  // 写角色显式 readOnly=true → 往更严方向，允许
-  await dispatcher.dispatch({ role: 'SS', task: '看看', readOnly: true })
-  assert.equal(adapter.calls[1].readOnly, true)
-
-  // 只读角色无法被 readOnly=false 放宽（这里传 false 应仍然只读）
-  await dispatcher.dispatch({ role: 'RV', task: '再审', readOnly: false })
-  assert.equal(adapter.calls[2].readOnly, true, '不得放宽只读角色')
-})
-
 test('写任务串行：第二个写任务被拒，释放后可继续', async () => {
   const { dispatcher, adapter } = makeDispatcher()
   const first = await dispatcher.dispatch({ role: 'SS', task: '写 A' })
@@ -105,22 +88,6 @@ test('写任务串行：第二个写任务被拒，释放后可继续', async ()
   dispatcher.release(first.taskRef)
   const third = await dispatcher.dispatch({ role: 'SS', task: '写 C' })
   assert.equal(third.ok, true)
-})
-
-test('只读任务可并行，直到上限', async () => {
-  const { dispatcher, adapter } = makeDispatcher({}, { maxParallelReadonly: 2 })
-  const a = await dispatcher.dispatch({ role: 'RV', task: '1' })
-  const b = await dispatcher.dispatch({ role: 'RV', task: '2' })
-  assert.equal(a.ok && b.ok, true)
-
-  const c = await dispatcher.dispatch({ role: 'RV', task: '3' })
-  assert.equal(c.ok, false)
-  assert.equal(c.code, DISPATCH_ERRORS.READONLY_LIMIT)
-
-  dispatcher.release(a.taskRef)
-  const d = await dispatcher.dispatch({ role: 'RV', task: '4' })
-  assert.equal(d.ok, true)
-  assert.equal(adapter.calls.length, 3)
 })
 
 test('provider 不可用时给出可诊断错误，而不是抛异常', async () => {
@@ -161,16 +128,14 @@ test('适配器失败（throw 或没返回 taskRef）都转成 ADAPTER_FAILED', 
 })
 
 test('stats 反映活跃任务，释放后归零', async () => {
-  const { dispatcher } = makeDispatcher({}, { maxParallelReadonly: 3 })
-  const r1 = await dispatcher.dispatch({ role: 'SS', task: 'w' })
-  const r2 = await dispatcher.dispatch({ role: 'RV', task: 'r1' })
-  const r3 = await dispatcher.dispatch({ role: 'RV', task: 'r2' })
+  const { dispatcher } = makeDispatcher({}, { serializeWrites: false })
+  const r1 = await dispatcher.dispatch({ role: 'SS', task: 'w1' })
+  const r2 = await dispatcher.dispatch({ role: 'RV', task: 'w2' })
+  const r3 = await dispatcher.dispatch({ role: 'RV', task: 'w3' })
   assert.deepEqual(dispatcher.stats(), {
     active: 3,
-    writes: 1,
-    readonly: 2,
-    maxParallelReadonly: 3,
-    serializeWrites: true,
+    writes: 3,
+    serializeWrites: false,
   })
   dispatcher.release(r1.taskRef)
   dispatcher.release(r2.taskRef)
@@ -251,7 +216,7 @@ test('onFinish 幂等：重复回调不会误删别人的槽位', async () => {
       return { taskRef: { id: `t${captured.length}` } }
     },
   }
-  const dispatcher = createDispatcher({ registry, adapter, limits: { maxParallelReadonly: 2 } })
+  const dispatcher = createDispatcher({ registry, adapter, limits: { serializeWrites: false } })
 
   const a = await dispatcher.dispatch({ role: 'RV', task: 'r1' })
   const b = await dispatcher.dispatch({ role: 'RV', task: 'r2' })
@@ -300,8 +265,8 @@ test('启动失败要回滚槽位，不能把项目永久锁死', async () => {
 
 test('歧义角色：名字被挡，但 roleId 仍然可用（纠错提示不能是空话）', async () => {
   const conflicting = [
-    { roleId: 'role-a', name: '同名', aliases: [], channel: { kind: 'in-process' }, permissionPreset: 'read-only', enabled: true },
-    { roleId: 'role-b', name: '同名', aliases: [], channel: { kind: 'in-process' }, permissionPreset: 'read-only', enabled: true },
+    { roleId: 'role-a', name: '同名', aliases: [], channel: { kind: 'in-process' }, enabled: true },
+    { roleId: 'role-b', name: '同名', aliases: [], channel: { kind: 'in-process' }, enabled: true },
   ]
   const registry = createRegistry({ globalRoles: conflicting })
   const adapter = { start: async () => ({ taskRef: { id: 't' } }) }
@@ -317,18 +282,18 @@ test('歧义角色：名字被挡，但 roleId 仍然可用（纠错提示不能
 
 // ─── 适配器错误码透传（调用方可以分支处理） ─────────────────────────────────
 
-test('适配器前置校验错误码透传：READONLY_UNENFORCEABLE 不再被包成 ADAPTER_FAILED', async () => {
+test('适配器前置校验错误码透传：MODEL_UNSUPPORTED 不被包成 ADAPTER_FAILED', async () => {
   const registry = createRegistry({ globalRoles: roles })
   const adapter = {
     start: async () => {
-      throw new Error('READONLY_UNENFORCEABLE: 角色是只读档位，但没有引用任何通道实例')
+      throw new Error('MODEL_UNSUPPORTED: 角色声明了 model，但没有指定 channelId')
     },
   }
   const dispatcher = createDispatcher({ registry, adapter })
   const res = await dispatcher.dispatch({ role: 'SS', task: 'x' })
   assert.equal(res.ok, false)
-  assert.equal(res.code, 'READONLY_UNENFORCEABLE')
-  assert.match(res.message, /READONLY_UNENFORCEABLE/)
+  assert.equal(res.code, 'MODEL_UNSUPPORTED')
+  assert.match(res.message, /MODEL_UNSUPPORTED/)
 })
 
 test('未知适配器错误仍归为 ADAPTER_FAILED', async () => {

@@ -55,7 +55,7 @@ test('正常读取：解析出项目角色与覆盖', () => {
       text: JSON.stringify({
         version: 1,
         roles: [{ roleId: 'role-scout', name: '斥候' }],
-        roleOverrides: { 'role-sashi': { permissionPreset: 'read-only' } },
+        roleOverrides: { 'role-sashi': { description: '项目内改为复核' } },
       }),
       mtimeMs: 5,
     },
@@ -65,7 +65,7 @@ test('正常读取：解析出项目角色与覆盖', () => {
   assert.equal(res.exists, true)
   assert.deepEqual(res.errors, [])
   assert.equal(res.config.roles.length, 1)
-  assert.deepEqual(res.config.roleOverrides, { 'role-sashi': { permissionPreset: 'read-only' } })
+  assert.deepEqual(res.config.roleOverrides, { 'role-sashi': { description: '项目内改为复核' } })
 })
 
 test('坏 JSON → 降级为空配置 + INVALID_JSON，不抛异常', () => {

@@ -53,17 +53,16 @@ test('完整配置按字段解析', () => {
     version: 1,
     defaultRoleId: ' role-sashi ',
     roles: [{ roleId: 'role-scout', name: '斥候' }],
-    roleOverrides: { 'role-sashi': { permissionPreset: 'read-only' } },
+    roleOverrides: { 'role-sashi': { description: '项目内改为复核' } },
     dispatchNotes: '关键改动交悟空复核',
     projectRules: ['未经确认不得改迁移文件', 123, null],
-    limits: { maxParallelReadonly: 2.7, serializeWrites: false },
+    limits: { serializeWrites: false },
   }
   const { config, errors } = normalizeProjectConfig(raw)
   assert.equal(config.defaultRoleId, 'role-sashi', 'defaultRoleId 应 trim')
   assert.equal(config.roles.length, 1)
-  assert.deepEqual(config.roleOverrides, { 'role-sashi': { permissionPreset: 'read-only' } })
+  assert.deepEqual(config.roleOverrides, { 'role-sashi': { description: '项目内改为复核' } })
   assert.deepEqual(config.projectRules, ['未经确认不得改迁移文件'], '非字符串项丢弃')
-  assert.equal(config.limits.maxParallelReadonly, 2, '取整')
   assert.equal(config.limits.serializeWrites, false)
   assert.deepEqual(codes(errors), [PROJECT_CONFIG_ERRORS.BAD_FIELD], 'projectRules 丢弃项要报出来')
 })
@@ -112,13 +111,11 @@ test('roleOverrides 里非对象值被跳过', () => {
   assert.equal(errors[0].field, 'roleOverrides.role-b')
 })
 
-test('limits 边界：maxParallelReadonly 必须 ≥1', () => {
-  const zero = normalizeProjectConfig({ limits: { maxParallelReadonly: 0 } })
-  assert.equal(zero.config.limits.maxParallelReadonly, undefined)
-  assert.equal(zero.errors.length, 1)
-
-  const negative = normalizeProjectConfig({ limits: { maxParallelReadonly: -3 } })
-  assert.equal(negative.config.limits.maxParallelReadonly, undefined)
+test('limits 边界：serializeWrites 必须是布尔值', () => {
+  const bad = normalizeProjectConfig({ limits: { serializeWrites: 'yes' } })
+  assert.equal(bad.config.limits.serializeWrites, undefined)
+  assert.equal(bad.errors.length, 1)
+  assert.equal(bad.errors[0].field, 'limits.serializeWrites')
 })
 
 test('toRegistryInput：只搬移，不解释语义', () => {
@@ -126,20 +123,20 @@ test('toRegistryInput：只搬移，不解释语义', () => {
   const project = normalizeProjectConfig({
     defaultRoleId: 'role-a',
     roles: [{ roleId: 'role-b', name: 'B' }],
-    roleOverrides: { 'role-a': { permissionPreset: 'read-only' } },
+    roleOverrides: { 'role-a': { description: '项目内改名' } },
   }).config
 
   const input = toRegistryInput(globalConfig, project)
   assert.deepEqual(input.globalRoles.map((r) => r.roleId), ['role-a'])
   assert.deepEqual(input.projectRoles.map((r) => r.roleId), ['role-b'])
-  assert.deepEqual(input.projectOverrides, { 'role-a': { permissionPreset: 'read-only' } })
+  assert.deepEqual(input.projectOverrides, { 'role-a': { description: '项目内改名' } })
 
   // 缺省输入不炸
   const empty = toRegistryInput(undefined, undefined)
   assert.deepEqual(empty, { globalRoles: [], projectRoles: [], projectOverrides: {} })
 })
 
-test('项目配置 + 注册表端到端：项目只能收紧权限', async () => {
+test('项目配置 + 注册表端到端：项目覆盖字段生效', async () => {
   const { createRegistry } = await import('../src/roles/registry.js')
   const globalConfig = {
     roles: [
@@ -148,7 +145,6 @@ test('项目配置 + 注册表端到端：项目只能收紧权限', async () =>
         name: '沙僧',
         aliases: ['SS'],
         channel: { kind: 'acp-cli' },
-        permissionPreset: 'project-write',
         enabled: true,
       },
     ],
@@ -157,7 +153,7 @@ test('项目配置 + 注册表端到端：项目只能收紧权限', async () =>
     roleOverrides: {
       // 注意：channel 是整值替换（与 DSH patch 语义一致），覆盖时必须重述 kind
       'role-sashi': {
-        permissionPreset: 'read-only',
+        description: '项目内改为复核',
         channel: { kind: 'acp-cli', model: 'deepseek-v4.1-flash' },
       },
     },
@@ -166,15 +162,15 @@ test('项目配置 + 注册表端到端：项目只能收紧权限', async () =>
   const registry = createRegistry(toRegistryInput(globalConfig, project))
   const role = registry.resolve('SS')
   assert.ok(role)
-  assert.equal(role.permissionPreset, 'read-only')
+  assert.equal(role.description, '项目内改为复核')
   assert.equal(role.channel.kind, 'acp-cli', '重述的 kind 生效')
   assert.equal(role.channel.model, 'deepseek-v4.1-flash')
 
-  // 放宽会被拒，并保留全局值
-  const widened = normalizeProjectConfig({
+  // 已移除的 permissionPreset 字段被忽略，不报错、不产出
+  const legacy = normalizeProjectConfig({
     roleOverrides: { 'role-sashi': { permissionPreset: 'approval' } },
   }).config
-  const reg2 = createRegistry(toRegistryInput(globalConfig, widened))
-  assert.equal(reg2.get('role-sashi').permissionPreset, 'project-write')
-  assert.ok(reg2.errors.some((e) => e.code === 'PERMISSION_WIDENED'))
+  const reg2 = createRegistry(toRegistryInput(globalConfig, legacy))
+  assert.equal(Object.hasOwn(reg2.get('role-sashi'), 'permissionPreset'), false)
+  assert.deepEqual(reg2.errors, [])
 })

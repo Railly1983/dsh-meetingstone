@@ -1,5 +1,9 @@
 # 审计证据目录（阶段 0）
 
+> **2026-11-11 移除声明**：本目录中出现的 `readOnly` / `readOnlyEnforced` / `permissionPreset` /
+> `READONLY_UNENFORCEABLE` / `READONLY_LIMIT` / "只读档位"均为**历史记录**。只读通道已因
+> "宿主 subagent spec 无权限字段、做不到绝对只读"而彻底移除，**不要再实现**。
+
 本目录存放阶段 0 的**实测证据**，不是设计文档。规矩：
 
 1. 每个结论后面必须跟"怎么得到的"：命令、输出片段、版本号、日期。

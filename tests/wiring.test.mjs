@@ -1,7 +1,7 @@
 // @ts-check
 /**
  * 装配层的集成测试：用假 ctx 走一遍 apply()，确认
- *  配置 → 注册表 → 派单器 → 三个工具 真的接上了。
+ *  配置 → 注册表 → 派单器 → 六个工具 真的接上了。
  *
  * 这里不碰 DSH 运行时；真实 provider 行为的验收在阶段 2 的真机联调里做。
  */
@@ -44,7 +44,6 @@ const config = {
       name: '沙僧',
       aliases: ['SS'],
       channel: { kind: 'acp-cli', cli: 'codebuddy' },
-      permissionPreset: 'project-write',
       enabled: true,
     },
     {
@@ -52,7 +51,6 @@ const config = {
       name: '审核员',
       aliases: ['RV'],
       channel: { kind: 'in-process' },
-      permissionPreset: 'read-only',
       enabled: true,
     },
   ],
@@ -82,10 +80,10 @@ test('apply 注册六个工具且不抛错（即便宿主没有 subagents）', (
   }
 })
 
-test('注册给宿主的工具 schema 是合法 JSON Schema（不撞 readOnly 保留注解）', () => {
+test('注册给宿主的工具 schema 是合法 JSON Schema（不撞保留注解）', () => {
   const { ctx, tools } = makeCtx()
   apply(ctx, config)
-  // 回归：原样注册未编译的参数字典时，根上的 readOnly 会被 DeepSeek 当成
+  // 回归：原样注册未编译的参数字典时，根上的字段名会被 DeepSeek 当成
   // JSON Schema 保留注解（要求 boolean），整轮请求被 400 INVALID_REQUEST 拒掉。
   for (const t of tools) {
     assert.equal(t.parameters.type, 'object', `${t.name}: parameters 未编译成 object 根`)
@@ -103,7 +101,7 @@ test('注册给宿主的工具 schema 是合法 JSON Schema（不撞 readOnly �
     }
   }
   const dispatch = tools.find((t) => t.name === 'meetingstone_dispatch')
-  assert.equal(dispatch.parameters.properties.readOnly.type, 'boolean')
+  assert.equal(Object.hasOwn(dispatch.parameters.properties, 'readOnly'), false, '只读通道已移除')
   assert.deepEqual(dispatch.parameters.required, ['role', 'task'])
   assert.deepEqual(dispatch.parameters.properties.role.type, 'string')
 })
@@ -127,8 +125,9 @@ test('注入宿主 defineTool 时传的是作者 spec 字典（不双重编译�
     defineTool: fakeDefineTool,
   })
   assert.equal(seen.length, 6)
-  assert.equal(Object.hasOwn(seen[1].parameters, 'readOnly'), true, '应把作者 DSL 交给 defineTool')
-  assert.equal(seen[1].parameters.readOnly.type, 'boolean')
+  assert.equal(Object.hasOwn(seen[1].parameters, 'role'), true, '应把作者 DSL 交给 defineTool')
+  assert.equal(seen[1].parameters.role.type, 'string')
+  assert.equal(Object.hasOwn(seen[1].parameters, 'readOnly'), false, '只读通道已移除，参数里不得再出现')
   assert.equal(seen[1].parameters.type, undefined, '不能预先编译，否则 defineTool 会二次编译')
 })
 
@@ -203,10 +202,9 @@ test('list_roles 按当前会话项目根读取 .meetingstone.json（项目角�
           name: '斥候',
           aliases: ['SC'],
           channel: { kind: 'in-process' },
-          permissionPreset: 'read-only',
         },
       ],
-      roleOverrides: { 'role-sashi': { permissionPreset: 'read-only' } },
+      roleOverrides: { 'role-sashi': { description: '项目内改为复核' } },
     }),
     'utf8',
   )
@@ -221,14 +219,14 @@ test('list_roles 按当前会话项目根读取 .meetingstone.json（项目角�
     assert.equal(globalOnly.roles.length, 2)
     assert.equal(globalOnly.projectScoped, true, '注入了 resolveRegistry 就应标记为项目域可用')
 
-    // 给出会话项目根 → 项目角色出现，且全局角色的权限被收紧
+    // 给出会话项目根 → 项目角色出现，且全局角色的字段被覆盖
     const exec = { agent: { session: { header: { cwd: dir } } } }
     const scoped = await listTool.execute({}, exec)
     const ids = scoped.roles.map((r) => r.roleId).sort()
     assert.deepEqual(ids, ['role-reviewer', 'role-sashi', 'role-scout'], '项目新增角色应出现')
 
     const sashi = scoped.roles.find((r) => r.roleId === 'role-sashi')
-    assert.equal(sashi.permissionPreset, 'read-only', '项目覆盖应把权限收紧')
+    assert.equal(sashi.description, '项目内改为复核', '项目覆盖应生效')
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -267,7 +265,6 @@ test('list_roles 暴露配置透明度字段（职责/人设/通道）', async (
         description: '技术骨干',
         prompt: '你是技术骨干。',
         channel: { kind: 'acp-cli', provider: 'acp', channelId: 'ch-acp', model: 'hy4' },
-        permissionPreset: 'project-write',
       },
       { roleId: 'role-xiaobai', name: '小白', description: '杂活' },
     ],
@@ -293,7 +290,7 @@ test('dispatch 传入 projectKey（按项目隔离并发）', async () => {
         list: () => [],
         resolve: () => ({
           roleId: 'role-sashi', name: '沙僧', description: '',
-          channel: { kind: 'acp-cli' }, permissionPreset: 'project-write', enabled: true, timeoutMs: 1000,
+          channel: { kind: 'acp-cli' }, enabled: true, timeoutMs: 1000,
         }),
         errors: [],
       },

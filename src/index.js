@@ -8,7 +8,7 @@
  * - 不自建任务队列 / 会话 / 数据库（复用 DSH 原生）
  * - 不自研 CLI 启动器（派单经宿主 provider，docs/audit/03-native-capabilities.md）
  * - 任何资源都挂在 ctx.effect() 上，dispose 必须幂等且串行等待
- * - 权限不靠 Prompt：适配器拿不到强制手段时如实标 `readOnlyEnforced:false`（08-sandbox §8）
+ * - 本项目**不提供只读通道**：宿主 subagent spec 没有权限字段，做不到绝对只读就明说
  */
 import { Config } from './config.js'
 import { createRegistry } from './roles/registry.js'
@@ -26,7 +26,7 @@ import { createRunStore } from './run-store.js'
  * 宿主运行时把 `@deepseek-ai/dsh-tools` 作为 shared package 提供。
  * `defineTool` 会把「字段 spec 字典」编译成模型可见的 JSON Schema，并在
  * execute 前校验 args；缺了它，`ctx.tools.register` 收到的是未编译的字典，
- * 其中 `readOnly` 会被当成 JSON Schema 的保留注解（要求 boolean），
+ * 其中字段名会被当成 JSON Schema 的保留注解（要求 boolean），
  * DeepSeek API 直接返回 `Invalid schema for function ... is not of type "boolean"`。
  *
  * 本地单测环境只装了 schemastery，故用同步探测 + 容错：拿不到宿主包时
@@ -104,7 +104,7 @@ export function apply(ctx, config = {}) {
     const projectRoot = exec?.agent?.session?.header?.cwd
     const loaded = projectStore.get(projectRoot, cfg.projectConfigFile)
     const registry = createRegistry(toRegistryInput(cfg, loaded.config))
-    // 项目文件解析错误 + 注册表语义错误（别名冲突、权限放宽等）一起交给工具层展示
+    // 项目文件解析错误 + 注册表语义错误（别名冲突等）一起交给工具层展示
     return { registry, projectErrors: [...(loaded.errors ?? []), ...(registry.errors ?? [])] }
   }
 

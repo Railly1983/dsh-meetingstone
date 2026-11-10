@@ -28,7 +28,7 @@ assignees: ''
 
 **证据**
 
-- 工具返回的错误码（如 `MODEL_UNSUPPORTED` / `PROVIDER_UNAVAILABLE` / `READONLY_UNENFORCEABLE`）：
+- 工具返回的错误码（如 `MODEL_UNSUPPORTED` / `PROVIDER_UNAVAILABLE` / `PATH_OUTSIDE_PROJECT`）：
 - 相关日志或报错原文（**不要贴凭据**）：
 
 **已排除**

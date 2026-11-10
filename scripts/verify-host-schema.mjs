@@ -92,9 +92,9 @@ assert.throws(
   () =>
     checkParameters('regression-sample', {
       role: { type: 'string', required: true },
-      readOnly: { type: 'boolean', description: '只收紧、不放宽' },
+      writeOnly: { type: 'boolean', description: '未编译字段字典的示例' },
     }),
-  /保留关键字 readOnly/,
+  /保留关键字 writeOnly/,
   '门禁自身失效：未能识别未编译的参数字典',
 )
 
@@ -128,12 +128,12 @@ const wire = tools.map((t) => ({
 }))
 assert.deepEqual(JSON.parse(JSON.stringify(wire)), wire, 'parameters 不是 lossless JSON')
 
-// 3) 事故特异性回归：readOnly 必须在 properties 里，而不是根上。
+// 3) 只读通道已彻底移除：dispatch 不再有 readOnly 参数。
 const dispatch = tools.find((t) => t.name === 'meetingstone_dispatch')
 assert.equal(
-  dispatch.parameters.properties.readOnly?.type,
-  'boolean',
-  'meetingstone_dispatch.readOnly 的 boolean 定义丢失',
+  Object.hasOwn(dispatch.parameters.properties, 'readOnly'),
+  false,
+  'meetingstone_dispatch.readOnly 参数应已移除（本项目不提供只读通道）',
 )
 
 console.log(`PASS: ${tools.length} 个工具的注册产物符合宿主 / 模型 API 契约`)

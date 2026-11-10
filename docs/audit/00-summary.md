@@ -42,7 +42,7 @@ DSH 原生已经覆盖了「团队/项目/任务/会话/权限/统计/工具」�
 | --- | --- | --- | --- | --- |
 | C1 | **角色注册表 + 别名解析** | `dsh-persona`/`dsh-agent-preset` 是"一个 preset 一个静态身份"，没有"名称或别名 → 通道+参数+cwd+模型"的可变映射，也没有别名归一化与冲突消解（03 §5） | 一张角色表 + 别名索引 + 冲突拒绝；提示词复用 persona | 低 |
 | C2 | **本机 CLI 探测** | 官方明确「production performs no separate runtime version probe」「probes no version or authentication」，且 provider 不回退本机 PATH（03 F2）。现有最接近的只有 `resolveExecutable` 与 `runNativeCommand` 两个原语 | 多源解析（PATH → Appx 包 → npm 全局 → 常见目录 → 手工）+ `--version` 试跑 + 缓存与失效 + 状态展示 | 中：商店应用路径随升级漂移（R1） |
-| C3 | **派单编排薄层** | 原生没有"角色名 → 选哪条通道 → 用什么参数"的路由层；也没有跨异构 CLI 的统一编队（03 §5） | 角色 →（探测结果 + 通道）→ 调 `ctx.subagents`；写任务串行、只读可并行；权限档位映射到**显式 confine + CLI 原生 flag** | 中高：权限边界只能标"部分保证"（08） |
+| C3 | **派单编排薄层** | 原生没有"角色名 → 选哪条通道 → 用什么参数"的路由层；也没有跨异构 CLI 的统一编队（03 §5） | 角色 →（探测结果 + 通道）→ 调 `ctx.subagents`；同项目任务串行（只读通道与权限档位**已于 2026-11-11 移除，不要再实现**） | 中：权限边界由 provider 行决定（08） |
 | C4 | 设置页 UI | 官方**没有任何客户端消费** `autoGenerate`，每个插件的配置页由它自己的 companion 包注册（07 §3.6 + 官方 `ui-settings-plugins` README） | **第一版不做**；配置走 `cordis.patch.yml` + `.meetingstone.json`，用 `meetingstone_list_roles` 回显 | 已排 0.2.0 |
 
 ---
@@ -90,7 +90,7 @@ DeepSeek Harness Host（全部复用，零改动）
 | G2 | B 类：第一版要求用户安装 provider bundle（至少 `dsh-subagent-acp`） | ✅ 同意，作为安装文档的一部分 |
 | G3 | C 类 3 项自研范围（角色表/CLI 探测/派单编排） | ✅ 只做这 3 项 |
 | G4 | C4 设置页 UI 排到 0.2.0 | ✅ 已决（DD5） |
-| G5 | 权限承诺边界：只读=条件化；项目写入=标 partial/无保证；CodeBuddy=无保证；受限命令=未验证 | ✅ 按 08 §8 措辞，不夸大 |
+| G5 | 权限承诺边界：**本项目不提供只读通道**（2026-11-11 已移除，不要再实现）；实际权限由 provider 行决定，不夸大 | ✅ 按 08 §8 措辞 |
 | G6 | 产品文案不得写"外部任务出现在原生 UI" | ✅ 按 06 结论 |
 | G7 | 命名 `dsh-meetingstone` + 与 WOW 插件无关的声明 | ✅ 已决（DD6） |
 | G8 | 进入阶段 1 的首批任务 | P1-01 仓库骨架 → P1-02 构建链（锁内置 node）→ P1-03 空插件加载 |

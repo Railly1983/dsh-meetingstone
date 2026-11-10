@@ -16,7 +16,6 @@
         "provider": "codex",
         "model": "gpt-6-astra"
       },
-      "permissionPreset": "project-write",
       "enabled": true,
       "timeoutMs": 3600000
     },
@@ -35,7 +34,6 @@
         "provider": "codex-sol",
         "model": "gpt-6.1-sol"
       },
-      "permissionPreset": "project-write",
       "enabled": true,
       "timeoutMs": 3600000
     },
@@ -53,7 +51,6 @@
         "channelId": "ch-inprocess",
         "provider": "spawn"
       },
-      "permissionPreset": "project-write",
       "enabled": false,
       "timeoutMs": 3600000
     },
@@ -71,7 +68,6 @@
         "channelId": "ch-acp-flash",
         "provider": "acp"
       },
-      "permissionPreset": "project-write",
       "enabled": true,
       "timeoutMs": 3600000
     },
@@ -89,14 +85,12 @@
         "channelId": "ch-acp-hy4",
         "provider": "acp-hy4"
       },
-      "permissionPreset": "project-write",
       "enabled": true,
       "timeoutMs": 3600000
     }
   ],
   "dispatchNotes": "分工原则：唐僧能力最强、额度有限，只有最重要的事（架构/战略/关键决策/最终把关）才找他；悟空处理高难任务与审核验收；沙僧与小白是干活主力，常规任务优先给他们；八戒负责调度、监工、整合，一般不亲自干活。",
   "limits": {
-    "maxParallelReadonly": 2,
     "serializeWrites": true
   }
 }

@@ -6,15 +6,14 @@
       "roleId": "role-scout",
       "name": "斥候",
       "aliases": ["SC"],
-      "description": "只读侦察：找文件、查依赖、读接口，不改代码",
+      "description": "侦察：找文件、查依赖、读接口，不改代码",
       "channel": { "kind": "in-process", "channelId": "ch-inprocess" },
-      "permissionPreset": "read-only",
       "enabled": true
     }
   ],
   "roleOverrides": {
     "role-sashi": {
-      "permissionPreset": "read-only"
+      "description": "本项目里由沙僧负责主力开发"
     }
   },
   "dispatchNotes": "这个仓库只改 src/，动 docs/ 前先问；禁止直接改 package.json。",
@@ -23,7 +22,6 @@
     "同一项目的写任务默认串行"
   ],
   "limits": {
-    "maxParallelReadonly": 2,
     "serializeWrites": true
   }
 }

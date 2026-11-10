@@ -1,5 +1,9 @@
 # 14 · 真机派单链路验证（2026-11-10）
 
+> **2026-11-11 移除声明**：本文出现的 `readOnly` / `readOnlyEnforced` / `permissionPreset` /
+> `READONLY_UNENFORCEABLE` 均为历史记录。只读通道已彻底移除（宿主 subagent spec 无权限字段，
+> 做不到绝对只读），**不要再实现**。
+
 > 目的：证明「角色解析 → 通道选择 → 宿主 `ctx.subagents` → 原生任务引用」在**真实 DSH 会话**里跑通。
 > 环境：DSH `0.2.2-rc.1`，`desktop` profile，插件以本地链接安装（`D:\MeetingStone`）。
 > 全部操作都通过插件自己的工具完成，未改 profile 配置。
@@ -84,7 +88,7 @@ d52874f6-50e6-41fc-82db-218dd8950ff3 [running] — meetingstone:role-selftest
 
 | 项 | 原因 |
 | --- | --- |
-| 只读通道（`permissionPreset: read-only` 的实例） | 通道实例只能写在 profile 的全局 Config，需改配置 + 重启 |
+| 只读通道（`permissionPreset: read-only` 的实例） | **已移除，不要再实现**（2026-11-11）：宿主 spec 无权限字段，做不到绝对只读 |
 | 外部 provider（codex / acp）通道 | 需先装对应 bundle（隔离已验证配置组合，未在 desktop 装） |
 | 任务结果回读（子 Agent 到底输出了什么） | 当前只有 `list_roles` / `dispatch` / `cli_status`，缺 `get_task` |
 | 取消任务 | 同上，缺 `cancel_task` 工具 |
@@ -92,7 +96,8 @@ d52874f6-50e6-41fc-82db-218dd8950ff3 [running] — meetingstone:role-selftest
 ## 5. 结论
 
 **P2 的核心目标（按角色把任务派给宿主 provider 并拿到原生引用）已在真机达成。**
-剩余的是"读回结果 / 取消 / 只读实例 / 外部 provider"这类补全，属于 P2 收尾 + P3 范畴。
+剩余的是"读回结果 / 取消 / 外部 provider"这类补全，属于 P2 收尾 + P3 范畴。
+（原文中的"只读实例"已于 2026-11-11 随只读通道整体移除，不要再实现。）
 
 
 ## 6. 补验（2026-11-10 第二次重启后）
@@ -121,7 +126,10 @@ list_agents → b275997f-... [inactive]
 
 取消后立刻再派一个写任务 → 成功，**说明槽位随取消一起释放**。
 
-### 6.3 只读拒绝（READONLY_UNENFORCEABLE）
+### 6.3 只读拒绝（READONLY_UNENFORCEABLE）— 历史记录，功能已移除
+
+> **2026-11-11 注**：本节的只读拒绝路径已随只读通道整体删除，`READONLY_UNENFORCEABLE` 错误码不存在了。
+> 保留原文仅作历史证据，**不要再实现**。
 
 项目配置里加了一个只读角色，但没有引用任何通道实例：
 

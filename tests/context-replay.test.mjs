@@ -110,7 +110,6 @@ test('dispatch 工具：continuesFrom 解析成功时把重放块透传给派单
           name: '沙僧',
           description: '',
           channel: { kind: 'acp-cli' },
-          permissionPreset: 'project-write',
           enabled: true,
           timeoutMs: 1000,
         }),
@@ -119,7 +118,7 @@ test('dispatch 工具：continuesFrom 解析成功时把重放块透传给派单
       dispatcher: {
         async dispatch(input) {
           calls.push(input)
-          return { ok: true, taskRef: { childId: 'new-1' }, role: input.role, readOnly: false }
+          return { ok: true, taskRef: { childId: 'new-1' }, role: input.role }
         },
       },
       probe: { probe: async () => ({}) },
@@ -148,7 +147,6 @@ test('dispatch 工具：continuesFrom 找不到结果时直接失败，不静默
           name: '沙僧',
           description: '',
           channel: { kind: 'acp-cli' },
-          permissionPreset: 'project-write',
           enabled: true,
           timeoutMs: 1000,
         }),
