@@ -153,25 +153,31 @@ function readAliases(value) {
 }
 
 /**
- * 解析 channel 字段；缺失时给 `in-process`（原生子 Agent 是最保守的选择）。
+ * 解析 channel 字段。
+ * - 完整角色（默认）：缺失时给 `in-process`（原生子 Agent 是最保守的选择）
+ * - 字段级覆盖（`partial: true`）：**不给默认 kind**，否则只覆盖 model 会把 acp-cli 打回 in-process
  *
  * @param {unknown} value
  * @param {RegistryError[]} errors
  * @param {string} roleId
- * @returns {RoleChannel}
+ * @param {{ partial?: boolean }} [opts]
+ * @returns {Partial<RoleChannel> & { kind?: ChannelKind }}
  */
-function readChannel(value, errors, roleId) {
-  if (value === undefined || value === null) return { kind: 'in-process' }
+function readChannel(value, errors, roleId, opts = {}) {
+  const partial = opts.partial === true
+  if (value === undefined || value === null) return partial ? {} : { kind: 'in-process' }
   if (typeof value !== 'object') {
     errors.push({ code: 'INVALID_CHANNEL', roleId, message: `角色 ${roleId} 的 channel 必须是对象` })
-    return { kind: 'in-process' }
+    return partial ? {} : { kind: 'in-process' }
   }
 
   const input = /** @type {Record<string, unknown>} */ (value)
-  let kind = /** @type {ChannelKind} */ ('in-process')
+  /** @type {Partial<RoleChannel> & { kind?: ChannelKind }} */
+  const channel = {}
+
   if (typeof input.kind === 'string') {
     if (CHANNEL_KINDS.includes(/** @type {ChannelKind} */ (input.kind))) {
-      kind = /** @type {ChannelKind} */ (input.kind)
+      channel.kind = /** @type {ChannelKind} */ (input.kind)
     } else {
       errors.push({
         code: 'INVALID_CHANNEL_KIND',
@@ -182,12 +188,13 @@ function readChannel(value, errors, roleId) {
     }
   }
 
-  /** @type {RoleChannel} */
-  const channel = { kind }
   for (const key of /** @type {const} */ (['provider', 'cli', 'model', 'reasoning'])) {
     const raw = input[key]
     if (typeof raw === 'string' && raw.trim()) channel[key] = raw.trim()
   }
+
+  // 完整角色必须带 kind；覆盖时没写就保持原值（由合并方处理）
+  if (!partial && !channel.kind) channel.kind = 'in-process'
   return channel
 }
 
@@ -244,12 +251,13 @@ function readRole(raw, errors) {
     return null
   }
 
-  // permissionPreset 缺省时给 project-write：可写但不出项目目录，符合「默认不放开」。
+  // permissionPreset 缺省时给 read-only：与 Config schema 的默认值一致，
+  // 且「没写清楚就别放开」比「默认可写」安全（docs/audit/08-sandbox.md §8）。
   const preset =
     input.permissionPreset === undefined
-      ? /** @type {PermissionPreset} */ ('project-write')
+      ? /** @type {PermissionPreset} */ ('read-only')
       : readPermissionPreset(input.permissionPreset, errors, id) ??
-        /** @type {PermissionPreset} */ ('project-write')
+        /** @type {PermissionPreset} */ ('read-only')
 
   const timeout = Number(input.timeoutMs)
 
@@ -312,8 +320,8 @@ function mergeRole(base, patch, errors) {
     next.description = input.description
   }
   if (Object.hasOwn(input, 'channel')) {
-    // 通道按字段合并：只改 model 时不该把 provider/cli 抹掉。
-    const overridden = readChannel(input.channel, errors, base.roleId)
+    // 通道按字段合并：只改 model 时不该把 provider/cli/kind 抹掉
+    const overridden = readChannel(input.channel, errors, base.roleId, { partial: true })
     next.channel = { ...next.channel, ...overridden }
   }
 
@@ -364,9 +372,11 @@ function mergeRole(base, patch, errors) {
  * @param {Role[]} roles
  * @param {Map<string, Role>} byId
  * @param {RegistryError[]} errors
+ * @param {Set<string>} conflicted 输出参数：冲突 token 集合（供上层区分「不存在」与「有歧义」）
+ * @param {Map<string, string[]>} conflicts 输出参数：冲突 token → 涉及的 roleId 列表
  * @returns {Map<string, string>}
  */
-function buildAliasIndex(roles, byId, errors) {
+function buildAliasIndex(roles, byId, errors, conflicted, conflicts) {
   /** @type {Map<string, Set<string>>} */
   const buckets = new Map()
 
@@ -398,7 +408,9 @@ function buildAliasIndex(roles, byId, errors) {
       continue
     }
 
+    conflicted.add(token)
     const involved = [...owners]
+    conflicts.set(token, involved)
     errors.push({
       code: 'ALIAS_CONFLICT',
       alias: token,
@@ -526,7 +538,11 @@ export function createRegistry({ globalRoles = [], projectRoles = [], projectOve
     byId.set(roleId, merged)
   }
 
-  const aliasIndex = buildAliasIndex(roles, byId, errors)
+  /** @type {Set<string>} */
+  const conflictedTokens = new Set()
+  /** @type {Map<string, string[]>} */
+  const conflictMap = new Map()
+  const aliasIndex = buildAliasIndex(roles, byId, errors, conflictedTokens, conflictMap)
 
   /**
    * 按 roleId 取角色；未知返回 null。
@@ -576,5 +592,27 @@ export function createRegistry({ globalRoles = [], projectRoles = [], projectOve
     return roles.map(cloneRole)
   }
 
-  return { list, resolve, get, errors }
+  /**
+   * 这个引用是否「有歧义」（名字/别名被多个角色占用）。
+   * 用于让上层区分 ROLE_NOT_FOUND 与 ROLE_AMBIGUOUS——否则纠错提示无从给出。
+   * @param {unknown} ref
+   */
+  function isAmbiguousRef(ref) {
+    if (typeof ref !== 'string') return false
+    const key = normalizeAlias(ref)
+    return key ? conflictedTokens.has(key) : false
+  }
+
+  /**
+   * 冲突 token 涉及哪些 roleId（用于给出"请改用 roleId"的具体选项）。
+   * @param {unknown} ref
+   * @returns {string[]}
+   */
+  function conflictsFor(ref) {
+    if (typeof ref !== 'string') return []
+    const key = normalizeAlias(ref)
+    return key ? (conflictMap.get(key) ?? []) : []
+  }
+
+  return { list, resolve, get, errors, isAmbiguousRef, conflictsFor }
 }

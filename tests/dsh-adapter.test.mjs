@@ -156,7 +156,7 @@ test('providerNameFor：四种 channel.kind 的映射与显式 provider 覆盖',
 
 // ─── start ───────────────────────────────────────────────────────────────────
 
-test('start 成功：把 role/task/cwd 透传给宿主 startActivation，readOnly 如实标记', async () => {
+test('start 成功：把 role/task/cwd 透传给宿主 startActivation', async () => {
   const { adapter, subagents } = makeAdapter(
     fakeSubagents({ providers: { acp: {} } }),
   )
@@ -164,8 +164,10 @@ test('start 成功：把 role/task/cwd 透传给宿主 startActivation，readOnl
     role: role(),
     task: '改个函数',
     cwd: 'D:/MeetingStone',
-    readOnly: true,
+    readOnly: false,
     timeoutMs: 0, // 不装定时器，避免测试进程被挂住
+    // 项目根由宿主上下文给出；cwd 必须在其中（P2 Gate P0 的前置校验）
+    context: { projectRoot: 'D:/MeetingStone' },
   })
 
   const startCall = subagents.calls.find((c) => c.method === 'startActivation')
@@ -189,22 +191,18 @@ test('start 成功：把 role/task/cwd 透传给宿主 startActivation，readOnl
   assert.doesNotThrow(() => JSON.stringify(res.taskRef))
 })
 
-test('readOnly 无法强制执行：返回值与 taskRef 都带 readOnlyEnforced:false', async () => {
+test('readOnly 无法强制时**拒绝启动**，而不是带病启动（P2 Gate P0）', async () => {
   const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { acp: {} } }))
-  const res = await adapter.start({
-    role: role(),
-    task: '审一下',
-    readOnly: true,
-    timeoutMs: 0,
-  })
-  assert.equal(res.readOnlyEnforced, false)
-  assert.equal(res.taskRef.readOnlyEnforced, false, '上层经 taskRef 也能看到「无保证」')
-
-  // 官方 SubagentActivationSpec 没有 permission/readOnly 字段：不得偷偷塞一个假装生效
-  const spec = subagents.calls.find((c) => c.method === 'startActivation').spec
-  assert.equal(Object.hasOwn(spec, 'readOnly'), false)
-  assert.equal(Object.hasOwn(spec, 'permission'), false)
-  assert.equal(Object.hasOwn(spec, 'readOnlyEnforced'), false)
+  await assert.rejects(
+    () => adapter.start({ role: role(), task: '审一下', readOnly: true, timeoutMs: 0 }),
+    /READONLY_UNENFORCEABLE/,
+  )
+  // 关键：拒绝必须在调用宿主之前发生，不能先起任务再标「无保证」
+  assert.equal(
+    subagents.calls.filter((c) => c.method === 'startActivation').length,
+    0,
+    '前置校验失败时不得触达 startActivation',
+  )
 })
 
 test('start 抛错时向上抛，不吞、不降级成成功', async () => {
@@ -408,4 +406,83 @@ test('meetingstone_cli_status：探测器未注入时失败关闭，不编造状
   registerTools(ctx, { ...deps, probe: null })
   const out = await registered[2].execute({})
   assert.equal(out.error, 'PROBE_UNAVAILABLE')
+})
+
+// ─── P2 Gate P0：启动前置校验（不满足就不许触达 startActivation） ────────────
+
+test('角色指定了 model → 拒绝启动（配置成功不等于执行采用）', async () => {
+  const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { acp: {} } }))
+  await assert.rejects(
+    () =>
+      adapter.start({
+        role: role({ channel: { kind: 'acp-cli', model: 'deepseek-v4.1-flash' } }),
+        task: 'x',
+        readOnly: false,
+        timeoutMs: 0,
+      }),
+    /MODEL_UNSUPPORTED/,
+  )
+  assert.equal(
+    subagents.calls.filter((c) => c.method === 'startActivation').length,
+    0,
+    '前置校验失败不得启动任务',
+  )
+})
+
+test('cwd 越出项目根 → 拒绝启动', async () => {
+  const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { acp: {} } }))
+  await assert.rejects(
+    () =>
+      adapter.start({
+        role: role(),
+        task: 'x',
+        cwd: 'D:/OtherProject',
+        readOnly: false,
+        timeoutMs: 0,
+        context: { projectRoot: 'D:/MeetingStone' },
+      }),
+    /PATH_OUTSIDE_PROJECT/,
+  )
+  assert.equal(subagents.calls.filter((c) => c.method === 'startActivation').length, 0)
+})
+
+test('给不出项目根却指定了 cwd → 失败关闭', async () => {
+  const { adapter } = makeAdapter(fakeSubagents({ providers: { acp: {} } }))
+  await assert.rejects(
+    () =>
+      adapter.start({
+        role: role(),
+        task: 'x',
+        cwd: 'D:/MeetingStone',
+        readOnly: false,
+        timeoutMs: 0,
+      }),
+    /PROJECT_ROOT_UNKNOWN/,
+  )
+})
+
+test('parent 优先取当次 context.agent，不回退成上个会话', async () => {
+  const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { acp: {} } }))
+  const agentA = { session: { header: { cwd: 'D:/MeetingStone' } }, tag: 'A' }
+  await adapter.start({
+    role: role(),
+    task: 'x',
+    readOnly: false,
+    timeoutMs: 0,
+    context: { agent: agentA },
+  })
+  const spec = subagents.calls.find((c) => c.method === 'startActivation').spec
+  assert.equal(spec.parent, agentA, 'parent 必须是本次上下文里的 agent')
+})
+
+test('context 没有 agent 时失败关闭（不做全局回退）', async () => {
+  const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { acp: {} } }), {
+    // 明确不注入 getParent：模拟旧 holder 被删除后的真实装配
+    getParent: undefined,
+  })
+  await assert.rejects(
+    () => adapter.start({ role: role(), task: 'x', readOnly: false, timeoutMs: 0 }),
+    /PARENT_AGENT_UNAVAILABLE/,
+  )
+  assert.equal(subagents.calls.filter((c) => c.method === 'startActivation').length, 0)
 })

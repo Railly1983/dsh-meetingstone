@@ -1,4 +1,5 @@
 // @ts-check
+import { relative, resolve } from 'node:path'
 /**
  * DSH 接线层 · 适配器（阶段 2）。
  *
@@ -197,13 +198,48 @@ export function createDshAdapter(ctx, options = {}) {
       throw new Error(`PROVIDER_UNAVAILABLE: provider ${provider} 未注册`)
     }
 
-    // 2. parent 是 startActivation 的必填字段；拿不到就抛，不编造 Agent。
-    const parent = typeof getParent === 'function' ? getParent() : null
+    // 2. parent 必须来自**当次执行上下文**（exec.agent），不做全局 holder 回退：
+    //    全局回退会在并发/多会话下把上个会话的 agent 当成 parent（P2 Gate 复核指出）。
+    const parent = input?.context?.agent ?? (typeof getParent === 'function' ? getParent() : null)
     if (!parent) {
       throw new Error(
-        'PARENT_AGENT_UNAVAILABLE: startActivation 需要 parent Agent，' +
-          '但调用方未注入 getParent()（TODO(P2-parent)，见文件头）',
+        'PARENT_AGENT_UNAVAILABLE: startActivation 需要 parent Agent，但本次执行上下文没有 exec.agent',
       )
+    }
+
+    // 2.5 启动前置校验（P2 Gate 复核 P0）：三项约束不满足就**不启动**，而不是带病启动。
+    //
+    // (a) 只读：官方 SubagentActivationSpec 没有 readonly/permission 字段（TODO(P2-readonly)），
+    //     无法强制时按 docs/audit/08-sandbox.md §8 的要求拒绝启动，而不是启动后标个 false。
+    if (readOnly === true) {
+      throw new Error(
+        'READONLY_UNENFORCEABLE: 当前 provider 通道无法强制只读（spec 无 permission/readOnly 字段），' +
+          '已拒绝启动。需要只读请改用带原生只读沙箱的通道，或把角色降级为「无只读保证」后显式改用可写派单',
+      )
+    }
+
+    // (b) 模型/强度：官方 spec 不收 model/reasoning，写了也无法落实 → 拒绝，避免「配置成功、执行未采用」
+    if (role?.channel?.model || role?.channel?.reasoning) {
+      throw new Error(
+        'MODEL_UNSUPPORTED: 当前 provider 通道无法指定 model/reasoning（spec 无该字段），' +
+          `已拒绝启动。角色 ${role?.roleId ?? '?'} 配置的 model=${role?.channel?.model ?? '-'} / ` +
+          `reasoning=${role?.channel?.reasoning ?? '-'} 会被宿主忽略，静默忽略比报错更危险`,
+      )
+    }
+
+    // (c) 项目边界：cwd 必须在当前会话的项目根之内；拿不到项目根就失败关闭
+    if (typeof cwd === 'string' && cwd) {
+      const projectRoot = input?.context?.projectRoot ?? readProjectRoot(parent)
+      if (!projectRoot) {
+        throw new Error(
+          'PROJECT_ROOT_UNKNOWN: 无法从当前会话确定项目根，拒绝在未校验的 cwd 下启动',
+        )
+      }
+      if (!isInside(cwd, projectRoot)) {
+        throw new Error(
+          `PATH_OUTSIDE_PROJECT: cwd ${cwd} 不在项目根 ${projectRoot} 之内，已拒绝启动`,
+        )
+      }
     }
 
     // 3. 组装官方 SubagentActivationSpec（字段出处见文件头第 2 条）。
@@ -244,7 +280,7 @@ export function createDshAdapter(ctx, options = {}) {
     if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
       timer = setTimeout(() => controller.abort(new Error('meetingstone: timeout')), timeoutMs)
     }
-    handles.set(childId, { activation, controller, timer })
+    handles.set(childId, { activation, controller, timer, onFinish: input?.onFinish })
 
     // 任务自己结束后释放内部句柄（result 是 subagent.md 确认的 Promise）。
     if (activation.result && typeof activation.result.then === 'function') {
@@ -264,6 +300,14 @@ export function createDshAdapter(ctx, options = {}) {
     if (!handle) return
     handles.delete(childId)
     if (handle.timer) clearTimeout(handle.timer)
+    // 通知 dispatcher 释放并发槽位（幂等；适配器只负责"叫一声"，不关心上层怎么记账）
+    if (typeof handle.onFinish === 'function') {
+      try {
+        handle.onFinish()
+      } catch {
+        /* 释放回调失败不应影响任务收尾 */
+      }
+    }
   }
 
   /** 取消：先 abort，再让宿主 dispose 这个 activation。重复调用无害。 */
@@ -298,6 +342,14 @@ export function createDshAdapter(ctx, options = {}) {
             if (typeof ctx?.logger?.warn === 'function') {
               ctx.logger.warn(`[meetingstone] activation dispose failed: ${errorMessage(err)}`)
             }
+          } finally {
+            if (typeof handle.onFinish === 'function') {
+              try {
+                handle.onFinish()
+              } catch {
+                /* 同上：释放回调失败不影响清理 */
+              }
+            }
           }
         }
       }
@@ -305,6 +357,30 @@ export function createDshAdapter(ctx, options = {}) {
   }
 
   return { canStart, start, cancel }
+}
+
+/**
+ * 从宿主 Agent 读项目根：`exec.agent.session.header.cwd`
+ * （docs/audit/07-config-extension.md §4.2 确认该字段是"原始项目目录"）。
+ * 拿不到返回 null，由调用方失败关闭。
+ * @param {any} agent
+ * @returns {string | null}
+ */
+function readProjectRoot(agent) {
+  const cwd = agent?.session?.header?.cwd
+  return typeof cwd === 'string' && cwd ? cwd : null
+}
+
+/**
+ * 判断 child 是否在 root 之内（大小写按平台）。
+ * 用 path.relative 而不是字符串前缀，避免 `C:\proj-evil` 冒充 `C:\proj`。
+ * @param {string} child
+ * @param {string} root
+ */
+function isInside(child, root) {
+  const rel = relative(resolve(root), resolve(child))
+  if (rel === '') return true
+  return !rel.startsWith('..') && !rel.startsWith('/') && !/^[A-Za-z]:/.test(rel)
 }
 
 export default createDshAdapter

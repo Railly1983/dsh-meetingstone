@@ -1,11 +1,16 @@
 // @ts-check
 /**
- * 派单编排（C3）。纯逻辑 + 可注入适配器，便于单测；真实 DSH 调用在 dsh-adapter.js。
+ * 派单编排（C3）。纯逻辑 + 可注入适配器，便于单测；真实 DSH 调用在 dsh/adapter.js。
  *
  * 职责边界（勿扩大）：
  * - 只做「角色 → 通道 → 一次委派」的路由与并发纪律
  * - 不建任务队列、不存会话、不做重试策略、不渲染 UI
  * - 真正的生命周期（job、取消、进程树）归宿主 provider / ctx.jobs
+ *
+ * 并发纪律（唐僧 P2 Gate 复核后修正）：
+ * - **先占槽、再启动**：否则两个并发写请求会同时通过检查（旧实现已复现该 bug）
+ * - **由适配器回调释放**：`onFinish` 在任务终态（完成/失败/取消）时调用，幂等
+ * - **按项目隔离计数**：不同项目互不误挡；同项目写任务默认串行
  *
  * 依据：
  * - docs/开发计划.md §7.2（工具语义）
@@ -25,11 +30,15 @@ export const DISPATCH_ERRORS = Object.freeze({
   ADAPTER_FAILED: 'ADAPTER_FAILED',
 })
 
+/** 未指定项目时的默认槽位键。 */
+export const DEFAULT_PROJECT_KEY = 'default'
+
 /**
  * @typedef {object} DispatchRequest
  * @property {string} role 角色引用（roleId / name / 别名）
  * @property {string} task 任务内容
- * @property {string} [cwd] 目标目录；必须由调用方校验在项目内
+ * @property {string} [cwd] 目标目录；项目边界校验在适配器里做
+ * @property {string} [projectKey] 并发计数键（通常传项目根路径）；省略视为 default
  * @property {boolean} [readOnly] 覆盖角色的只读判定（只能在更严方向覆盖）
  * @property {object} [context] 宿主上下文（如 exec.agent），原样透传给适配器
  */
@@ -42,6 +51,7 @@ export const DISPATCH_ERRORS = Object.freeze({
  * @property {boolean} readOnly
  * @property {number} timeoutMs
  * @property {object} [context] 由调用方透传的宿主上下文
+ * @property {() => void} onFinish 任务终态回调（适配器必须在完成/失败/取消时调用一次）
  */
 
 /**
@@ -66,18 +76,36 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
   const maxParallelReadonly = Math.max(1, Math.floor(limits.maxParallelReadonly ?? 3))
   const serializeWrites = limits.serializeWrites !== false
 
-  /** @type {Map<object, { role: any, readOnly: boolean, startedAt: number }>} */
+  /** @type {Map<object, { role: any, readOnly: boolean, projectKey: string, startedAt: number, ref: object | null }>} */
   const active = new Map()
+  /** @type {Map<object, object>} taskRef -> token */
+  const refToToken = new Map()
 
-  const countWrites = () => {
-    let n = 0
-    for (const v of active.values()) if (!v.readOnly) n++
-    return n
+  /** @param {string} projectKey */
+  const countsFor = (projectKey) => {
+    let writes = 0
+    let readonly = 0
+    for (const v of active.values()) {
+      if (v.projectKey !== projectKey) continue
+      if (v.readOnly) readonly += 1
+      else writes += 1
+    }
+    return { writes, readonly }
   }
-  const countReadonly = () => {
-    let n = 0
-    for (const v of active.values()) if (v.readOnly) n++
-    return n
+
+  /**
+   * 释放一个槽位。按 token 或 taskRef 都可以，重复调用幂等。
+   * @param {object | null | undefined} key
+   */
+  function release(key) {
+    if (!key) return false
+    // 允许传 taskRef
+    const token = refToToken.get(key) ?? key
+    const entry = active.get(token)
+    if (!entry) return false
+    active.delete(token)
+    if (entry.ref) refToToken.delete(entry.ref)
+    return true
   }
 
   /**
@@ -96,10 +124,25 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
     // 1. 解析角色
     const role = registry.resolve(req.role)
     if (!role) {
+      // 区分「不存在」与「有歧义」：否则用户看到"找不到角色"却明明有这个名字
+      if (typeof registry.isAmbiguousRef === 'function' && registry.isAmbiguousRef(req.role)) {
+        const ids =
+          typeof registry.conflictsFor === 'function' ? registry.conflictsFor(req.role) : []
+        const hint = ids.length ? `，可选：${ids.join(' / ')}` : '（可用 meetingstone_list_roles 查看）'
+        return fail(
+          DISPATCH_ERRORS.ROLE_AMBIGUOUS,
+          `名称「${req.role}」被多个角色占用，请改用 roleId 指定${hint}`,
+        )
+      }
       return fail(DISPATCH_ERRORS.ROLE_NOT_FOUND, `找不到角色：${req.role}`)
     }
-    if (role.ambiguous === true) {
-      return fail(DISPATCH_ERRORS.ROLE_AMBIGUOUS, `角色「${role.name}」的名称或别名与其他角色冲突，请先用 roleId 指定`)
+    // 歧义只在「用名字/别名解析」时阻挡；直接给 roleId 仍然可用（否则纠错提示是空话）
+    const refKey = String(req.role).trim().toLowerCase()
+    if (role.ambiguous === true && refKey !== String(role.roleId).toLowerCase()) {
+      return fail(
+        DISPATCH_ERRORS.ROLE_AMBIGUOUS,
+        `角色「${role.name}」的名称或别名与其他角色冲突，请改用 roleId（${role.roleId}）指定`,
+      )
     }
     if (role.enabled === false || role.disabled === true) {
       return fail(DISPATCH_ERRORS.ROLE_DISABLED, `角色「${role.name}」已停用，不能派单`)
@@ -125,19 +168,31 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
       }
     }
 
-    // 4. 并发纪律：写串行、只读限流
+    // 4. 并发纪律：**先占槽再启动**，失败回滚
+    const projectKey =
+      typeof req.projectKey === 'string' && req.projectKey ? req.projectKey : DEFAULT_PROJECT_KEY
+    const { writes, readonly } = countsFor(projectKey)
+
     if (!readOnly) {
-      if (serializeWrites && countWrites() > 0) {
+      if (serializeWrites && writes > 0) {
         return fail(
           DISPATCH_ERRORS.WRITE_CONFLICT,
           '同一项目已有写任务在执行；写任务默认串行（可在项目配置里调整）',
         )
       }
-    } else if (countReadonly() >= maxParallelReadonly) {
+    } else if (readonly >= maxParallelReadonly) {
       return fail(
         DISPATCH_ERRORS.READONLY_LIMIT,
         `只读任务已达并发上限 ${maxParallelReadonly}，请等其中一个完成`,
       )
+    }
+
+    /** @type {object} */
+    const token = {}
+    active.set(token, { role, readOnly, projectKey, startedAt: now(), ref: null })
+    /** @type {() => void} */
+    const onFinish = () => {
+      release(token)
     }
 
     // 5. 交给宿主适配器
@@ -149,32 +204,29 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
         cwd: req.cwd,
         readOnly,
         timeoutMs: role.timeoutMs,
-        // 透传宿主上下文（如 exec.agent）：dispatcher 不解释它，只负责送到适配器
         context: req.context,
+        onFinish,
       })
     } catch (err) {
+      active.delete(token)
       return fail(
         DISPATCH_ERRORS.ADAPTER_FAILED,
         `派发失败：${err instanceof Error ? err.message : String(err)}`,
       )
     }
     if (!started || !started.taskRef) {
+      active.delete(token)
       return fail(DISPATCH_ERRORS.ADAPTER_FAILED, '派发失败：适配器没有返回任务引用')
     }
 
-    active.set(started.taskRef, { role, readOnly, startedAt: now() })
+    const entry = active.get(token)
+    if (entry) entry.ref = started.taskRef
+    refToToken.set(started.taskRef, token)
+
     return { ok: true, taskRef: started.taskRef, role, readOnly, startedAt: now() }
   }
 
-  /**
-   * 任务结束时释放并发槽位。重复调用无害。
-   * @param {object} taskRef
-   */
-  function release(taskRef) {
-    return active.delete(taskRef)
-  }
-
-  /** 取消：先让宿主取消，成功后释放槽位。 */
+  /** 取消：先让宿主取消，成功后释放槽位（适配器也可能回调 onFinish，release 幂等）。 */
   async function cancel(taskRef) {
     if (!taskRef) return
     if (adapter.cancel) await adapter.cancel(taskRef)
@@ -185,13 +237,25 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
     dispatch,
     release,
     cancel,
-    stats: () => ({
-      active: active.size,
-      writes: countWrites(),
-      readonly: countReadonly(),
-      maxParallelReadonly,
-      serializeWrites,
-    }),
+    stats: (projectKey) => {
+      if (typeof projectKey === 'string') {
+        const c = countsFor(projectKey)
+        return { active: c.writes + c.readonly, ...c, maxParallelReadonly, serializeWrites }
+      }
+      let writes = 0
+      let readonly = 0
+      for (const v of active.values()) {
+        if (v.readOnly) readonly += 1
+        else writes += 1
+      }
+      return {
+        active: active.size,
+        writes,
+        readonly,
+        maxParallelReadonly,
+        serializeWrites,
+      }
+    },
   }
 }
 

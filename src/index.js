@@ -50,13 +50,8 @@ export function apply(ctx, config = {}) {
     runner: runCommand,
   })
 
-  /** @type {{ agent: unknown }} 每次工具执行都会被 onExecute 更新为当次 exec.agent */
-  const holder = { agent: null }
-
-  const adapter = createDshAdapter(ctx, {
-    // startActivation 的 parent 必须来自当前执行上下文；拿不到时适配器会失败关闭
-    getParent: () => holder.agent,
-  })
+  // parent 由每次工具执行的 context.agent 传入（不再用全局 holder）
+  const adapter = createDshAdapter(ctx)
 
   const dispatcher = createDispatcher({
     registry,
@@ -67,14 +62,7 @@ export function apply(ctx, config = {}) {
   let registered = false
 
   ctx.effect(() => {
-    registerTools(ctx, {
-      registry,
-      dispatcher,
-      probe,
-      onExecute: (exec) => {
-        if (exec && typeof exec === 'object' && 'agent' in exec) holder.agent = exec.agent
-      },
-    })
+    registerTools(ctx, { registry, dispatcher, probe })
     registered = true
 
     const line = `[${name}] loaded v${PLUGIN_VERSION} (roles=${registry.list().length})`
@@ -86,7 +74,6 @@ export function apply(ctx, config = {}) {
       if (!registered) return
       registered = false
       probe.invalidate()
-      holder.agent = null
       if (typeof ctx.logger?.info === 'function') ctx.logger.info(`[${name}] disposed`)
       else console.log(`[${name}] disposed`)
     }

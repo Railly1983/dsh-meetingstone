@@ -196,9 +196,7 @@ export function registerTools(ctx, deps) {
         // TODO(P2-approval)：审批必须挂在这里，dispatcher.dispatch() 之前，见文件头第 5 条。
         // 第一版按要求不接审批：不调用 ctx.approval，也不假装已授权。
 
-        // 把宿主执行上下文交给上层（适配器需要 exec.agent 作为 startActivation 的 parent）。
-        // deps.onExecute 是可选钩子：不注入时不产生任何副作用，保持可测。
-        if (typeof deps?.onExecute === 'function') deps.onExecute(exec)
+        // 宿主执行上下文（exec.agent）随请求透传给适配器，作为 startActivation 的 parent。
 
         const input = {
           role: args?.role,

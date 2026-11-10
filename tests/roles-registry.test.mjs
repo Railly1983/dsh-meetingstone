@@ -365,7 +365,8 @@ test('默认值：缺省 permissionPreset/timeoutMs 走内置默认', () => {
   })
 
   const role = registry.resolve('role-min')
-  assert.equal(role?.permissionPreset, 'project-write')
+  // 与 Config schema 默认值一致：没写权限档位时按最严处理（P2 Gate 复核要求统一语义）
+  assert.equal(role?.permissionPreset, 'read-only')
   assert.equal(role?.timeoutMs, DEFAULT_TIMEOUT_MS)
   assert.deepEqual(role?.aliases, [])
   assert.equal(role?.fallbackRoleId, null)

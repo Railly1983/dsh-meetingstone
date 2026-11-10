@@ -190,3 +190,127 @@ test('cancel 调用适配器并释放槽位', async () => {
   assert.equal(cancelled.length, 1)
   assert.equal(dispatcher.stats().active, 0)
 })
+
+// ─── P2 Gate 复核后的回归用例（唐僧复现的两个 bug） ───────────────────────────
+
+test('并发写请求：先占槽再启动，第二个必须被拒（旧实现两个都成功）', async () => {
+  /** @type {(v: any) => void} */
+  let releaseStart
+  const calls = []
+  const registry = createRegistry({ globalRoles: roles })
+  const adapter = {
+    start: (input) => {
+      calls.push(input)
+      return new Promise((resolve) => {
+        releaseStart = resolve
+      })
+    },
+  }
+  const dispatcher = createDispatcher({ registry, adapter })
+
+  const first = dispatcher.dispatch({ role: 'SS', task: '写 A' })
+  // 第一个还没返回（start pending），此时第二个写请求必须被挡
+  const second = await dispatcher.dispatch({ role: 'SS', task: '写 B' })
+  assert.equal(second.ok, false)
+  assert.equal(second.code, DISPATCH_ERRORS.WRITE_CONFLICT)
+  assert.equal(calls.length, 1, '第二个请求不得触达适配器')
+
+  releaseStart({ taskRef: { id: 't1' } })
+  assert.equal((await first).ok, true)
+})
+
+test('onFinish 释放槽位：任务结束后可以继续派单（旧实现永久占槽）', async () => {
+  const captured = []
+  const registry = createRegistry({ globalRoles: roles })
+  const adapter = {
+    start: async (input) => {
+      captured.push(input)
+      return { taskRef: { id: `t${captured.length}` } }
+    },
+  }
+  const dispatcher = createDispatcher({ registry, adapter })
+
+  const a = await dispatcher.dispatch({ role: 'SS', task: '写 A' })
+  assert.equal(a.ok, true)
+  assert.equal(dispatcher.stats().active, 1)
+
+  // 适配器在任务终态回调 onFinish
+  captured[0].onFinish()
+  assert.equal(dispatcher.stats().active, 0, 'onFinish 后槽位应释放')
+
+  const b = await dispatcher.dispatch({ role: 'SS', task: '写 B' })
+  assert.equal(b.ok, true, '槽位释放后应能继续派单')
+})
+
+test('onFinish 幂等：重复回调不会误删别人的槽位', async () => {
+  const captured = []
+  const registry = createRegistry({ globalRoles: roles })
+  const adapter = {
+    start: async (input) => {
+      captured.push(input)
+      return { taskRef: { id: `t${captured.length}` } }
+    },
+  }
+  const dispatcher = createDispatcher({ registry, adapter, limits: { maxParallelReadonly: 2 } })
+
+  const a = await dispatcher.dispatch({ role: 'RV', task: 'r1' })
+  const b = await dispatcher.dispatch({ role: 'RV', task: 'r2' })
+  assert.equal(a.ok && b.ok, true)
+
+  captured[0].onFinish()
+  captured[0].onFinish() // 重复
+  assert.equal(dispatcher.stats().active, 1, '只应释放一个槽位')
+})
+
+test('跨项目隔离：不同项目各占一个写槽，互不误挡', async () => {
+  const registry = createRegistry({ globalRoles: roles })
+  const adapter = { start: async () => ({ taskRef: { id: Math.random().toString(36) } }) }
+  const dispatcher = createDispatcher({ registry, adapter })
+
+  const a = await dispatcher.dispatch({ role: 'SS', task: '写 A', projectKey: 'D:/proj-a' })
+  assert.equal(a.ok, true)
+
+  const b = await dispatcher.dispatch({ role: 'SS', task: '写 B', projectKey: 'D:/proj-b' })
+  assert.equal(b.ok, true, '不同项目的写任务不应互相阻塞')
+
+  const c = await dispatcher.dispatch({ role: 'SS', task: '写 C', projectKey: 'D:/proj-a' })
+  assert.equal(c.code, DISPATCH_ERRORS.WRITE_CONFLICT, '同项目第二个写任务仍应串行')
+})
+
+test('启动失败要回滚槽位，不能把项目永久锁死', async () => {
+  const registry = createRegistry({ globalRoles: roles })
+  let attempt = 0
+  const adapter = {
+    start: async () => {
+      attempt += 1
+      if (attempt === 1) throw new Error('spawn ENOENT')
+      return { taskRef: { id: 't2' } }
+    },
+  }
+  const dispatcher = createDispatcher({ registry, adapter })
+
+  const first = await dispatcher.dispatch({ role: 'SS', task: '写 A' })
+  assert.equal(first.ok, false)
+  assert.equal(first.code, DISPATCH_ERRORS.ADAPTER_FAILED)
+  assert.equal(dispatcher.stats().active, 0, '失败必须回滚占位')
+
+  const second = await dispatcher.dispatch({ role: 'SS', task: '写 B' })
+  assert.equal(second.ok, true, '回滚后应能重试')
+})
+
+test('歧义角色：名字被挡，但 roleId 仍然可用（纠错提示不能是空话）', async () => {
+  const conflicting = [
+    { roleId: 'role-a', name: '同名', aliases: [], channel: { kind: 'in-process' }, permissionPreset: 'read-only', enabled: true },
+    { roleId: 'role-b', name: '同名', aliases: [], channel: { kind: 'in-process' }, permissionPreset: 'read-only', enabled: true },
+  ]
+  const registry = createRegistry({ globalRoles: conflicting })
+  const adapter = { start: async () => ({ taskRef: { id: 't' } }) }
+  const dispatcher = createDispatcher({ registry, adapter })
+
+  const byName = await dispatcher.dispatch({ role: '同名', task: 'x' })
+  assert.equal(byName.code, DISPATCH_ERRORS.ROLE_AMBIGUOUS)
+  assert.match(byName.message, /role-a|role-b/, '提示里要给出可用的 roleId')
+
+  const byId = await dispatcher.dispatch({ role: 'role-a', task: 'x' })
+  assert.equal(byId.ok, true, '明确给 roleId 时不应被歧义挡住')
+})
