@@ -91,19 +91,24 @@ Bundle 是「附带一个配置层的 npm 包」，`dsh.bundle` 回答「这个�
       name: dsh-hello-plugin
 ```
 
-本机第三方实例（L6，仅包结构，未读实现）证实以下写法均合法：
+本机合法写法的**构造示例**（为遵守 `docs/CLEAN_ROOM.md` 的来源边界，此处不复述任何第三方包的实际 patch 内容，仅示意语法形式）：
 
 ```yaml
 - insert:
-    - id: cliworker-now
-      name: dsh-cliworker-now            # 包名
-      inject: [cliworkerNativeReady]     # 行级 inject
-    - id: cliworker-ui-session
-      name: ./runtime-host/dsh-client-ui-session/lib/index.js   # 相对路径
-      inject: [cliworkerNativeReady]
-- id: ui-session
-  disabled: true                         # 按 id 禁用前面层的行
+    - id: some-bundle                # 行 id
+      name: some-bundle              # 形式一：包名
+      inject: [someService]          # 行级 inject
+    - id: some-bundle-ui
+      name: ./lib/client/index.js    # 形式二：相对路径
+      inject: [someService]
+- id: some-service                   # 按 id 覆盖前面层已有行的 config
+  config:
+    enabled: false
+- id: some-legacy-row
+  disabled: true                     # 按 id 禁用前面层的行
 ```
+
+> 说明：以上四种形式（`insert` + 行级 `inject`、包名/相对路径两种 `name`、按 id 覆盖 config、按 id `disabled`）来自官方示例与官方 app-boot 文档；**不再引用第三方包的 patch 原文**（P0-02b 复核指出原稿摘录违反了 clean-room 契约，已按悟空勘误修正）。
 
 | 结构 | 含义 | 来源 |
 | --- | --- | --- |
@@ -155,6 +160,16 @@ Bundle 是「附带一个配置层的 npm 包」，`dsh.bundle` 回答「这个�
 | 本机实例 | L3 中 `- id: ui-settings / config: { enabled: false }` 就是「按 id 覆盖 + 只写一个 config 键」；按整行替换语义，该行其余键依赖 schema 默认值补齐（S1:134 的「let the schema carry the rest」）。此处只记录写法，不断言其是否丢配置 | L3 · S1:134 |
 
 ### 1.6 `engines.dsh`：写法 + 本机陷阱 + 具体建议值
+
+> ## ⚠️ 本节结论已被 `02b-engine-probe.md` 推翻，以 02b 为准
+>
+> 原节基于**默认** `semver.satisfies`（`includePrerelease: false`）推理，结论「官方示例 `>=0.2.0 <0.3.0` 在本机不匹配」**经实证为假**。悟空在隔离 `DSH_HOME` 里做了真实安装：`>=0.2.0 <0.3.0` 安装退出码 0、layer 正常组合；`0.2.2`（正式版精确值）才被拒。
+>
+> 已实证机制：DSH 的比较**带 `includePrerelease: true`**，且保留完整 rc 版本号（不剥 rc）。
+>
+> **最终取值：`"engines": { "dsh": ">=0.2.2-rc.1 <0.3.0-0" }`**（E 组已实装验证）。下界取当前唯一实测基线，上界 `<0.3.0-0` 才是真正排除整个 0.3 预发布线。
+>
+> 以下原文保留作为推理留痕，**不得作为实现依据**。
 
 **官方规则（S1:66）**：用 SemVer 范围声明 bundle 支持的 DSH 版本，例 `"engines": { "dsh": ">=0.2.0 <0.3.0" }`；安装与 profile 启动会拒绝当前 DSH 不满足范围的 bundle；**不写 `engines.dsh` 时改为检查其 `@deepseek-ai/dsh*` peer 依赖范围**（规则指向 `packages/boot/app-boot/README.md#profiles`）。
 
@@ -568,7 +583,7 @@ exit /b %errorlevel%
   "files": ["lib", "cordis.patch.yml"],
   "engines": {
     "node": ">=22.19.0",
-    "dsh": ">=0.2.2-rc.1 <0.3.0"      // ⚠️ 不要照抄官方示例 ">=0.2.0 <0.3.0"，本机 rc 版本按标准 semver 会判 false（见 1.6 / U1）
+    "dsh": ">=0.2.2-rc.1 <0.3.0-0"     // 以 02b-engine-probe.md 实证结论为准（DSH 比较带 includePrerelease）
   },
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" }
