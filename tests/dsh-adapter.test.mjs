@@ -722,3 +722,39 @@ test('没有 prompt 时回退用 description；两者都没有则只发任务', 
   const spec2 = subagents.calls.filter((c) => c.method === 'startActivation')[1].spec
   assert.equal(spec2.request.prompt[0].text, '裸任务')
 })
+
+test('落盘钩子：终态记录的 result 字段必须有值（不能只传 output）', async () => {
+  const started = []
+  const finished = []
+  const subagents = fakeSubagents({ providers: { acp: {} } })
+  // 让 activation.result 立刻以文本结果结算
+  subagents.startActivation = async (spec) => ({
+    childId: 'child-1',
+    name: 'child-1',
+    result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'PONG' }] }),
+    dispose: async () => {},
+  })
+  const adapter = createDshAdapter(
+    { subagents, effect: null },
+    {
+      channels: [],
+      onRunStart: (r) => started.push(r),
+      onRunFinish: (r) => finished.push(r),
+    },
+  )
+  await adapter.start({
+    role: role({ channel: { kind: 'acp-cli' } }),
+    task: 'x',
+    readOnly: false,
+    timeoutMs: 0,
+    context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
+  })
+  await new Promise((r) => setTimeout(r, 30))
+  assert.equal(started.length, 1)
+  assert.equal(started[0].status, 'running')
+  assert.equal(finished.length, 1, '完成时应触发一次终态落盘')
+  assert.equal(finished[0].status, 'completed')
+  assert.equal(finished[0].result, 'PONG', 'result 必须映射成功输出')
+  assert.equal(finished[0].output, 'PONG')
+  assert.equal(finished[0].role, 'role-sashi')
+})

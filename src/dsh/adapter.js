@@ -469,7 +469,13 @@ export function createDshAdapter(ctx, options = {}) {
             at: now(),
           }
           rememberFinished(childId, settled)
-          emitRunFinish({ ...runBase, ...settled, finishedAt: settled.at })
+          emitRunFinish({
+            ...runBase,
+            ...settled,
+            // 落盘字段叫 result：这里显式映射，否则磁盘记录会是空串（真机踩过）
+            result: settled.output,
+            finishedAt: settled.at,
+          })
           cleanup(childId)
         },
         (err) => {
@@ -484,6 +490,7 @@ export function createDshAdapter(ctx, options = {}) {
           emitRunFinish({
             ...runBase,
             ...settled,
+            result: settled.output,
             error: { code: 'ADAPTER_ERROR', message: errorMessage(err) },
             finishedAt: settled.at,
           })
@@ -552,7 +559,7 @@ export function createDshAdapter(ctx, options = {}) {
     }
     rememberFinished(String(childId), settled)
     // 只在底层结算之后写终态：避免"记录已取消、进程其实又成功完成"
-    emitRunFinish({ ...handle.runBase, ...settled, finishedAt: settled.at })
+    emitRunFinish({ ...handle.runBase, ...settled, result: settled.output, finishedAt: settled.at })
   }
 
   // 插件卸载：单一 disposer 内串行 await 全部收尾（02-plugin-spec.md §2.4 的硬要求，
