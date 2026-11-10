@@ -35,6 +35,13 @@ function fakeSubagents(over = {}) {
     },
     async startActivation(spec) {
       calls.push({ method: 'startActivation', spec })
+      // 与真实宿主一致：runtime 读的是 spec.request.*（见 src/dsh/adapter.js 注释）。
+      // 扁平形状会在宿主里炸成 "Cannot read properties of undefined (reading 'maxDepth')"，
+      // 这里把同样的错误提前到测试里，避免再靠真机试错。
+      if (!spec || typeof spec !== 'object' || !spec.request) {
+        throw new Error("Cannot read properties of undefined (reading 'maxDepth')")
+      }
+      if (!spec.request.parent) throw new Error('subagent creation requires the exact live parent agent')
       if (over.startError) throw over.startError
       if (over.activation) return over.activation
       return {
@@ -173,14 +180,15 @@ test('start 成功：把 role/task/cwd 透传给宿主 startActivation', async (
   const startCall = subagents.calls.find((c) => c.method === 'startActivation')
   assert.ok(startCall, '必须真的调用宿主 startActivation')
   const spec = startCall.spec
+  assert.ok(spec.request, 'spec 必须是嵌套 request 形状（运行时契约）')
   assert.equal(spec.provider, 'acp', 'role.channel.kind → provider')
   assert.match(spec.label, /role-sashi/, 'roleId 必须体现在 label 里')
-  assert.equal(spec.prompt[0].type, 'text')
-  assert.equal(spec.prompt[0].text, '改个函数', 'task 必须透传')
-  assert.equal(spec.cwd, 'D:/MeetingStone', 'cwd 必须透传')
+  assert.equal(spec.request.prompt[0].type, 'text')
+  assert.equal(spec.request.prompt[0].text, '改个函数', 'task 必须透传')
+  assert.equal(spec.request.cwd, 'D:/MeetingStone', 'cwd 必须透传')
   assert.equal(spec.delivery, 'caller')
   assert.ok(spec.signal instanceof AbortSignal, '必须传 AbortSignal')
-  assert.ok(spec.parent, 'parent: Agent 必须由注入的 getParent 提供')
+  assert.ok(spec.request.parent, 'parent: Agent 必须由注入的 getParent 提供')
 
   // taskRef 是宿主原生可查引用：childId(SessionId) + provider + name，且全可 JSON 序列化
   assert.equal(res.taskRef.kind, 'subagent-activation')
@@ -488,7 +496,7 @@ test('parent 优先取当次 context.agent，不回退成上个会话', async ()
     context: { agent: agentA },
   })
   const spec = subagents.calls.find((c) => c.method === 'startActivation').spec
-  assert.equal(spec.parent, agentA, 'parent 必须是本次上下文里的 agent')
+  assert.equal(spec.request.parent, agentA, 'parent 必须是本次上下文里的 agent')
 })
 
 test('context 没有 agent 时失败关闭（不做全局回退）', async () => {
@@ -524,7 +532,7 @@ test('模型一致：角色声明 == 通道实例配置 → 允许启动', async
   assert.equal(subagents.calls.filter((c) => c.method === 'startActivation').length, 1)
   // 模型不塞进 spec（官方 spec 没有该字段），而是由 provider 行承载
   const spec = subagents.calls.find((c) => c.method === 'startActivation').spec
-  assert.equal(Object.hasOwn(spec, 'model'), false)
+  assert.equal(Object.hasOwn(spec.request, 'model'), false)
 })
 
 test('模型不一致：角色声明与通道实例冲突 → 拒绝并说明差异', async () => {

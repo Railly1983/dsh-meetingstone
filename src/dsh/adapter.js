@@ -296,14 +296,24 @@ export function createDshAdapter(ctx, options = {}) {
     //    delivery:'caller' —— 「caller delivery only returns the result」（subagent.md）；
     //    TODO(P2-runtime): 该取值尚未在真实会话里验证，若宿主要求 parent delivery 需改这里。
     const controller = new AbortController()
+    // 3. 组装 spec。**运行时形状与官方文档不一致**（2026-11-10 真机核对）：
+    //    实现里 `SubagentRuntime.startActivation(spec)` 读的是 `spec.request.*`
+    //    （`manager.startLocal/startExternal` 里 `const request = spec.request`），
+    //    而文档给的是扁平字段。按文档传扁平对象会得到
+    //      `Cannot read properties of undefined (reading 'maxDepth')`
+    //    因为 `spec.request` 是 undefined。这里按**实现**的嵌套形状组装。
     const spec = {
       provider,
       label: `meetingstone:${role?.roleId ?? 'unknown'}`,
       delivery: 'caller',
-      prompt: [{ type: 'text', text: String(task ?? '') }],
-      parent,
       signal: controller.signal,
-      ...(typeof cwd === 'string' && cwd ? { cwd } : {}),
+      request: {
+        parent,
+        prompt: [{ type: 'text', text: String(task ?? '') }],
+        ...(typeof cwd === 'string' && cwd ? { cwd } : {}),
+        // 不传 maxDepth：实现里 `resolveChildDepth(parent, undefined)` 自带默认上限；
+        // 传了反而要求 provider 具备 depthLimit 能力。
+      },
     }
 
     // 4. 调宿主创建任务。抛错（含权限被拒 / 参数不接受）直接向上抛，不吞。
