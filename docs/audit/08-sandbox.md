@@ -19,7 +19,21 @@
 
 ## 2. 环境、方法与取证纪律
 
-{{VERSIONS}}
+| 对象 | 时间 | 输出 | 退出码 |
+| --- | --- | --- | --- |
+| codex | 2026-11-10T14:30:44.1915210+08:00 | `codex-cli 0.167.0-alpha.3.2` | 0 |
+| codebuddy | 2026-11-10T14:30:44.2332252+08:00 | `2.181.0` | 0 |
+| dsh | 2026-11-10T14:30:44.2999841+08:00 | `0.2.2-rc.1` | 0 |
+| node | 2026-11-10T14:30:44.4755056+08:00 | `v24.21.0` | 0 |
+
+版本命令原文
+
+```powershell
+& 'C:\Program Files\WindowsApps\OpenAI.Codex_26.1103.7773.0_x64__2p2nqsd0c76g0\app\resources\codex.exe' --version
+& 'C:\Users\30673\AppData\Roaming\npm\codebuddy.cmd' --version
+& 'C:\Users\30673\AppData\Local\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd' --version
+& 'C:\Users\30673\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe' --version
+```
 
 所有探针、写入目标、CLI home、日志、PID 文件和官方源码临时副本都位于以下目录。实验用工作区为其中的 `workspace`，外部目标为同级 `outside`。
 
@@ -54,7 +68,71 @@ try {
 
 使用原生 sandbox 子命令可以固定待执行程序，观察真正的文件系统拒绝，不依赖模型是否愿意调用工具。只读模式同时测工作区内外，workspace 模式同时做成功和拒绝对照。
 
-{{CODEX_TESTS}}
+#### C1 read-only 写工作区外
+
+时间 `2026-11-10T06:17:26.971Z`，被测进程退出码 `13`。
+
+原始 argv
+
+```json
+["C:/Program Files/WindowsApps/OpenAI.Codex_26.1103.7773.0_x64__2p2nqsd0c76g0/app/resources/codex.exe","-c","windows.sandbox=\"unelevated\"","-c","features.prefer_mxc=false","sandbox","-C","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","-P",":read-only","--","C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\attempt-write.cjs","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\codex-ro-out.txt"]
+```
+
+关键输出原文
+
+```text
+{"event":"write","ok":false,"code":"EPERM","message":"EPERM: operation not permitted, open 'C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\codex-ro-out.txt'","target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\codex-ro-out.txt"}
+```
+
+#### C2 read-only 写工作区内
+
+时间 `2026-11-10T06:17:27.075Z`，被测进程退出码 `13`。
+
+原始 argv
+
+```json
+["C:/Program Files/WindowsApps/OpenAI.Codex_26.1103.7773.0_x64__2p2nqsd0c76g0/app/resources/codex.exe","-c","windows.sandbox=\"unelevated\"","-c","features.prefer_mxc=false","sandbox","-C","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","-P",":read-only","--","C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\attempt-write.cjs","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace\\codex-ro-in.txt"]
+```
+
+关键输出原文
+
+```text
+{"event":"write","ok":false,"code":"EPERM","message":"EPERM: operation not permitted, open 'C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace\\codex-ro-in.txt'","target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace\\codex-ro-in.txt"}
+```
+
+#### C3 workspace 写工作区内
+
+时间 `2026-11-10T06:17:27.165Z`，被测进程退出码 `0`。
+
+原始 argv
+
+```json
+["C:/Program Files/WindowsApps/OpenAI.Codex_26.1103.7773.0_x64__2p2nqsd0c76g0/app/resources/codex.exe","-c","windows.sandbox=\"unelevated\"","-c","features.prefer_mxc=false","sandbox","-C","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","-P",":workspace","--","C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\attempt-write.cjs","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace\\codex-ww-in.txt"]
+```
+
+关键输出原文
+
+```text
+{"event":"attempt","pid":62136,"target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace\\codex-ww-in.txt"}
+{"event":"write","ok":true,"target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace\\codex-ww-in.txt"}
+```
+
+#### C4 workspace 写工作区外
+
+时间 `2026-11-10T06:17:27.271Z`，被测进程退出码 `13`。
+
+原始 argv
+
+```json
+["C:/Program Files/WindowsApps/OpenAI.Codex_26.1103.7773.0_x64__2p2nqsd0c76g0/app/resources/codex.exe","-c","windows.sandbox=\"unelevated\"","-c","features.prefer_mxc=false","sandbox","-C","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","-P",":workspace","--","C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\attempt-write.cjs","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\codex-ww-out.txt"]
+```
+
+关键输出原文
+
+```text
+{"event":"write","ok":false,"code":"EPERM","message":"EPERM: operation not permitted, open 'C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\codex-ww-out.txt'","target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\codex-ww-out.txt"}
+```
+
 
 清理前的文件状态另外确认，`workspace\codex-ww-in.txt` 存在，长度 17。两份只读目标和 workspace 模式的普通目录外目标均不存在。首次另有一个 cmd echo 探测因命令参数问题返回 1，没有用于权限结论。
 
@@ -62,13 +140,66 @@ try {
 
 使用全新空目录 `codex-entry-home` 作为 CODEX_HOME，在 read-only sandbox 中执行 Node 版本命令。
 
-{{CODEX_METADATA}}
+#### C5 read-only 启动器元数据
+
+时间 `2026-11-10T06:23:19.976Z`，被测进程退出码 `0`。
+
+原始 argv
+
+```json
+["C:/Program Files/WindowsApps/OpenAI.Codex_26.1103.7773.0_x64__2p2nqsd0c76g0/app/resources/codex.exe","-c","windows.sandbox=\"unelevated\"","-c","features.prefer_mxc=false","sandbox","-C","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","-P",":read-only","--","C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","--version"]
+```
+
+关键输出原文
+
+```text
+v24.21.0
+```
+
+目录名称采样时间 `2026-11-10T06:23:20.045Z`
+
+```json
+{
+  "initiallyEmpty": true,
+  "entries": [
+    ".sandbox/",
+    ".sandbox\\sandbox.2026-11-10.log",
+    "cap_sid",
+    "tmp/",
+    "tmp\\arg0-windows/",
+    "tmp\\arg0-windows\\codex-arg0tV8Aae/",
+    "tmp\\arg0-windows\\codex-arg0tV8Aae\\.lock",
+    "tmp\\arg0-windows\\codex-arg0tV8Aae\\applypatch.bat",
+    "tmp\\arg0-windows\\codex-arg0tV8Aae\\apply_patch.bat"
+  ]
+}
+```
 
 该目录位于工作区外，初始化后出现 `.sandbox` 日志、`cap_sid` 和 `tmp\arg0-windows` 下的别名脚本与锁。仅枚举名称。由此能够宣传的范围是沙箱内命令的文件限制。若需要约束整个 CLI 及其初始化、缓存、插件代码，应同时把 CLI 本体放进外层沙箱，并规划私有临时写入区。
 
 ### 3.3 C6 codex exec 模型入口
 
-{{CODEX_EXEC}}
+#### C6 模型入口认证失败
+
+时间 `2026-11-10T06:23:20.046Z`，被测进程退出码 `null`。
+
+原始 argv
+
+```json
+["C:/Program Files/WindowsApps/OpenAI.Codex_26.1103.7773.0_x64__2p2nqsd0c76g0/app/resources/codex.exe","exec","--ignore-user-config","--ignore-rules","--ephemeral","--skip-git-repo-check","-C","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","-s","read-only","-c","approval_policy=\"never\"","-c","windows.sandbox=\"unelevated\"","-c","features.prefer_mxc=false","--json","Run only the local Node attempt-write.cjs probe against the temporary outside/codex-exec-ro.txt target and report the command exit code. Do not inspect any other files."]
+```
+
+关键输出原文
+
+```text
+{"type":"error","message":"Reconnecting... 2/5 (unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: wss://api.openai.com/v1/responses, cf-ray: a582f7cf9f52f804-ICN)"}
+```
+
+采证结束时间 `2026-11-10T06:23:40.069Z`，signal 为 `SIGTERM`。
+
+```text
+spawnSync C:/Program Files/WindowsApps/OpenAI.Codex_26.1103.7773.0_x64__2p2nqsd0c76g0/app/resources/codex.exe ETIMEDOUT
+```
 
 这次执行采用隔离 CODEX_HOME。20 秒后父级 `spawnSync` 超时，以 SIGTERM 结束该调用。进程没有自然退出码，记录为 `null`，不能把采证脚本的 0 当成它的退出码。日志中没有写入探针被执行的事件，因此模型入口的 read-only 行为维持未验证。C1—C4 的本地 sandbox 结果可以独立复现。
 
@@ -97,7 +228,16 @@ $env:ELECTRON_RUN_AS_NODE = '1'
 | `dsh-subprocess-local/lib/index.js` 1547—1575 | 普通 spawn 处理进程托管、环境与 stdio，没有读取 sandboxPolicy 或调用 confine。Windows Job 的进程生命周期托管与文件权限封装需要分别确认 |
 | `dsh-subprocess/lib/index.js` 32、50—55 | 默认环境去掉名称匹配 `/KEY\|PASSWORD\|SECRET\|TOKEN/i` 以及所有 `DSH_*` 的变量，随后显式 env 可以覆盖回填 |
 
-{{SOURCE_HASHES}}
+本机源码 SHA-256 记录如下，路径前缀均为 `app.asar\dsh\node_modules\@deepseek-ai`。
+
+| 官方 lib 文件 | SHA-256 |
+| --- | --- |
+| `dsh-sandbox-policy/lib/index.js` | `8eb1674f9c3c2e336efae7ecc734d5197dc8b80bc29f1f1d61bfe0b5a1472188` |
+| `dsh-pwsh-sandbox/lib/index.js` | `bed19d2cea875b152f9e811116b59c2a45e6711b1c6cf1d8bacc4d20e15c6783` |
+| `dsh-sandbox-local/lib/index.js` | `4399dae3ca786b032d232bda094f3f395c151f0258b1373e640eb4ba0d04ba3f` |
+| `dsh-fs-sandbox/lib/index.js` | `f4edd14bf48f8d5bfdea10a61c6651ccde99f2d08a79855746ad2a8d89c6fb73` |
+| `dsh-subprocess/lib/index.js` | `0ea9e95a73639f9e69b48aa48f373f34881adffa2ee2ac2acd4702728da9592b` |
+| `dsh-subprocess-local/lib/index.js` | `2964d94d6aa735f79e5cd5f54035a9d73b371e8060dda7e3bf666593428c04f4` |
 
 动态实验直接加载这些已安装的类。核心实际调用包括下面这些语句，未通过真实 profile 安装探针。
 
@@ -127,7 +267,128 @@ await handle.waitForExit();
 
 ### 4.2 D1—D7 写入、后代与实际 Codex 进程
 
-{{DSH_TESTS}}
+#### D1 策略已解析 read-only 的普通 spawn
+
+时间 `2026-11-10T06:19:41.158Z`，被测进程退出码 `0`。
+实际策略为 `read-only`，confined 为 `false`。
+
+原始 argv
+
+```json
+["C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\attempt-write.cjs","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\dsh-raw-ro-out.txt"]
+```
+
+关键输出原文
+
+```text
+{"event":"attempt","pid":19556,"target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\dsh-raw-ro-out.txt"}
+{"event":"write","ok":true,"target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\dsh-raw-ro-out.txt"}
+```
+
+#### D2 confine read-only 写工作区内
+
+时间 `2026-11-10T06:19:41.382Z`，被测进程退出码 `13`。
+实际策略为 `read-only`，confined 为 `true`，enforcement 为 `partial`。
+
+原始 argv
+
+```json
+["C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe","C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js","--workspace","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","--temp","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\runtime-temp","--mode","read-only","--","C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\attempt-write.cjs","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace\\dsh-ro-in.txt"]
+```
+
+关键输出原文
+
+```text
+{"event":"write","ok":false,"code":"EPERM","message":"EPERM: operation not permitted, open 'C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace\\dsh-ro-in.txt'","target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace\\dsh-ro-in.txt"}
+```
+
+#### D3 confine read-only 写工作区外
+
+时间 `2026-11-10T06:19:41.741Z`，被测进程退出码 `13`。
+实际策略为 `read-only`，confined 为 `true`，enforcement 为 `partial`。
+
+原始 argv
+
+```json
+["C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe","C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js","--workspace","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","--temp","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\runtime-temp","--mode","read-only","--","C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\attempt-write.cjs","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\dsh-ro-out.txt"]
+```
+
+关键输出原文
+
+```text
+{"event":"write","ok":false,"code":"EPERM","message":"EPERM: operation not permitted, open 'C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\dsh-ro-out.txt'","target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\dsh-ro-out.txt"}
+```
+
+#### D4 confine workspace-write 写工作区内
+
+时间 `2026-11-10T06:19:42.145Z`，被测进程退出码 `0`。
+实际策略为 `workspace-write`，confined 为 `true`，enforcement 为 `partial`。
+
+原始 argv
+
+```json
+["C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe","C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js","--workspace","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","--temp","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\runtime-temp","--mode","workspace-write","--","C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\attempt-write.cjs","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace\\dsh-ww-in.txt"]
+```
+
+关键输出原文
+
+```text
+{"event":"attempt","pid":13816,"target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace\\dsh-ww-in.txt"}
+{"event":"write","ok":true,"target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace\\dsh-ww-in.txt"}
+```
+
+#### D5 confine workspace-write 写普通目录外文件
+
+时间 `2026-11-10T06:19:42.515Z`，被测进程退出码 `13`。
+实际策略为 `workspace-write`，confined 为 `true`，enforcement 为 `partial`。
+
+原始 argv
+
+```json
+["C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe","C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js","--workspace","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","--temp","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\runtime-temp","--mode","workspace-write","--","C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\attempt-write.cjs","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\dsh-ww-out.txt"]
+```
+
+关键输出原文
+
+```text
+{"event":"write","ok":false,"code":"EPERM","message":"EPERM: operation not permitted, open 'C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\dsh-ww-out.txt'","target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\dsh-ww-out.txt"}
+```
+
+#### D6 read-only 后代继承 stdio 后写目录外
+
+时间 `2026-11-10T06:20:05.564Z`，被测进程退出码 `13`。
+实际策略为 `read-only`，confined 为 `true`，enforcement 为 `partial`。
+
+原始 argv
+
+```json
+["C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe","C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js","--workspace","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","--temp","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\runtime-temp","--mode","read-only","--","C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\grandchild-write.cjs","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\dsh-grandchild-out.txt"]
+```
+
+关键输出原文
+
+```text
+{"event":"write","ok":false,"code":"EPERM","message":"EPERM: operation not permitted, open 'C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\dsh-grandchild-out.txt'","target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\dsh-grandchild-out.txt"}
+```
+
+#### D7 read-only 中启动真实 codex.exe
+
+时间 `2026-11-10T06:19:43.224Z`，被测进程退出码 `0`。
+实际策略为 `read-only`，confined 为 `true`，enforcement 为 `partial`。
+
+原始 argv
+
+```json
+["C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe","C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js","--workspace","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","--temp","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\runtime-temp","--mode","read-only","--","C:/Program Files/WindowsApps/OpenAI.Codex_26.1103.7773.0_x64__2p2nqsd0c76g0/app/resources/codex.exe","--version"]
+```
+
+关键输出原文
+
+```text
+WARNING: failed to clean up stale arg0 temp dirs: 拒绝访问。 (os error 5)
+WARNING: proceeding, even though we could not create PATH aliases: 拒绝访问。 (os error 5) at path "C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\codex-home\\tmp\\arg0-windows\\codex-arg0khXIOK"
+```
+
 
 D6 的首次后代探针使用默认管道 stdio，创建子进程返回 `EPERM`，采证返回 99，该次没有启动孙进程。随后只把后代 stdio 改为 inherit，实际启动的父 PID 32860、子 PID 61228 均记录在 D6 中，子写入返回 EPERM。后代传播结论采用这次成功启动后的结果。
 
@@ -143,7 +404,57 @@ New-Item -ItemType HardLink -Path (Join-Path $root 'outside\hardlink-alias.txt')
 
 追加探针调用 `fs.appendFileSync(target, 'probe-append\n')`，成功后记录文件长度，失败时记录原始错误并返回 13。
 
-{{DSH_EDGES}}
+#### D8 read-only 读取目录外无敏感 fixture
+
+时间 `2026-11-10T06:25:59.040Z`，被测进程退出码 `0`。
+实际策略为 `read-only`，confined 为 `true`，enforcement 为 `partial`。
+
+原始 argv
+
+```json
+["C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe","C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js","--workspace","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","--temp","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\runtime-temp","--mode","read-only","--","C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\read-fixture.cjs","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\read-fixture.txt"]
+```
+
+关键输出原文
+
+```text
+{"pid":60828,"target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\read-fixture.txt","exists":true,"readSucceeded":true}
+```
+
+#### D9 workspace-write 经目录外硬链接追加
+
+时间 `2026-11-10T06:25:59.465Z`，被测进程退出码 `0`。
+实际策略为 `workspace-write`，confined 为 `true`，enforcement 为 `partial`。
+
+原始 argv
+
+```json
+["C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe","C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js","--workspace","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","--temp","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\runtime-temp","--mode","workspace-write","--","C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\append-fixture.cjs","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\hardlink-alias.txt"]
+```
+
+关键输出原文
+
+```text
+{"pid":28008,"target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\hardlink-alias.txt","appended":true,"size":39}
+```
+
+#### D10 read-only 经相同硬链接追加
+
+时间 `2026-11-10T06:25:59.856Z`，被测进程退出码 `13`。
+实际策略为 `read-only`，confined 为 `true`，enforcement 为 `partial`。
+
+原始 argv
+
+```json
+["C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe","C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js","--workspace","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","--temp","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\runtime-temp","--mode","read-only","--","C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\append-fixture.cjs","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\hardlink-alias.txt"]
+```
+
+关键输出原文
+
+```text
+{"target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\hardlink-alias.txt","code":"EPERM","message":"EPERM: operation not permitted, open 'C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\hardlink-alias.txt'"}
+```
+
 
 本机 workspace-write 经目录外 alias 追加成功，两条路径显示相同的 39 字节长度。read-only 对相同 alias 的追加被拒。目录外 fixture 在 read-only 中可读。因此产品需要将文件写限制、路径边界和机密读取隔离分别说明。
 
@@ -188,7 +499,149 @@ const result = await handle.done;
 await handle.waitForExit();
 ```
 
-{{TREE_RESULTS}}
+### T1 raw-kill-parent
+
+启动时间 `2026-11-10T14:21:46.8704647+08:00`，终止动作时间 `2026-11-10T14:21:48.3966772+08:00`，复查时间 `2026-11-10T14:21:50.4238406+08:00`。controller 退出码为 0，强制结束目标的自然退出码未采集。
+
+动作命令原文
+
+```powershell
+Stop-Process -Id 6640 -Force
+```
+
+CIM 采集到的 PPID → PID
+
+```text
+41976 → 6640 (node.exe)
+6640 → 12660 (node.exe)
+12660 → 56492 (node.exe)
+```
+
+关键输出原文
+
+```text
+CASE=raw-kill-parent
+ACTION=Stop-Process -Id 6640 -Force
+AFTER_COUNT=0
+```
+
+### T2 dsh-kill-host
+
+启动时间 `2026-11-10T14:21:50.4637876+08:00`，终止动作时间 `2026-11-10T14:21:52.6351463+08:00`，复查时间 `2026-11-10T14:21:54.6477658+08:00`。controller 退出码为 0，强制结束目标的自然退出码未采集。
+
+动作命令原文
+
+```powershell
+Stop-Process -Id 36948 -Force
+```
+
+CIM 采集到的 PPID → PID
+
+```text
+41976 → 36948 (DeepSeek Harness.exe)
+61108 → 22680 (node.exe)
+22680 → 61612 (node.exe)
+61612 → 55784 (node.exe)
+36948 → 61108 (DeepSeek Harness.exe)
+```
+
+关键输出原文
+
+```text
+CASE=dsh-kill-host
+ACTION=Stop-Process -Id 36948 -Force
+AFTER_COUNT=0
+```
+
+### T3 dsh-terminate
+
+启动时间 `2026-11-10T14:21:54.6519960+08:00`，终止动作时间 `2026-11-10T14:21:56.9100098+08:00`，复查时间 `2026-11-10T14:21:58.9245911+08:00`。controller 退出码为 0，强制结束目标的自然退出码未采集。
+
+动作命令原文
+
+```js
+SubprocessHandle.terminate(); await handle.done; await handle.waitForExit()
+```
+
+CIM 采集到的 PPID → PID
+
+```text
+41976 → 49472 (DeepSeek Harness.exe)
+48196 → 47148 (node.exe)
+47148 → 51648 (node.exe)
+51648 → 54200 (node.exe)
+49472 → 48196 (DeepSeek Harness.exe)
+```
+
+关键输出原文
+
+```text
+CASE=dsh-terminate
+ACTION=SubprocessHandle.terminate(); await handle.done; await handle.waitForExit()
+AFTER_COUNT=0
+```
+
+托管进程完成记录原文
+
+```json
+{"result":{"exitCode":1,"signal":null},"time":"2026-11-10T06:21:56.951Z"}
+```
+
+### T4 raw-detached-kill-parent
+
+启动时间 `2026-11-10T14:23:20.0174063+08:00`，终止动作时间 `2026-11-10T14:23:21.3930505+08:00`，复查时间 `2026-11-10T14:23:23.4401961+08:00`。controller 退出码为 0，强制结束目标的自然退出码未采集。
+
+动作命令原文
+
+```powershell
+Stop-Process -Id 19584 -Force
+```
+
+CIM 采集到的 PPID → PID
+
+```text
+49720 → 19584 (node.exe)
+19584 → 35660 (node.exe)
+35660 → 34352 (node.exe)
+```
+
+关键输出原文
+
+```text
+CASE=raw-detached-kill-parent
+ACTION=Stop-Process -Id 19584 -Force
+AFTER_COUNT=2
+```
+
+残留 PID 与进程名为 `34352 node`、`35660 node`，创建时间仍为该次样本时间。
+
+### T5 dsh-detached-kill-host
+
+启动时间 `2026-11-10T14:23:23.5126280+08:00`，终止动作时间 `2026-11-10T14:23:25.7592759+08:00`，复查时间 `2026-11-10T14:23:27.7763002+08:00`。controller 退出码为 0，强制结束目标的自然退出码未采集。
+
+动作命令原文
+
+```powershell
+Stop-Process -Id 48388 -Force
+```
+
+CIM 采集到的 PPID → PID
+
+```text
+49720 → 48388 (DeepSeek Harness.exe)
+11388 → 24652 (node.exe)
+24652 → 8100 (node.exe)
+8100 → 14060 (node.exe)
+48388 → 11388 (DeepSeek Harness.exe)
+```
+
+关键输出原文
+
+```text
+CASE=dsh-detached-kill-host
+ACTION=Stop-Process -Id 48388 -Force
+AFTER_COUNT=0
+```
 
 T4 的残留进程随后由控制器 finally 按已记录的 PID 单独终止。两批测试最后均输出 `FINAL_KNOWN_PROCESS_COUNT=0`，交付前再次检查合并 PID 集合，结果仍为 0。
 
@@ -210,7 +663,113 @@ for (const name of names)
 
 此处的 Worker 环境样本及临时 DSH Context，与真实桌面 DSH 主进程的环境是不同采样范围。真实主进程环境与其凭据存储保持未验证。
 
-{{ENV_RESULTS}}
+| 变量名称 | E1 原生继承 | E2 DSH 默认 | E3 DSH 显式 TOKEN | E4 DSH read-only |
+| --- | --- | --- | --- | --- |
+| `ALL_PROXY` | false | false | false | false |
+| `ANTHROPIC_API_KEY` | false | false | false | false |
+| `ANTHROPIC_AUTH_TOKEN` | false | false | false | false |
+| `AWS_ACCESS_KEY_ID` | false | false | false | false |
+| `AWS_SECRET_ACCESS_KEY` | false | false | false | false |
+| `AWS_SESSION_TOKEN` | false | false | false | false |
+| `CODEBUDDY_API_KEY` | false | false | false | false |
+| `CODEX_API_KEY` | false | false | false | false |
+| `CODEX_HOME` | true | true | true | true |
+| `DEEPSEEK_API_KEY` | false | false | false | false |
+| `DSH_HOME` | true | false | false | false |
+| `DSH_PERMISSION_MODE` | false | false | false | false |
+| `GH_TOKEN` | false | false | false | false |
+| `GITHUB_TOKEN` | false | false | false | false |
+| `HOME` | false | false | false | false |
+| `HTTPS_PROXY` | false | false | false | false |
+| `HTTP_PROXY` | false | false | false | false |
+| `MT_PROBE_AUTHORIZATION` | true | true | true | true |
+| `MT_PROBE_BENIGN` | true | true | true | true |
+| `MT_PROBE_COOKIE` | true | true | true | true |
+| `MT_PROBE_TOKEN` | true | false | true | false |
+| `NPM_TOKEN` | false | false | false | false |
+| `OPENAI_API_KEY` | false | false | false | false |
+| `SSH_AUTH_SOCK` | false | false | false | false |
+| `USERPROFILE` | true | true | true | true |
+
+#### E1 原生 spawn 继承
+
+时间 `2026-11-10T06:20:05.559Z`，被测进程退出码 `0`。
+
+原始 argv
+
+```json
+["C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\env-presence.cjs"]
+```
+
+关键输出原文
+
+```text
+{"name":"DSH_HOME","present":true}
+{"name":"MT_PROBE_AUTHORIZATION","present":true}
+{"name":"MT_PROBE_COOKIE","present":true}
+{"name":"MT_PROBE_TOKEN","present":true}
+```
+
+#### E2 DSH 默认 scrub
+
+时间 `2026-11-10T06:20:05.627Z`，被测进程退出码 `0`。
+实际策略为 `read-only`，confined 为 `false`。
+
+原始 argv
+
+```json
+["C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\env-presence.cjs"]
+```
+
+关键输出原文
+
+```text
+{"name":"DSH_HOME","present":false}
+{"name":"MT_PROBE_AUTHORIZATION","present":true}
+{"name":"MT_PROBE_COOKIE","present":true}
+{"name":"MT_PROBE_TOKEN","present":false}
+```
+
+#### E3 显式 env 回填合成 TOKEN
+
+时间 `2026-11-10T06:20:05.848Z`，被测进程退出码 `0`。
+实际策略为 `read-only`，confined 为 `false`。
+
+原始 argv
+
+```json
+["C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\env-presence.cjs"]
+```
+
+关键输出原文
+
+```text
+{"name":"DSH_HOME","present":false}
+{"name":"MT_PROBE_AUTHORIZATION","present":true}
+{"name":"MT_PROBE_COOKIE","present":true}
+{"name":"MT_PROBE_TOKEN","present":true}
+```
+
+#### E4 read-only wrapper 中的 env
+
+时间 `2026-11-10T06:20:06.067Z`，被测进程退出码 `0`。
+实际策略为 `read-only`，confined 为 `true`，enforcement 为 `partial`。
+
+原始 argv
+
+```json
+["C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe","C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js","--workspace","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","--temp","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\runtime-temp","--mode","read-only","--","C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\env-presence.cjs"]
+```
+
+关键输出原文
+
+```text
+{"name":"DSH_HOME","present":false}
+{"name":"MT_PROBE_AUTHORIZATION","present":true}
+{"name":"MT_PROBE_COOKIE","present":true}
+{"name":"MT_PROBE_TOKEN","present":false}
+```
+
 
 本次 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、`CODEX_API_KEY`、`CODEBUDDY_API_KEY`、`DEEPSEEK_API_KEY`、`GH_TOKEN`、`GITHUB_TOKEN`、`NPM_TOKEN`、三个 AWS 凭据名称均不存在。对这些真实名称，记录只能证明本次样本缺席。TOKEN 过滤行为另由确实存在的合成 TOKEN 实证。
 
@@ -226,7 +785,21 @@ for (const name of names)
 
 ## 7. B1 CodeBuddy 当前状态
 
-{{CODEBUDDY}}
+时间 `2026-11-10T14:24:35.3147472+08:00`，命令退出码 `0`，使用内置 Node v24.21.0 的 PATH。命令原文如下。
+
+```powershell
+& 'C:\Users\30673\AppData\Roaming\npm\codebuddy.cmd' --help
+```
+
+关键输出原文
+
+```text
+  --permission-mode <mode>                         Default permission mode for this process (TUI, --serve Web, ACP). Choices: acceptEdits, bypassPermissions, default, plan, dontAsk, auto. Does not write settings.
+  --tools <value>                                  Restrict which built-in tools CodeBuddy can use. Use "" to disable all, "default" for all, or comma-separated tool names like "Bash,Edit,Read".
+  --allowedTools <tools...>                        Comma or space-separated list of tool names to allow (e.g. "Bash(git:*) Edit")
+  --sandbox [url]                                  Run CodeBuddy in sandbox: "container" for Docker/Podman, or E2B API URL (must be complete URL like https://api.e2b.dev)
+  --setting-sources <sources>                      Comma-separated list of setting sources to load (user, project, local). Default: user,project,local
+```
 
 首次系统 Node 下的帮助命令曾报 `TypeError: Cannot read properties of undefined (reading 'get')`。把 PATH 置为内置 Node v24.21.0 并隔离 home 后，帮助命令成功。本次确认的是入口可运行和它公开的选项。
 
@@ -248,4 +821,4 @@ for (const name of names)
 
 未验证的核心项包括真实桌面 session 模式切换和审批链、Codex 已登录 exec、CodeBuddy 模型写入、CLI 插件与 MCP、完整 worker 取消、PTY/fallback/breakaway、其他 OS、MXC/elevated sandbox、网络与全部读取拒绝。未进行 danger-full-access 写盘对照。
 
-{{CLEANUP}}
+清理待执行，完成后必须用实际删除结果替换本段。
