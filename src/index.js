@@ -66,7 +66,7 @@ export const name = 'meetingstone'
 /** 包名，与 package.json 的 name 一致（补丁按包名解析入口）。 */
 export const PACKAGE_NAME = 'dsh-meetingstone'
 
-export const PLUGIN_VERSION = '0.0.7'
+export const PLUGIN_VERSION = '0.0.8'
 
 /**
  * 插件入口。
@@ -182,6 +182,19 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  /**
+   * 列出当前项目最近的派单记录（工具 `meetingstone_list_runs` 用）。
+   * @param {any} exec
+   * @param {{ limit?: number }} [options]
+   */
+  async function listPersistedRuns(exec, options = {}) {
+    const root = exec?.agent?.session?.header?.cwd
+    const store = storeFor(root)
+    if (!store) return { runs: [], reason: '当前执行上下文没有项目根，无法定位派单记录' }
+    const runs = await store.listRuns({ limit: options.limit })
+    return { runs, dir: store.dir }
+  }
+
   const dispatcher = createDispatcher({
     registry: globalRegistry,
     adapter,
@@ -197,6 +210,7 @@ export function apply(ctx, config = {}) {
       probe,
       resolveRegistry,
       loadPersistedRun,
+      listPersistedRuns,
       ...(typeof hostDefineTool === 'function' ? { defineTool: hostDefineTool } : {}),
     })
     registered = true

@@ -46,15 +46,15 @@
         "BJ",
         "调度"
       ],
-      "description": "技术主管：调度、监工、整合（主 Agent 本体，一般不自派）",
-      "prompt": "你是技术主管，负责调度、监工、整合。你的定位是组织与把关，一般不亲自干活：把任务拆给沙僧/小白，关键修改交悟空复核，重大取舍才找唐僧。只有在没有合适执行者时才自己动手。",
+      "description": "技术主管：调度、监工、整合（主 Agent 本体，不参与派单）",
+      "prompt": "你是技术主管（主 Agent 本体）。你的职责是调度、监工、整合：拆解任务、盯进度、验收结果。你不需要被派单，因为你就是派单的人。",
       "channel": {
         "kind": "in-process",
         "channelId": "ch-inprocess",
         "provider": "spawn"
       },
       "permissionPreset": "project-write",
-      "enabled": true,
+      "enabled": false,
       "timeoutMs": 3600000
     },
     {

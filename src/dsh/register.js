@@ -71,6 +71,7 @@ export const TOOL_NAMES = Object.freeze({
   LIST_ROLES: 'meetingstone_list_roles',
   DISPATCH: 'meetingstone_dispatch',
   GET_TASK: 'meetingstone_get_task',
+  LIST_RUNS: 'meetingstone_list_runs',
   CANCEL_TASK: 'meetingstone_cancel_task',
   CLI_STATUS: 'meetingstone_cli_status',
 })
@@ -85,6 +86,24 @@ export const CLI_STATUS_CLIS = Object.freeze(['codex', 'codebuddy', 'claude'])
  */
 function renderObject(_args, value) {
   return [{ type: 'text', text: JSON.stringify(value ?? null) }]
+}
+
+/**
+ * 归一化并发计数键。
+ *
+ * 为什么需要：`dispatcher` 用**精确字符串**比较 projectKey，`D:/P` 与 `d:/p/`
+ * 会被当成两个项目，从而绕过"同项目写任务串行"（沙僧审计实测）。
+ * Windows 大小写不敏感、尾斜杠等价，统一折叠；POSIX 只去尾斜杠，避免误并不同目录。
+ *
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+export function normalizeProjectKey(value) {
+  if (typeof value !== 'string') return null
+  let key = value.trim().replace(/[\\/]+$/, '')
+  if (!key) return null
+  if (process.platform === 'win32') key = key.toLowerCase()
+  return key
 }
 
 /**
@@ -248,7 +267,7 @@ function toCliView(r) {
  * @returns {Array<{ name: string }>} 已注册的工具定义（便于调用方/测试核对）
  */
 export function registerTools(ctx, deps) {
-  const { registry, dispatcher, probe, loadPersistedRun } = deps ?? {}
+  const { registry, dispatcher, probe, loadPersistedRun, listPersistedRuns } = deps ?? {}
 
   /**
    * 取一次任务的结果（内存优先、磁盘兜底），供上下文重放使用。
@@ -380,8 +399,9 @@ export function registerTools(ctx, deps) {
           ...(typeof args?.cwd === 'string' ? { cwd: args.cwd } : {}),
           ...(typeof args?.readOnly === 'boolean' ? { readOnly: args.readOnly } : {}),
           ...(continuation ? { continuation } : {}),
-          // 并发计数按项目隔离：不传的话 dispatcher 会把所有项目算成 default（真机审计发现）
-          ...(typeof projectRoot === 'string' && projectRoot ? { projectKey: projectRoot } : {}),
+          // 并发计数按项目隔离：不传的话 dispatcher 会把所有项目算成 default（真机审计发现）。
+          // 必须归一化：Windows 大小写不敏感、尾斜杠等价，否则 'D:/P' 与 'd:/p/' 会被当成两个项目而绕过串行。
+          ...(normalizeProjectKey(projectRoot) ? { projectKey: normalizeProjectKey(projectRoot) } : {}),
           registry: effective.registry,
           ...(agent || projectRoot
             ? { context: { ...(agent ? { agent } : {}), ...(projectRoot ? { projectRoot } : {}) } }
@@ -395,6 +415,23 @@ export function registerTools(ctx, deps) {
           return { ...result, projectErrors: effective.projectErrors }
         }
         return result
+      },
+    },
+    {
+      name: TOOL_NAMES.LIST_RUNS,
+      description:
+        '列出当前项目最近的派单记录（新的在前）：childId、角色、通道、模型、状态、耗时与 200 字预览。' +
+        '数据来自 `.meetingstone/runs/`，DSH 重启后仍可查；用于回答"我派过哪些任务、现在什么状态"。',
+      parameters: {
+        limit: { type: 'number', description: '最多返回多少条（默认 20，上限 200）' },
+      },
+      output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
+      async execute(args, exec) {
+        if (typeof listPersistedRuns !== 'function') {
+          return { runs: [], reason: '当前插件未启用派单记录' }
+        }
+        const limit = typeof args?.limit === 'number' ? args.limit : undefined
+        return listPersistedRuns(exec, { limit })
       },
     },
     {

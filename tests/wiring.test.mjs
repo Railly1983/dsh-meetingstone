@@ -63,10 +63,10 @@ test('inject 声明了 tools 依赖', () => {
   assert.deepEqual(inject, ['tools', 'subagents'], 'tools 用于注册，subagents 用于派单与可用性')
 })
 
-test('apply 注册五个工具且不抛错（即便宿主没有 subagents）', () => {
+test('apply 注册六个工具且不抛错（即便宿主没有 subagents）', () => {
   const { ctx, tools } = makeCtx()
   apply(ctx, config)
-  assert.equal(tools.length, 5)
+  assert.equal(tools.length, 6)
   const names = tools.map((t) => t.name).sort()
   assert.deepEqual(names, [
     'meetingstone_cancel_task',
@@ -74,6 +74,7 @@ test('apply 注册五个工具且不抛错（即便宿主没有 subagents）', (
     'meetingstone_dispatch',
     'meetingstone_get_task',
     'meetingstone_list_roles',
+    'meetingstone_list_runs',
   ])
   for (const t of tools) {
     assert.equal(typeof t.execute, 'function', `${t.name} 缺少 execute`)
@@ -125,7 +126,7 @@ test('注入宿主 defineTool 时传的是作者 spec 字典（不双重编译�
     probe: { probe: async () => ({}), probeAll: async () => [] },
     defineTool: fakeDefineTool,
   })
-  assert.equal(seen.length, 5)
+  assert.equal(seen.length, 6)
   assert.equal(Object.hasOwn(seen[1].parameters, 'readOnly'), true, '应把作者 DSL 交给 defineTool')
   assert.equal(seen[1].parameters.readOnly.type, 'boolean')
   assert.equal(seen[1].parameters.type, undefined, '不能预先编译，否则 defineTool 会二次编译')
@@ -175,7 +176,7 @@ test('dispose 幂等，且在 dispose 后再次 dispose 不报错', () => {
 test('空配置也能加载（roles=0）', () => {
   const { ctx, tools, logs } = makeCtx()
   assert.doesNotThrow(() => apply(ctx, {}))
-  assert.equal(tools.length, 5)
+  assert.equal(tools.length, 6)
   assert.ok(logs.some((l) => l.includes('roles=0')))
 })
 
@@ -302,7 +303,7 @@ test('dispatch 传入 projectKey（按项目隔离并发）', async () => {
   )
   const spec = registered.get('meetingstone_dispatch')
   await spec.execute({ role: 'SS', task: 'x' }, { agent: { session: { header: { cwd: 'D:/proj-a' } } } })
-  assert.equal(calls[0].projectKey, 'D:/proj-a', '必须把项目根作为并发计数键')
+  assert.equal(calls[0].projectKey, 'd:/proj-a', '必须把项目根归一化后作为并发计数键（Windows 折叠大小写）')
 })
 
 test('get_task：running 时以内存为准，不被磁盘快照覆盖', async () => {

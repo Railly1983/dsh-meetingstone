@@ -319,18 +319,19 @@ function makeDeps(over = {}) {
   return { deps, dispatchCalls }
 }
 
-test('registerTools：恰好注册五个工具，名字正确、描述非空', () => {
+test('registerTools：恰好注册六个工具，名字正确、描述非空', () => {
   const { ctx, registered } = fakeCtx()
   const { deps } = makeDeps()
   const tools = registerTools(ctx, deps)
 
-  assert.equal(registered.length, 5, '第一版注册五个工具')
-  assert.equal(tools.length, 5)
+  assert.equal(registered.length, 6, '当前注册六个工具')
+  assert.equal(tools.length, 6)
   assert.deepEqual(
     registered.map((t) => t.name),
     [
       TOOL_NAMES.LIST_ROLES,
       TOOL_NAMES.DISPATCH,
+      TOOL_NAMES.LIST_RUNS,
       TOOL_NAMES.GET_TASK,
       TOOL_NAMES.CANCEL_TASK,
       TOOL_NAMES.CLI_STATUS,
@@ -364,6 +365,7 @@ test('registerTools：defineTool 可注入（生产注入真实实现，测试�
   assert.deepEqual(seen, [
     TOOL_NAMES.LIST_ROLES,
     TOOL_NAMES.DISPATCH,
+    TOOL_NAMES.LIST_RUNS,
     TOOL_NAMES.GET_TASK,
     TOOL_NAMES.CANCEL_TASK,
     TOOL_NAMES.CLI_STATUS,
@@ -416,7 +418,7 @@ test('meetingstone_cli_status：只透传探测字段，不返回余额、不编
   const { deps } = makeDeps()
   registerTools(ctx, deps)
 
-  const all = await registered[4].execute({})
+  const all = await registered[5].execute({})
   assert.equal(all.clis.length, 3)
   for (const item of all.clis) {
     for (const key of ['installed', 'path', 'version', 'source', 'checkedAt', 'notes']) {
@@ -427,12 +429,12 @@ test('meetingstone_cli_status：只透传探测字段，不返回余额、不编
     }
   }
 
-  const one = await registered[4].execute({ cli: 'codex' })
+  const one = await registered[5].execute({ cli: 'codex' })
   assert.equal(one.clis.length, 1)
   assert.equal(one.clis[0].cli, 'codex')
   assert.equal(one.clis[0].installed, true)
 
-  const bad = await registered[4].execute({ cli: 'nope' })
+  const bad = await registered[5].execute({ cli: 'nope' })
   assert.equal(bad.error, 'UNKNOWN_CLI')
 })
 
@@ -440,7 +442,7 @@ test('meetingstone_cli_status：探测器未注入时失败关闭，不编造状
   const { ctx, registered } = fakeCtx()
   const { deps } = makeDeps()
   registerTools(ctx, { ...deps, probe: null })
-  const out = await registered[4].execute({})
+  const out = await registered[5].execute({})
   assert.equal(out.error, 'PROBE_UNAVAILABLE')
 })
 

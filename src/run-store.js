@@ -122,10 +122,12 @@ export function createRunStore(options) {
     const result = truncateUtf8(record?.result ?? '', maxResultBytes, {
       headBytes: Math.floor(maxResultBytes * 0.75),
     })
-    const err = record?.error
+    const rawError = record?.error
+    // 注意：不能在初始化式里引用 err 自身（TDZ）。用 rawError 取字段。
+    const err = rawError
       ? {
-          code: truncateUtf8(err_code(err), MAX_ERROR_BYTES).text,
-          message: truncateUtf8(err_message(err), MAX_ERROR_BYTES).text,
+          code: truncateUtf8(err_code(rawError), MAX_ERROR_BYTES).text,
+          message: truncateUtf8(err_message(rawError), MAX_ERROR_BYTES).text,
         }
       : null
     return {
@@ -210,6 +212,52 @@ export function createRunStore(options) {
   }
 
   /**
+   * 列出最近的派单记录（新的在前），只返回摘要，不返回完整结果。
+   * 目的：让 `meetingstone_list_runs` 能回答"我派过哪些任务、现在什么状态"，
+   * 而不是只能靠 childId 逐个查。
+   *
+   * @param {{ limit?: number }} [options]
+   */
+  async function listRuns(options = {}) {
+    const limit = Math.max(1, Math.min(200, Math.floor(options.limit ?? 20)))
+    let names
+    try {
+      names = await fs.readdir(dir)
+    } catch {
+      return []
+    }
+    const records = []
+    for (const name of names) {
+      if (!name.endsWith('.json')) continue
+      try {
+        const text = await fs.readFile(join(dir, name), 'utf8')
+        const parsed = JSON.parse(text)
+        if (!parsed || typeof parsed !== 'object') continue
+        records.push({
+          childId: parsed.childId ?? name.replace(/\.json$/, ''),
+          role: parsed.role ?? null,
+          channel: parsed.channel ?? null,
+          provider: parsed.provider ?? null,
+          model: parsed.model ?? null,
+          status: parsed.status ?? 'unknown',
+          stopReason: parsed.stopReason ?? null,
+          createdAt: parsed.createdAt ?? null,
+          finishedAt: parsed.finishedAt ?? null,
+          resultBytes: parsed.resultBytes ?? 0,
+          resultTruncated: parsed.resultTruncated === true,
+          error: parsed.error ?? null,
+          // 摘要：只取前 200 字符，避免把整份结果塞进列表
+          preview: typeof parsed.result === 'string' ? parsed.result.slice(0, 200) : '',
+        })
+      } catch {
+        /* 单条坏记录跳过，不影响列表 */
+      }
+    }
+    records.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+    return records.slice(0, limit)
+  }
+
+  /**
    * 清理：先按条数，再按时长。只处理本目录下的 `.json`。
    */
   async function pruneRuns() {
@@ -249,7 +297,7 @@ export function createRunStore(options) {
     return { removed }
   }
 
-  return { root, dir, writeRun, loadRun, pruneRuns, truncateUtf8 }
+  return { root, dir, writeRun, loadRun, listRuns, pruneRuns, truncateUtf8 }
 }
 
 /** @param {any} error */

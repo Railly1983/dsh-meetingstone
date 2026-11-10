@@ -45,12 +45,12 @@ test('导出契约：name / PACKAGE_NAME / apply', () => {
   assert.equal(typeof apply, 'function')
 })
 
-test('apply 注册 effect 与五个工具', () => {
+test('apply 注册 effect 与六个工具', () => {
   const { ctx, disposers, tools } = makeCtx()
   apply(ctx)
   assert.ok(disposers.length >= 1)
   for (const d of disposers) assert.equal(typeof d, 'function', '每个 effect 都必须返回 disposer')
-  assert.equal(tools.length, 5)
+  assert.equal(tools.length, 6)
 })
 
 test('生命周期：loaded 后 disposed，且整体 dispose 幂等', () => {
