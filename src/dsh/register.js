@@ -416,8 +416,9 @@ export function registerTools(ctx, deps) {
           return { status: 'unknown', reason: '当前派单器不支持结果查询' }
         }
         const live = await dispatcher.getTask(id)
-        // 内存里是 running/unknown 时才去磁盘找终态（内存已完成就直接返回，避免多读一次文件）
-        if (live?.status === 'running' || live?.status === 'unknown') {
+        // 只在内存确实不知道（unknown）时才查磁盘：running 必须以内存实时状态为准，
+        // 否则会把磁盘里"派单瞬间写的 running"当成当前状态（字段形状也不一致）。
+        if (live?.status === 'unknown') {
           const persisted = await loadPersistedRun?.(exec, id)
           if (persisted) return persisted
         }

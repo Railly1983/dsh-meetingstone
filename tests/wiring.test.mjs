@@ -304,3 +304,22 @@ test('dispatch 传入 projectKey（按项目隔离并发）', async () => {
   await spec.execute({ role: 'SS', task: 'x' }, { agent: { session: { header: { cwd: 'D:/proj-a' } } } })
   assert.equal(calls[0].projectKey, 'D:/proj-a', '必须把项目根作为并发计数键')
 })
+
+test('get_task：running 时以内存为准，不被磁盘快照覆盖', async () => {
+  const registered = new Map()
+  let diskReads = 0
+  registerTools(
+    { tools: { register: (spec) => registered.set(spec.name, spec) } },
+    {
+      registry: { list: () => [], resolve: () => null, errors: [] },
+      dispatcher: { dispatch: async () => ({}), getTask: async () => ({ status: 'running', childId: 'c1', output: '' }) },
+      probe: { probe: async () => ({}) },
+      loadPersistedRun: async () => { diskReads += 1; return { status: 'running', schemaVersion: 1 } },
+    },
+  )
+  const spec = registered.get('meetingstone_get_task')
+  const out = await spec.execute({ childId: 'c1' }, { agent: { session: { header: { cwd: 'D:/p' } } } })
+  assert.equal(out.status, 'running')
+  assert.equal(diskReads, 0, 'running 时不该读磁盘')
+  assert.equal(out.schemaVersion, undefined)
+})
