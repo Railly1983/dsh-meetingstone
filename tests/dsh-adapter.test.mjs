@@ -758,3 +758,58 @@ test('落盘钩子：终态记录的 result 字段必须有值（不能只传 ou
   assert.equal(finished[0].output, 'PONG')
   assert.equal(finished[0].role, 'role-sashi')
 })
+
+test('安全回归：channelId 指向只读实例但 provider 声明可写 → 拒绝（不能只读校验通过跑可写通道）', async () => {
+  const subagents = fakeSubagents({ providers: { acp: {}, 'acp-ro': {}, codex: {} } })
+  const adapter = createDshAdapter(
+    { subagents, effect: null },
+    {
+      channels: [
+        { channelId: 'ch-acp-ro', kind: 'acp-cli', provider: 'acp-ro', permissionPreset: 'read-only' },
+      ],
+    },
+  )
+  await assert.rejects(
+    () =>
+      adapter.start({
+        role: role({
+          channel: { kind: 'acp-cli', channelId: 'ch-acp-ro', provider: 'acp' },
+          permissionPreset: 'read-only',
+        }),
+        task: 'review',
+        readOnly: true,
+        timeoutMs: 0,
+        context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
+      }),
+    /CHANNEL_MISMATCH/,
+    '声明 provider 与实例不一致必须拒绝（否则只读是假的）',
+  )
+})
+
+test('安全回归：执行的 provider 取自通道实例，而不是角色声明', async () => {
+  const subagents = fakeSubagents({ providers: { 'codex-ro': {} } })
+  const adapter = createDshAdapter(
+    { subagents, effect: null },
+    { channels: [{ channelId: 'ch-ro', kind: 'codex', provider: 'codex-ro', permissionPreset: 'read-only' }] },
+  )
+  await adapter.start({
+    role: role({ channel: { kind: 'codex', channelId: 'ch-ro' }, permissionPreset: 'read-only' }),
+    task: 'review',
+    readOnly: true,
+    timeoutMs: 0,
+    context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
+  })
+  const spec = subagents.calls.find((c) => c.method === 'startActivation').spec
+  assert.equal(spec.provider, 'codex-ro', '必须用实例的 provider 执行')
+})
+
+test('安全回归：canStart 对实例与声明不一致给出可诊断原因', () => {
+  const subagents = fakeSubagents({ providers: { 'acp-ro': {} } })
+  const adapter = createDshAdapter(
+    { subagents, effect: null },
+    { channels: [{ channelId: 'ch-ro', kind: 'acp-cli', provider: 'acp-ro', permissionPreset: 'read-only' }] },
+  )
+  const res = adapter.canStart(role({ channel: { kind: 'acp-cli', channelId: 'ch-ro', provider: 'acp' } }))
+  assert.equal(res.ok, false)
+  assert.match(res.reason, /CHANNEL_MISMATCH/)
+})

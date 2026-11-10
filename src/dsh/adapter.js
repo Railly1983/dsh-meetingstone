@@ -268,7 +268,13 @@ export function createDshAdapter(ctx, options = {}) {
    * 拿不到查询能力或查不到 provider，一律 ok:false。
    */
   function canStart(role) {
-    const provider = providerNameFor(role)
+    // 与 start 用同一套路由解析：实例不一致/不存在时提前给出可诊断原因，而不是等到启动才抛
+    let provider
+    try {
+      provider = resolveRoute(role).provider
+    } catch (err) {
+      return { ok: false, reason: errorMessage(err) }
+    }
     const subagents = safeService(ctx, 'subagents')
     if (!provider || !subagents || typeof subagents.getProvider !== 'function') {
       return { ok: false, reason: '无法确认 provider 是否注册' }
@@ -287,12 +293,57 @@ export function createDshAdapter(ctx, options = {}) {
   }
 
   /** 启动一次委派。任何失败都抛，不吞、不降级。 */
+  /**
+   * 解析一次派单的实际执行路由。
+   *
+   * 规则（fail-closed）：
+   * - 没有 channelId：沿用角色声明的 provider/kind（老配置兼容）
+   * - 有 channelId：**以实例的 provider 为准**；角色声明的 provider/kind 与实例不一致就拒绝
+   *   （`CHANNEL_MISMATCH`），实例不存在就拒绝（`CHANNEL_NOT_FOUND`）
+   *
+   * @param {any} role
+   * @returns {{ provider: string | null, instance: any | null }}
+   */
+  function resolveRoute(role) {
+    const channelId = role?.channel?.channelId
+    if (!channelId) return { provider: providerNameFor(role), instance: null }
+    const instance = channelsById.get(String(channelId))
+    if (!instance) {
+      throw new Error(`CHANNEL_NOT_FOUND: 角色引用的通道实例 ${channelId} 不存在，拒绝启动`)
+    }
+    const instanceProvider =
+      typeof instance.provider === 'string' && instance.provider.trim()
+        ? instance.provider.trim()
+        : /** @type {Record<string, string>} */ (PROVIDER_BY_KIND)[instance.kind] ?? null
+    if (!instanceProvider) {
+      throw new Error(`CHANNEL_MISMATCH: 通道实例 ${channelId} 既没声明 provider 也没有已知 kind，拒绝启动`)
+    }
+    const declaredProvider = role?.channel?.provider
+    if (typeof declaredProvider === 'string' && declaredProvider.trim() && declaredProvider.trim() !== instanceProvider) {
+      throw new Error(
+        `CHANNEL_MISMATCH: 角色声明的 provider 是 ${declaredProvider}，但通道实例 ${channelId} 实际是 ${instanceProvider}；` +
+          '两者必须一致，否则会出现「只读校验通过、实际跑可写通道」。已拒绝启动',
+      )
+    }
+    const declaredKind = role?.channel?.kind
+    if (typeof declaredKind === 'string' && declaredKind && instance.kind && declaredKind !== instance.kind) {
+      throw new Error(
+        `CHANNEL_MISMATCH: 角色声明的通道类型是 ${declaredKind}，但实例 ${channelId} 是 ${instance.kind}，已拒绝启动`,
+      )
+    }
+    return { provider: instanceProvider, instance }
+  }
+
   async function start(input) {
     const { role, task, cwd, readOnly, timeoutMs } = input ?? {}
     // readOnly 在这里被显式「不消费」：官方 SubagentActivationSpec 没有 permission/readOnly
     // 字段（TODO(P2-readonly)），绝不塞进 spec 假装生效；只在结果/taskRef 上标 false。
     void readOnly
-    const provider = providerNameFor(role)
+    // 执行路由**必须**以引用的通道实例为准，不能只信角色自己的声明。
+    // 否则：角色写 channelId=只读实例 + provider=可写 provider，就会通过只读校验、
+    // 却实际跑可写通道（沙僧审计发现，真实安全漏洞）。
+    const route = resolveRoute(role)
+    const provider = route.provider
     const subagents = safeService(ctx, 'subagents')
 
     // 1. 失败关闭：重新查询，不依赖 canStart 是否被上层调用过。
@@ -328,7 +379,7 @@ export function createDshAdapter(ctx, options = {}) {
     let readOnlyEnforced = false
     if (readOnly === true) {
       const channelId = role?.channel?.channelId
-      const instance = channelId ? channelsById.get(String(channelId)) : null
+      const instance = route.instance
       if (!instance) {
         throw new Error(
           'READONLY_UNENFORCEABLE: 角色是只读档位，但没有引用任何通道实例，无法确认该通道真的只读。' +
