@@ -16,7 +16,17 @@
 ```powershell
 $dsh = "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 
-# 从本地 checkout 安装（开发期）
+# 方式 A（推荐，生产/日常）：先打包，再装 tarball
+#   ⚠️ tgz 必须放在**仓库之外**的稳定目录：pnpm 处理 file: 依赖时会去读该目录的
+#      node_modules/依赖图，放在仓库内会因符号链接权限报 EPERM
+& $node $pnpm pack                      # 在仓库根执行，产出 dsh-meetingstone-<版本>.tgz
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.dsh\packages" | Out-Null
+Move-Item .\dsh-meetingstone-*.tgz "$env:USERPROFILE\.dsh\packages\" -Force
+& $dsh plugin --profile desktop add "$env:USERPROFILE\.dsh\packages\dsh-meetingstone-0.0.1.tgz"
+
+# 方式 B（开发期，改代码即生效）：linked 安装
+#   ⚠️ profile 里会创建指向仓库的 **junction**；**不要对 profile 目录做递归删除**
+#      （本次已实测：递归删除会顺着 junction 进入仓库）
 & $dsh plugin --profile desktop add "D:\MeetingStone"
 ```
 
@@ -160,7 +170,9 @@ Copy-Item "$env:USERPROFILE\.dsh\profiles\desktop\package.json.bak-<时间戳>" 
 | `installation rejected: ... is incompatible with dsh ...` | `engines.dsh` 不匹配 | 确认 DSH 版本；本插件要求 `>=0.2.2-rc.1 <0.3.0-0` |
 | `ERR_UNKNOWN_BUILTIN_MODULE: node:sqlite` | 用系统 node v20 跑了内置 pnpm | 用 DSH 内置 node v24.21.0 执行 |
 | 安装成功但界面上看不到任何东西 | 第一版**没有 UI**（已决定排到 0.2.0） | 角色表通过 `meetingstone_list_roles` 工具查看，配置写在 profile 的 `cordis.patch.yml` |
-| 想用外部 CLI 派单 | 需要先装官方 provider bundle | 见 `docs/audit/03-native-capabilities.md` §3（B 类），阶段 2 会给出具体命令 |
+| 想用外部 CLI 派单 | 需要先装官方 provider bundle | `& $dsh plugin --profile desktop add @deepseek-ai/dsh-subagent-codex@0.2.2-rc.1` |
+| 安装报 `EPERM: rename ... dsh-meetingstone_tmp_*` | profile 里残留了旧的 junction，pnpm 无法在它上面 rename | 先 `cmd /c rmdir "<profile>\node_modules\dsh-meetingstone"`（只删链接），再重装 |
+| 安装报 `EPERM: symlink` | tgz 放在仓库内，pnpm 试图链接其 devDependencies | 把 tgz 移到仓库外（如 `~/.dsh/packages`）再装 |
 
 ## 开发者：跑测试
 

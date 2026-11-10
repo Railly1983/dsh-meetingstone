@@ -30,8 +30,18 @@
       "permissionPreset": "read-only",
       "enabled": true,
       "timeoutMs": 120000
+    },
+    {
+      "roleId": "role-selftest-codex",
+      "name": "自检员Codex",
+      "aliases": ["SELFTESTCODEX"],
+      "description": "外部 CLI 通道自检：走官方 codex provider（需装 @deepseek-ai/dsh-subagent-codex）",
+      "channel": { "kind": "codex", "provider": "codex" },
+      "permissionPreset": "project-write",
+      "enabled": true,
+      "timeoutMs": 300000
     }
   ],
-  "dispatchNotes": "仓库自带项目级自检配置：验证派单/结果回读/取消/只读拒绝。",
+  "dispatchNotes": "仓库自带项目级自检配置：验证派单/结果回读/取消/只读拒绝/外部 CLI 通道。",
   "limits": { "maxParallelReadonly": 2, "serializeWrites": true }
 }

@@ -499,3 +499,21 @@ LEFTOVER=0
 我们的插件当前以 `link:D:/MeetingStone` 装进 `desktop`，profile 里是 **junction** 指向仓库。演练时复制/删除 profile 目录会**顺着 junction 进入真实仓库**（本次删除尝试触发了对 `.git/objects` 的删除，因文件只读而失败；事后 `git fsck` 复核仓库完好）。
 
 处置建议：**真实 profile 改用 tarball 安装**（`pnpm pack` → `dsh plugin add ./dsh-meetingstone-0.0.1.tgz`），profile 里是副本而非链接，既避免递归删除风险，也消掉 pnpm 的 peer 警告。开发期可继续用 link，但**不要对 profile 目录做递归删除**。
+
+
+### 事故实证（2026-11-10，后续更多证据）
+
+对 profile 目录做递归删除时，**确实顺着 junction 删进了仓库的 `.git`**：
+`.git/HEAD`、`.git/config`、`.git/index` 被删除，`objects/` 与 `refs/` 幸存。
+恢复方式（已验证有效）：
+
+```powershell
+git init -b main            # 补回 HEAD/config
+git show-ref                # refs/heads/main 仍指向原提交
+git reset --mixed HEAD      # 重建 index，不动工作树
+git fsck                   # 无错误
+```
+
+恢复结果：**36 个提交、历史完整、工作树无损失**。
+
+结论不变且更强：**不要对 profile 目录做递归删除**；生产环境用 tarball 安装（无 junction）。
