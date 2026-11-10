@@ -3,23 +3,32 @@
  * 派单编排（C3）。纯逻辑 + 可注入适配器，便于单测；真实 DSH 调用在 dsh/adapter.js。
  *
  * 职责边界（勿扩大）：
- * - 只做「角色 → 通道 → 一次委派」的路由与并发纪律
+ * - 只做「角色 → 通道 → 一次委派」的路由、隔离与并发纪律
  * - 不建任务队列、不存会话、不做重试策略、不渲染 UI
- * - 真正的生命周期（job、取消、进程树）归宿主 provider / ctx.jobs
+ * - 工作树管理由注入的 `worktrees`（src/worktree.js）负责
  *
- * 并发纪律（唐僧 P2 Gate 复核后修正）：
- * - **先占槽、再启动**：否则两个并发写请求会同时通过检查（旧实现已复现该 bug）
+ * 并发纪律（2026-11-11 悟空裁决后的并行版）：
+ * - **先占槽、再启动**：两级额度（项目 / 全局）在**首次异步操作前**一起预占，
+ *   包括建工作树；否则并发请求会同时通过检查
+ * - **所有 provider 共用同一计数器**：额度属于 dispatcher 实例，不按通道分开
+ * - **按项目隔离计数**：项目 key 先归一化（Windows 大小写 / 尾斜杠），别名不能绕限
  * - **由适配器回调释放**：`onFinish` 在任务终态（完成/失败/取消）时调用，幂等
- * - **按项目隔离计数**：不同项目互不误挡；同项目写任务默认串行
  *
- * 本项目**不提供只读通道**：没有只读判定、没有只读限流，所有派单都按写任务串行。
- * 宿主 subagent spec 没有权限字段，做不到绝对只读，就不要留半吊子承诺（2026-11-11）。
+ * 隔离纪律：
+ * - 默认隔离方式来自全局配置 `limits.defaultIsolation`（默认 `worktree`）
+ * - 请求隔离但工作树服务缺失 / 建树失败 → **拒绝派单**，绝不退回主工作区
+ * - `isolation:'none'` 与隔离任务**不得混跑**：同项目任一方向有活动任务就拒绝
+ * - 终止时**不删除**工作树/分支；未合并改动只能人工处理
+ *
+ * 本项目**不提供只读通道**：没有只读判定、没有只读限流。
  *
  * 依据：
+ * - docs/plan/2026-11-11-parallel-plan.md（悟空裁决）
  * - docs/开发计划.md §7.2（工具语义）
- * - docs/audit/03-native-capabilities.md（provider 通道）
  * - docs/audit/08-sandbox.md（权限不能靠 Prompt，必须显式封装）
  */
+
+import { randomUUID } from 'node:crypto'
 
 /** 派单错误码。 */
 export const DISPATCH_ERRORS = Object.freeze({
@@ -28,13 +37,25 @@ export const DISPATCH_ERRORS = Object.freeze({
   ROLE_AMBIGUOUS: 'ROLE_AMBIGUOUS',
   PROVIDER_UNAVAILABLE: 'PROVIDER_UNAVAILABLE',
   WRITE_CONFLICT: 'WRITE_CONFLICT',
+  WRITE_LIMIT_PROJECT: 'WRITE_LIMIT_PROJECT',
+  WRITE_LIMIT_TOTAL: 'WRITE_LIMIT_TOTAL',
   INVALID_TASK: 'INVALID_TASK',
+  INVALID_ISOLATION: 'INVALID_ISOLATION',
   ADAPTER_FAILED: 'ADAPTER_FAILED',
   // 适配器的前置校验错误码：原样透传，便于调用方分支处理（而不是一律 ADAPTER_FAILED）
   MODEL_UNSUPPORTED: 'MODEL_UNSUPPORTED',
   PATH_OUTSIDE_PROJECT: 'PATH_OUTSIDE_PROJECT',
   PROJECT_ROOT_UNKNOWN: 'PROJECT_ROOT_UNKNOWN',
   PARENT_AGENT_UNAVAILABLE: 'PARENT_AGENT_UNAVAILABLE',
+  // 工作树隔离错误码（与 src/worktree.js 的 WORKTREE_ERRORS 对齐）
+  WORKTREE_UNAVAILABLE: 'WORKTREE_UNAVAILABLE',
+  WORKTREE_NOT_GIT_REPOSITORY: 'WORKTREE_NOT_GIT_REPOSITORY',
+  WORKTREE_BASE_INVALID: 'WORKTREE_BASE_INVALID',
+  WORKTREE_PATH_EXISTS: 'WORKTREE_PATH_EXISTS',
+  WORKTREE_BRANCH_EXISTS: 'WORKTREE_BRANCH_EXISTS',
+  WORKTREE_GIT_FAILED: 'WORKTREE_GIT_FAILED',
+  WORKTREE_TIMEOUT: 'WORKTREE_TIMEOUT',
+  WORKTREE_PATH_OUTSIDE: 'WORKTREE_PATH_OUTSIDE',
 })
 
 /** 适配器抛错串里可透传的错误码前缀。 */
@@ -46,6 +67,15 @@ const PASSTHROUGH_PREFIXES = [
   'PROVIDER_UNAVAILABLE',
 ]
 
+/** 工作树错误码前缀（dispatcher 自己抛/透传）。 */
+const WORKTREE_CODE_PREFIX = 'WORKTREE_'
+
+/** 未指定项目时的默认槽位键。 */
+export const DEFAULT_PROJECT_KEY = 'default'
+
+/** 隔离方式闭集。 */
+export const ISOLATION_MODES = Object.freeze(['none', 'worktree'])
+
 /**
  * 从适配器错误里取出可透传的错误码；取不到就归为 ADAPTER_FAILED。
  * @param {string} raw
@@ -55,15 +85,47 @@ function adapterErrorCode(raw) {
   return PASSTHROUGH_PREFIXES.includes(head) ? head : DISPATCH_ERRORS.ADAPTER_FAILED
 }
 
-/** 未指定项目时的默认槽位键。 */
-export const DEFAULT_PROJECT_KEY = 'default'
+/**
+ * 归一化并发计数键。
+ *
+ * 为什么需要：`dispatcher` 用**精确字符串**比较 projectKey，`D:/P` 与 `d:/p/`
+ * 会被当成两个项目，从而绕过"同项目"的额度（沙僧审计实测）。
+ * Windows 大小写不敏感、尾斜杠等价，统一折叠；POSIX 只去尾斜杠，避免误并不同目录。
+ *
+ * 注意：这只解决**路径字符串别名**；同一仓库的两个不同路径（如工作树本身）
+ * 不会自动合并——派单的 projectKey 应始终传项目根。
+ *
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+export function normalizeProjectKey(value) {
+  if (typeof value !== 'string') return null
+  let key = value.trim().replace(/[\\/]+$/, '')
+  if (!key) return null
+  // Windows 上 `D:\P` 与 `D:/P` 是同一路径；大小写也不敏感。POSIX 保留原样，
+  // 避免把合法的反斜杠文件名/目录名误并。
+  if (process.platform === 'win32') key = key.replace(/\\/g, '/').toLowerCase()
+  return key
+}
+
+/**
+ * @param {unknown} value
+ * @param {number} fallback
+ */
+function positiveInteger(value, fallback) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  const n = Math.floor(value)
+  return n >= 1 ? n : fallback
+}
 
 /**
  * @typedef {object} DispatchRequest
  * @property {string} role 角色引用（roleId / name / 别名）
  * @property {string} task 任务内容
- * @property {string} [cwd] 目标目录；项目边界校验在适配器里做
+ * @property {string} [cwd] 目标目录；隔离模式下会被工作树路径覆盖
  * @property {string} [projectKey] 并发计数键（通常传项目根路径）；省略视为 default
+ * @property {string} [projectRoot] 原始项目根（未归一化；建工作树用）
+ * @property {'none' | 'worktree'} [isolation] 覆盖本次隔离方式
  * @property {object} [context] 宿主上下文（如 exec.agent），原样透传给适配器
  * @property {object} [registry] 覆盖本次解析用的注册表（按项目上下文注入全局+项目覆盖）
  */
@@ -76,6 +138,9 @@ export const DEFAULT_PROJECT_KEY = 'default'
  * @property {number} timeoutMs
  * @property {object} [context] 由调用方透传的宿主上下文
  * @property {() => void} onFinish 任务终态回调（适配器必须在完成/失败/取消时调用一次）
+ * @property {'none' | 'worktree'} [isolation]
+ * @property {string} [operationId]
+ * @property {{ path: string, branch: string, baseSha: string, repositoryRoot: string, operationId: string }} [worktree]
  */
 
 /**
@@ -86,31 +151,96 @@ export const DEFAULT_PROJECT_KEY = 'default'
  */
 
 /**
- * @typedef {{ ok: true, taskRef: object, role: object, startedAt: number }
- *   | { ok: false, code: string, message: string, role?: object }} DispatchResult
+ * @typedef {{ ok: true, taskRef: object, role: object, startedAt: number, isolation?: string,
+ *             operationId?: string, worktree?: object }
+ *   | { ok: false, code: string, message: string, role?: object,
+ *       operationId?: string, worktree?: object, residualPath?: string }} DispatchResult
  */
 
 /**
  * @param {{ registry: { resolve: (ref: string) => any, list: () => any[] },
  *           adapter: DispatchAdapter,
- *           limits?: { serializeWrites?: boolean },  // 来自插件全局配置；项目级配置不提供
+ *           limits?: { serializeWrites?: boolean, maxParallelWritesPerProject?: number,
+ *                      maxParallelWritesTotal?: number, defaultIsolation?: 'none' | 'worktree' },
+ *           worktrees?: { create: (input: { projectRoot: string, operationId: string }) => Promise<any> } | null,
  *           now?: () => number }} deps
  */
-export function createDispatcher({ registry, adapter, limits = {}, now = () => Date.now() }) {
+export function createDispatcher({ registry, adapter, limits = {}, worktrees = null, now = () => Date.now() }) {
   const serializeWrites = limits.serializeWrites !== false
+  const maxParallelWritesPerProject = positiveInteger(limits.maxParallelWritesPerProject, 2)
+  const maxParallelWritesTotal = positiveInteger(limits.maxParallelWritesTotal, 4)
+  // 注意：这里缺省为 none（纯 dispatcher 单测/旧装配的兼容默认）；用户可见默认由
+  // src/config.js 的 limits.defaultIsolation='worktree' 提供，index.js 会原样传入。
+  const defaultIsolation = limits.defaultIsolation === 'worktree' ? 'worktree' : 'none'
 
-  /** @type {Map<object, { role: any, projectKey: string, startedAt: number, ref: object | null }>} */
+  /** @type {Map<object, { role: any, projectKey: string, startedAt: number, ref: object | null,
+   *   isolation: 'none' | 'worktree', operationId: string | null, worktree: any,
+   *   phase: 'reserved' | 'starting' | 'started' }>} */
   const active = new Map()
   /** @type {Map<object, object>} taskRef -> token */
   const refToToken = new Map()
 
-  /** @param {string} projectKey */
-  const writesFor = (projectKey) => {
-    let writes = 0
-    for (const v of active.values()) {
-      if (v.projectKey === projectKey) writes += 1
+  /**
+   * @param {string} projectKey
+   * @returns {Array<any>}
+   */
+  function entriesFor(projectKey) {
+    /** @type {Array<any>} */
+    const entries = []
+    for (const entry of active.values()) {
+      if (entry.projectKey === projectKey) entries.push(entry)
     }
-    return writes
+    return entries
+  }
+
+  /**
+   * 在**任何 await 之前**做完整额度检查。返回 null 表示可以占槽。
+   * @param {string} projectKey
+   * @param {'none' | 'worktree'} isolation
+   * @returns {{ code: string, message: string } | null}
+   */
+  function quotaFailure(projectKey, isolation) {
+    const entries = entriesFor(projectKey)
+    const hasWorktree = entries.some((entry) => entry.isolation === 'worktree')
+    const hasNone = entries.some((entry) => entry.isolation === 'none')
+
+    if (isolation === 'none') {
+      if (hasWorktree) {
+        return {
+          code: DISPATCH_ERRORS.WRITE_CONFLICT,
+          message: '同一项目已有隔离任务在执行；关闭隔离的派单不得与隔离任务混跑',
+        }
+      }
+      if (serializeWrites && entries.length > 0) {
+        return {
+          code: DISPATCH_ERRORS.WRITE_CONFLICT,
+          message: '同一项目已有任务在执行；写任务默认串行（可在插件全局配置里调整）',
+        }
+      }
+    } else if (hasNone) {
+      return {
+        code: DISPATCH_ERRORS.WRITE_CONFLICT,
+        message: '同一项目已有未隔离任务在执行；隔离任务不得与未隔离任务混跑',
+      }
+    }
+
+    if (entries.length >= maxParallelWritesPerProject) {
+      return {
+        code: DISPATCH_ERRORS.WRITE_LIMIT_PROJECT,
+        message:
+          `同一项目并行写任务已达上限 ${maxParallelWritesPerProject}；` +
+          '请等待现有任务完成或调大 limits.maxParallelWritesPerProject 后重试',
+      }
+    }
+    if (active.size >= maxParallelWritesTotal) {
+      return {
+        code: DISPATCH_ERRORS.WRITE_LIMIT_TOTAL,
+        message:
+          `全局并行写任务已达上限 ${maxParallelWritesTotal}；` +
+          '请等待现有任务完成或调大 limits.maxParallelWritesTotal 后重试',
+      }
+    }
+    return null
   }
 
   /**
@@ -139,6 +269,12 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
     }
     if (typeof req.task !== 'string' || !req.task.trim()) {
       return fail(DISPATCH_ERRORS.INVALID_TASK, '任务内容不能为空')
+    }
+    if (req.isolation !== undefined && !ISOLATION_MODES.includes(req.isolation)) {
+      return fail(
+        DISPATCH_ERRORS.INVALID_ISOLATION,
+        `isolation 必须是 none | worktree，收到 ${JSON.stringify(req.isolation)}`,
+      )
     }
 
     // 1. 解析角色（允许调用方按项目上下文传入专用注册表：全局 + 项目覆盖）
@@ -190,59 +326,158 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
       }
     }
 
-    // 3. 并发纪律：**先占槽再启动**，失败回滚。所有派单都按写任务串行。
+    // 3. 并发纪律：**先占槽再启动**，两级额度一起预占；所有派单都按写任务计数。
     const projectKey =
-      typeof req.projectKey === 'string' && req.projectKey ? req.projectKey : DEFAULT_PROJECT_KEY
-    const writes = writesFor(projectKey)
-
-    if (serializeWrites && writes > 0) {
-      return fail(
-        DISPATCH_ERRORS.WRITE_CONFLICT,
-        '同一项目已有任务在执行；写任务默认串行（可在插件全局配置里调整）',
-      )
-    }
+      normalizeProjectKey(req.projectKey) ?? normalizeProjectKey(req.projectRoot) ?? DEFAULT_PROJECT_KEY
+    const isolation = req.isolation ?? defaultIsolation
+    const quota = quotaFailure(projectKey, isolation)
+    if (quota) return fail(quota.code, quota.message)
 
     /** @type {object} */
     const token = {}
-    active.set(token, { role, projectKey, startedAt: now(), ref: null })
+    /** @type {any} */
+    const entry = {
+      role,
+      projectKey,
+      startedAt: now(),
+      ref: null,
+      isolation,
+      operationId: null,
+      worktree: null,
+      phase: 'reserved',
+    }
+    // 同步占槽：这一行之前没有任何 await，两个并发请求不可能同时通过额度检查。
+    active.set(token, entry)
     /** @type {() => void} */
     const onFinish = () => {
       release(token)
     }
 
-    // 4. 交给宿主适配器
+    // 4. 隔离：在 adapter.start 之前建树；失败释放额度并拒绝派单（绝不退回主工作区）
+    let worktree = null
+    let operationId = null
+    let taskCwd = req.cwd
+    if (isolation === 'worktree') {
+      if (!worktrees || typeof worktrees.create !== 'function') {
+        release(token)
+        return fail(
+          DISPATCH_ERRORS.WORKTREE_UNAVAILABLE,
+          '请求了工作树隔离，但工作树服务不可用；拒绝派单（不会退回主工作区）',
+        )
+      }
+      const projectRoot =
+        typeof req.projectRoot === 'string' && req.projectRoot
+          ? req.projectRoot
+          : typeof req.context?.projectRoot === 'string'
+            ? req.context.projectRoot
+            : null
+      if (!projectRoot) {
+        release(token)
+        return fail(
+          DISPATCH_ERRORS.PROJECT_ROOT_UNKNOWN,
+          '请求了工作树隔离，但无法确定项目根；拒绝派单（不会退回主工作区）',
+        )
+      }
+      operationId = randomUUID()
+      entry.operationId = operationId
+      entry.phase = 'starting'
+      try {
+        worktree = await worktrees.create({ projectRoot, operationId })
+      } catch (err) {
+        release(token)
+        const rawCode = /** @type {any} */ (err)?.code
+        const code =
+          typeof rawCode === 'string' && rawCode.startsWith(WORKTREE_CODE_PREFIX)
+            ? rawCode
+            : DISPATCH_ERRORS.WORKTREE_GIT_FAILED
+        const residualPath =
+          typeof /** @type {any} */ (err)?.path === 'string'
+            ? /** @type {any} */ (err).path
+            : typeof /** @type {any} */ (err)?.details?.path === 'string'
+              ? /** @type {any} */ (err).details.path
+              : undefined
+        return fail(code, `创建工作树失败：${errorMessage(err)}`, {
+          operationId,
+          ...(residualPath ? { residualPath } : {}),
+        })
+      }
+      if (!worktree || typeof worktree.path !== 'string' || !worktree.path) {
+        release(token)
+        return fail(
+          DISPATCH_ERRORS.WORKTREE_GIT_FAILED,
+          '创建工作树失败：工作树服务没有返回有效 path',
+          { operationId },
+        )
+      }
+      entry.worktree = worktree
+      entry.operationId = worktree.operationId ?? operationId
+      operationId = entry.operationId
+      taskCwd = worktree.path
+    }
+
+    // 5. 交给宿主适配器
+    //    把原始 projectRoot 补进 context：落盘层需要它定位 `.meetingstone/runs`；
+    //    调用方已给的 agent 等上下文原样保留。
+    const startContext = {
+      ...(req.context && typeof req.context === 'object' ? req.context : {}),
+      ...(typeof req.projectRoot === 'string' && req.projectRoot
+        ? { projectRoot: req.projectRoot }
+        : {}),
+    }
     let started
     try {
       started = await adapter.start({
         role,
         task: req.task,
-        cwd: req.cwd,
+        // 隔离模式下 cwd 必须是工作树；显式传入的 cwd 不能绕过隔离
+        cwd: taskCwd,
         timeoutMs: role.timeoutMs,
-        context: req.context,
+        ...(Object.keys(startContext).length > 0 ? { context: startContext } : {}),
         // 上下文重放块（P1）：由工具层解析好后透传，适配器只负责拼进提示词
         ...(req.continuation ? { continuation: req.continuation } : {}),
+        isolation,
+        ...(operationId ? { operationId } : {}),
+        ...(worktree ? { worktree } : {}),
         onFinish,
       })
     } catch (err) {
-      active.delete(token)
+      release(token)
       const raw = err instanceof Error ? err.message : String(err)
-      return fail(adapterErrorCode(raw), `派发失败：${raw}`)
+      return fail(adapterErrorCode(raw), `派发失败：${raw}`, {
+        ...(operationId ? { operationId } : {}),
+        ...(worktree ? { worktree, residualPath: worktree.path } : {}),
+      })
     }
     if (!started || !started.taskRef) {
-      active.delete(token)
-      return fail(DISPATCH_ERRORS.ADAPTER_FAILED, '派发失败：适配器没有返回任务引用')
+      release(token)
+      return fail(DISPATCH_ERRORS.ADAPTER_FAILED, '派发失败：适配器没有返回任务引用', {
+        ...(operationId ? { operationId } : {}),
+        ...(worktree ? { worktree, residualPath: worktree.path } : {}),
+      })
     }
 
-    const entry = active.get(token)
-    if (entry) entry.ref = started.taskRef
+    const current = active.get(token)
+    if (current) {
+      current.ref = started.taskRef
+      current.phase = 'started'
+    }
     refToToken.set(started.taskRef, token)
 
-    return { ok: true, taskRef: started.taskRef, role, startedAt: now() }
+    return {
+      ok: true,
+      taskRef: started.taskRef,
+      role,
+      startedAt: now(),
+      isolation,
+      ...(operationId ? { operationId } : {}),
+      ...(worktree ? { worktree } : {}),
+    }
   }
 
   /**
    * 取消：先让宿主取消，成功或失败后都释放槽位（适配器也可能回调 onFinish，release 幂等）。
    * 用 finally 保证适配器抛错时槽位不泄漏——项目不能被一次失败的取消永久锁死。
+   * **不删除工作树**：未合并改动留在树里，人工处理。
    */
   async function cancel(taskRef) {
     if (!taskRef) return
@@ -271,7 +506,8 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
     getTask,
     stats: (projectKey) => {
       if (typeof projectKey === 'string') {
-        const writes = writesFor(projectKey)
+        const key = normalizeProjectKey(projectKey) ?? DEFAULT_PROJECT_KEY
+        const writes = entriesFor(key).length
         return { active: writes, writes, serializeWrites }
       }
       return { active: active.size, writes: active.size, serializeWrites }
@@ -279,11 +515,17 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
   }
 }
 
+/** @param {unknown} error */
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error)
+}
+
 /**
  * @param {string} code
  * @param {string} message
+ * @param {{ operationId?: string, worktree?: object, residualPath?: string }} [extra]
  * @returns {{ ok: false, code: string, message: string }}
  */
-function fail(code, message) {
-  return { ok: false, code, message }
+function fail(code, message, extra) {
+  return { ok: false, code, message, ...(extra ?? {}) }
 }

@@ -136,6 +136,16 @@ assert.equal(
   'meetingstone_dispatch.readOnly 参数应已移除（本项目不提供只读通道）',
 )
 
+// 4) 并行隔离参数：必须是 none | worktree 闭集（模型才知道可以传什么）
+const isolation = dispatch.parameters.properties.isolation
+assert.ok(isolation, 'meetingstone_dispatch 必须有 isolation 参数')
+assert.deepEqual(
+  isolation.enum,
+  ['none', 'worktree'],
+  'isolation 参数必须是 none | worktree',
+)
+assert.equal(isolation.type, 'string')
+
 console.log(`PASS: ${tools.length} 个工具的注册产物符合宿主 / 模型 API 契约`)
 for (const tool of tools) {
   const args = Object.keys(tool.parameters.properties).join(', ') || '(无参数)'

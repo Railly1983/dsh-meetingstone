@@ -1,0 +1,846 @@
+// @ts-check
+/**
+ * 并行多任务（工作树隔离）的派单/额度/查询测试。
+ *
+ * 分两层：
+ * - dispatcher 层：注入假适配器 + 假工作树服务，验证两级额度、失败关闭、混跑纪律
+ * - 插件层：真实临时 git 仓库 + 假 subagents，验证建树、changedFiles、取消/卸载、重叠预警
+ */
+import test, { afterEach } from 'node:test'
+import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { apply } from '../src/index.js'
+import { createDispatcher, DISPATCH_ERRORS } from '../src/dispatch/dispatcher.js'
+import { createRegistry } from '../src/roles/registry.js'
+import { createRunStore, RUNS_RELATIVE_DIR } from '../src/run-store.js'
+import { WORKTREE_ERRORS } from '../src/worktree.js'
+import { delay, git, makeRepo, removeRepo, waitFor } from './helpers.mjs'
+
+const ROLE = {
+  roleId: 'role-sashi',
+  name: '沙僧',
+  aliases: ['SS'],
+  channel: { kind: 'acp-cli' },
+  enabled: true,
+  timeoutMs: 0,
+}
+
+/** @param {object} [over] */
+function fakeCtx(over = {}) {
+  const disposers = []
+  const tools = []
+  const warns = []
+  const ctx = {
+    effect(fn) {
+      disposers.push(fn())
+    },
+    tools: {
+      register(tool) {
+        tools.push(tool)
+      },
+    },
+    logger: { info() {}, warn: (line) => warns.push(line) },
+    ...over,
+  }
+  return { ctx, disposers, tools, warns }
+}
+
+/** 假适配器：start 立即成功，任务保持 active 直到测试主动结束/取消。 */
+function fakeAdapter() {
+  const started = []
+  return {
+    started,
+    async start(input) {
+      const childId = `child-${started.length + 1}`
+      started.push({ childId, input })
+      return { taskRef: { childId } }
+    },
+    async cancel(ref) {
+      const childId = typeof ref === 'string' ? ref : ref?.childId
+      const item = started.find((entry) => entry.childId === childId)
+      // 模拟适配器终态回调；dispatcher.cancel 自己也会 release，验证幂等
+      item?.input?.onFinish?.()
+    },
+  }
+}
+
+/** 假工作树服务：不碰磁盘，只记录创建参数。 */
+function fakeWorktrees() {
+  const created = []
+  return {
+    created,
+    async create({ projectRoot, operationId }) {
+      const worktree = {
+        path: `${projectRoot}/.meetingstone/worktrees/${operationId}`,
+        branch: `meetingstone/${operationId}`,
+        baseSha: 'fake-base-sha',
+        repositoryRoot: projectRoot,
+        operationId,
+      }
+      created.push(worktree)
+      return worktree
+    },
+  }
+}
+
+/** @param {{ limits?: object, worktrees?: any, adapter?: any }} [options] */
+function makeDispatcher(options = {}) {
+  const registry = createRegistry({ globalRoles: [ROLE] })
+  const adapter = options.adapter ?? fakeAdapter()
+  // 显式传 null 表示"服务缺失"，必须与"未传（用默认假服务）"区分开
+  const worktrees = options.worktrees === undefined ? fakeWorktrees() : options.worktrees
+  const dispatcher = createDispatcher({
+    registry,
+    adapter,
+    worktrees,
+    limits: options.limits ?? {},
+  })
+  return { dispatcher, adapter, worktrees, registry }
+}
+
+const req = (over = {}) => ({
+  role: 'SS',
+  task: '干活',
+  projectKey: 'D:/proj-a',
+  projectRoot: 'D:/proj-a',
+  ...over,
+})
+
+// ─── 额度 ────────────────────────────────────────────────────────────────────
+
+test('项目额度 2：第三个并行写请求被拒（WRITE_LIMIT_PROJECT），释放后可继续', async () => {
+  const { dispatcher, worktrees } = makeDispatcher({
+    limits: {
+      defaultIsolation: 'worktree',
+      maxParallelWritesPerProject: 2,
+      maxParallelWritesTotal: 10,
+    },
+  })
+  const a = await dispatcher.dispatch(req({ task: 'a' }))
+  const b = await dispatcher.dispatch(req({ task: 'b' }))
+  assert.equal(a.ok && b.ok, true)
+  const c = await dispatcher.dispatch(req({ task: 'c' }))
+  assert.equal(c.ok, false)
+  assert.equal(c.code, DISPATCH_ERRORS.WRITE_LIMIT_PROJECT)
+  assert.equal(worktrees.created.length, 2, '被额度拒绝的请求不得建树')
+
+  dispatcher.release(a.taskRef)
+  const d = await dispatcher.dispatch(req({ task: 'd' }))
+  assert.equal(d.ok, true)
+})
+
+test('全局额度 4：跨项目合计超限被拒（WRITE_LIMIT_TOTAL）', async () => {
+  const { dispatcher, worktrees } = makeDispatcher({
+    limits: {
+      defaultIsolation: 'worktree',
+      maxParallelWritesPerProject: 10,
+      maxParallelWritesTotal: 4,
+    },
+  })
+  for (const projectKey of ['D:/p1', 'D:/p1', 'D:/p2', 'D:/p2']) {
+    const res = await dispatcher.dispatch(req({ projectKey, projectRoot: projectKey }))
+    assert.equal(res.ok, true, `${projectKey} 应成功`)
+  }
+  const fifth = await dispatcher.dispatch(req({ projectKey: 'D:/p3', projectRoot: 'D:/p3' }))
+  assert.equal(fifth.ok, false)
+  assert.equal(fifth.code, DISPATCH_ERRORS.WRITE_LIMIT_TOTAL)
+  assert.equal(worktrees.created.length, 4)
+})
+
+test('跨项目可并行：不同 projectKey 各占各的项目额度', async () => {
+  const { dispatcher } = makeDispatcher({
+    limits: {
+      defaultIsolation: 'worktree',
+      maxParallelWritesPerProject: 2,
+      maxParallelWritesTotal: 10,
+    },
+  })
+  const a1 = await dispatcher.dispatch(req({ projectKey: 'D:/p1', projectRoot: 'D:/p1' }))
+  const b1 = await dispatcher.dispatch(req({ projectKey: 'D:/p2', projectRoot: 'D:/p2' }))
+  assert.equal(a1.ok && b1.ok, true)
+  assert.equal(dispatcher.stats().active, 2)
+})
+
+test('同仓库路径别名不绕限：尾斜杠/Windows 大小写折叠到同一项目键', async () => {
+  const { dispatcher } = makeDispatcher({
+    limits: {
+      defaultIsolation: 'worktree',
+      maxParallelWritesPerProject: 1,
+      maxParallelWritesTotal: 10,
+    },
+  })
+  const first = await dispatcher.dispatch(req({ projectKey: 'D:/P', projectRoot: 'D:/P' }))
+  assert.equal(first.ok, true)
+
+  const trailing = await dispatcher.dispatch(req({ projectKey: 'D:/P/', projectRoot: 'D:/P/' }))
+  assert.equal(trailing.code, DISPATCH_ERRORS.WRITE_LIMIT_PROJECT, '尾斜杠别名不得绕过项目额度')
+
+  if (process.platform === 'win32') {
+    const lower = await dispatcher.dispatch(req({ projectKey: 'd:/p', projectRoot: 'd:/p' }))
+    assert.equal(lower.code, DISPATCH_ERRORS.WRITE_LIMIT_PROJECT, '大小写别名不得绕过项目额度')
+    const backslash = await dispatcher.dispatch(
+      req({ projectKey: 'D:\\P', projectRoot: 'D:\\P' }),
+    )
+    assert.equal(backslash.code, DISPATCH_ERRORS.WRITE_LIMIT_PROJECT, '反斜杠别名不得绕过项目额度')
+  }
+
+  // 也可以只用 projectRoot（不传 projectKey）计数
+  dispatcher.release(first.taskRef)
+  const byRoot = await dispatcher.dispatch({
+    role: 'SS',
+    task: 'x',
+    projectRoot: 'D:/P',
+  })
+  assert.equal(byRoot.ok, true)
+})
+
+// ─── 失败关闭 / 混跑纪律 ─────────────────────────────────────────────────────
+
+test('建树失败：拒绝派单、不启动适配器、额度回滚，并返回残留位置', async () => {
+  const failingWorktrees = {
+    async create({ projectRoot, operationId }) {
+      const err = new Error('不是 git 仓库')
+      // @ts-expect-error 测试构造带 code 的错误
+      err.code = WORKTREE_ERRORS.NOT_GIT_REPOSITORY
+      // @ts-expect-error 测试构造带 path 的错误
+      err.path = `${projectRoot}/.meetingstone/worktrees/${operationId}`
+      throw err
+    },
+  }
+  const { dispatcher, adapter } = makeDispatcher({
+    limits: { defaultIsolation: 'worktree' },
+    worktrees: failingWorktrees,
+  })
+  const res = await dispatcher.dispatch(req())
+  assert.equal(res.ok, false)
+  assert.equal(res.code, WORKTREE_ERRORS.NOT_GIT_REPOSITORY)
+  assert.equal(adapter.started.length, 0, '建树失败绝不能退回主工作区启动任务')
+  assert.ok(res.residualPath && res.residualPath.startsWith('D:/proj-a/.meetingstone/worktrees/'))
+  assert.equal(dispatcher.stats().active, 0, '失败后额度必须回滚')
+})
+
+test('工作树服务缺失：WORKTREE_UNAVAILABLE，拒绝派单', async () => {
+  const { dispatcher, adapter } = makeDispatcher({
+    limits: { defaultIsolation: 'worktree' },
+    worktrees: null,
+  })
+  const res = await dispatcher.dispatch(req())
+  assert.equal(res.ok, false)
+  assert.equal(res.code, DISPATCH_ERRORS.WORKTREE_UNAVAILABLE)
+  assert.equal(adapter.started.length, 0)
+  assert.equal(dispatcher.stats().active, 0)
+})
+
+test('缺少项目根：WORKTREE_UNAVAILABLE 之外的失败关闭（PROJECT_ROOT_UNKNOWN）', async () => {
+  const { dispatcher, adapter } = makeDispatcher({ limits: { defaultIsolation: 'worktree' } })
+  const res = await dispatcher.dispatch({ role: 'SS', task: 'x' })
+  assert.equal(res.ok, false)
+  assert.equal(res.code, DISPATCH_ERRORS.PROJECT_ROOT_UNKNOWN)
+  assert.equal(adapter.started.length, 0)
+})
+
+test('非法 isolation 值被拒绝（INVALID_ISOLATION）', async () => {
+  const { dispatcher } = makeDispatcher({ limits: { defaultIsolation: 'worktree' } })
+  const res = await dispatcher.dispatch(req({ isolation: 'sandbox' }))
+  assert.equal(res.ok, false)
+  assert.equal(res.code, DISPATCH_ERRORS.INVALID_ISOLATION)
+})
+
+test('隔离与未隔离不得混跑（双向）', async () => {
+  const { dispatcher } = makeDispatcher({
+    limits: {
+      defaultIsolation: 'worktree',
+      maxParallelWritesPerProject: 2,
+      maxParallelWritesTotal: 10,
+    },
+  })
+  const isolated = await dispatcher.dispatch(req({ isolation: 'worktree', task: '树里跑' }))
+  assert.equal(isolated.ok, true)
+
+  const plainWhileIsolated = await dispatcher.dispatch(req({ isolation: 'none', task: '主区跑' }))
+  assert.equal(plainWhileIsolated.code, DISPATCH_ERRORS.WRITE_CONFLICT)
+
+  dispatcher.release(isolated.taskRef)
+  const plain = await dispatcher.dispatch(req({ isolation: 'none', task: '主区跑' }))
+  assert.equal(plain.ok, true)
+
+  const isolatedWhilePlain = await dispatcher.dispatch(req({ isolation: 'worktree', task: '树里跑' }))
+  assert.equal(isolatedWhilePlain.code, DISPATCH_ERRORS.WRITE_CONFLICT)
+
+  dispatcher.release(plain.taskRef)
+  const isolatedAgain = await dispatcher.dispatch(req({ isolation: 'worktree', task: '树里跑' }))
+  assert.equal(isolatedAgain.ok, true)
+})
+
+test('isolation=none + serializeWrites：同项目仍互斥；关闭串行时按额度并行', async () => {
+  const serial = makeDispatcher({
+    limits: { defaultIsolation: 'none', serializeWrites: true },
+  })
+  assert.equal((await serial.dispatcher.dispatch(req())).ok, true)
+  const blocked = await serial.dispatcher.dispatch(req())
+  assert.equal(blocked.code, DISPATCH_ERRORS.WRITE_CONFLICT)
+
+  const parallel = makeDispatcher({
+    limits: {
+      defaultIsolation: 'none',
+      serializeWrites: false,
+      maxParallelWritesPerProject: 2,
+      maxParallelWritesTotal: 4,
+    },
+  })
+  assert.equal((await parallel.dispatcher.dispatch(req())).ok, true)
+  assert.equal((await parallel.dispatcher.dispatch(req())).ok, true)
+  const third = await parallel.dispatcher.dispatch(req())
+  assert.equal(third.code, DISPATCH_ERRORS.WRITE_LIMIT_PROJECT)
+})
+
+test('取消只释放一次槽位：重复 cancel 不会把别人的额度也放掉', async () => {
+  const { dispatcher } = makeDispatcher({
+    limits: {
+      defaultIsolation: 'worktree',
+      maxParallelWritesPerProject: 2,
+      maxParallelWritesTotal: 10,
+    },
+  })
+  const a = await dispatcher.dispatch(req({ task: 'a' }))
+  const b = await dispatcher.dispatch(req({ task: 'b' }))
+  assert.equal(dispatcher.stats().active, 2)
+
+  await dispatcher.cancel(a.taskRef)
+  await dispatcher.cancel(a.taskRef) // 重复
+  assert.equal(dispatcher.stats().active, 1, '只应释放 a 的槽位，b 仍在')
+
+  const c = await dispatcher.dispatch(req({ task: 'c' }))
+  assert.equal(c.ok, true, '空出的一个槽位应可用')
+  const d = await dispatcher.dispatch(req({ task: 'd' }))
+  assert.equal(d.code, DISPATCH_ERRORS.WRITE_LIMIT_PROJECT, 'b+c 已占满 2 个')
+})
+
+// ─── 插件层：真实 git 工作树 ─────────────────────────────────────────────────
+
+/** 可控子 Agent：startActivation 返回 pending result，测试决定何时完成。 */
+function controllableSubagents({ onStart } = {}) {
+  const calls = []
+  const pending = []
+  let seq = 0
+  return {
+    calls,
+    pending,
+    getProvider() {
+      return { name: 'acp' }
+    },
+    async startActivation(spec) {
+      seq += 1
+      const childId = `child-${seq}`
+      let resolveResult
+      /** @type {(value?: any) => void} */
+      const resolveFn = (value) => resolveResult(value)
+      const result = new Promise((resolvePromise) => {
+        resolveResult = resolvePromise
+      })
+      const item = { childId, spec, resolve: resolveFn }
+      calls.push(item)
+      pending.push(item)
+      if (onStart) await onStart(item)
+      return {
+        childId,
+        name: childId,
+        result,
+        dispose: async () => {},
+      }
+    },
+  }
+}
+
+/** @param {string} root */
+const execFor = (root) => ({ agent: { session: { header: { cwd: root } } } })
+
+/** 按插件 effect 顺序串行收尾，清掉 adapter 的 30 分钟超时定时器。 @param {any[]} disposers */
+async function disposeAll(disposers) {
+  for (const dispose of disposers) {
+    if (typeof dispose === 'function') await dispose()
+  }
+}
+
+/** @param {string} root @param {string} childId */
+async function readRun(root, childId) {
+  return JSON.parse(await readFile(join(root, RUNS_RELATIVE_DIR, `${childId}.json`), 'utf8'))
+}
+
+/** @param {string} root @param {string} childId */
+function waitCompleted(root, childId, timeoutMs = 8000) {
+  return waitFor(async () => {
+    const record = await readRun(root, childId)
+    return record.status === 'completed' ? record : null
+  }, timeoutMs)
+}
+
+/**
+ * @param {string} root
+ * @param {any} subagents
+ * @param {object} [limits]
+ */
+function applyPlugin(root, subagents, limits = {}) {
+  const { ctx, disposers, tools } = fakeCtx({ subagents })
+  apply(ctx, {
+    roles: [ROLE],
+    channels: [],
+    limits: { defaultIsolation: 'worktree', ...limits },
+  })
+  // 每个测试结束都必须收尾：adapter 会给每个存活任务装 30 分钟超时定时器，
+  // 不收尾会让 node --test 进程挂到定时器结束（且失败时更难排查）。
+  pluginDisposers.push(...disposers)
+  return {
+    tools,
+    disposers,
+    tool: (/** @type {string} */ name) => tools.find((t) => t.name === name),
+  }
+}
+
+/** @type {Array<() => any>} */
+const pluginDisposers = []
+afterEach(async () => {
+  const pending = pluginDisposers.splice(0)
+  await disposeAll(pending)
+})
+
+test('默认隔离：派单在独立工作树里启动，终态记录 worktree/changedFiles/stopConfirmed', async () => {
+  const { root } = await makeRepo({ 'base.txt': 'base\n' })
+  try {
+    const subagents = controllableSubagents({
+      onStart: async (item) => {
+        // 子 Agent 在工作树里留下未跟踪文件；完成后应出现在 changedFiles
+        await writeFile(join(item.spec.request.cwd, 'work.txt'), 'done\n', 'utf8')
+      },
+    })
+    const { tool } = applyPlugin(root, subagents)
+    const dispatch = tool('meetingstone_dispatch')
+    const res = await dispatch.execute({ role: 'SS', task: '改点东西' }, execFor(root))
+    assert.equal(res.ok, true, JSON.stringify(res))
+    assert.ok(res.operationId)
+    assert.equal(res.taskRef.operationId, res.operationId, 'taskRef 必须携带 operationId → childId 映射')
+    assert.ok(res.worktree && res.worktree.path, '返回里必须带工作树元数据')
+    assert.equal(
+      res.worktree.branch,
+      `meetingstone/${res.operationId}`,
+      '分支名必须由 operationId 派生',
+    )
+    assert.match(
+      res.worktree.path.replace(/\\/g, '/'),
+      /\.meetingstone\/worktrees\//,
+      'cwd 必须指向隔离工作树',
+    )
+    assert.equal(subagents.calls.length, 1)
+    assert.equal(
+      subagents.calls[0].spec.request.cwd,
+      res.worktree.path,
+      'adapter 启动 cwd 必须是工作树路径',
+    )
+
+    const childId = res.taskRef.childId
+    subagents.pending[0].resolve({
+      stopReason: 'completed',
+      output: [{ type: 'text', text: 'done' }],
+    })
+    const record = await waitCompleted(root, childId)
+    assert.equal(record.worktree.path, res.worktree.path)
+    assert.equal(record.worktree.branch, res.worktree.branch)
+    assert.equal(record.operationId, res.operationId)
+    assert.equal(record.stopConfirmed, true)
+    assert.ok(Array.isArray(record.changedFiles) && record.changedFiles.includes('work.txt'))
+    assert.equal(record.changedFilesUnknown, false)
+    assert.equal(existsSync(res.worktree.path), true, '终止后不得删除工作树')
+    assert.equal(existsSync(join(root, 'work.txt')), false, '子 Agent 的改动不得直接落到主工作区')
+
+    const getTask = tool('meetingstone_get_task')
+    const got = await getTask.execute({ childId }, execFor(root))
+    assert.equal(got.status, 'completed')
+    assert.equal(got.worktree.path, res.worktree.path)
+    assert.ok(got.changedFiles.includes('work.txt'))
+    assert.deepEqual(got.overlapWarnings, [])
+
+    const listRuns = tool('meetingstone_list_runs')
+    const listed = await listRuns.execute({}, execFor(root))
+    assert.equal(listed.runs.length, 1)
+    assert.equal(listed.runs[0].worktree.path, res.worktree.path)
+    assert.ok(listed.runs[0].changedFiles.includes('work.txt'))
+  } finally {
+    await removeRepo(root)
+  }
+})
+
+test('项目额度 2（插件层）：第三个被拒且不建树；完成后槽位释放', async () => {
+  const { root } = await makeRepo()
+  try {
+    const subagents = controllableSubagents()
+    const { tool } = applyPlugin(root, subagents, {
+      maxParallelWritesPerProject: 2,
+      maxParallelWritesTotal: 4,
+    })
+    const dispatch = tool('meetingstone_dispatch')
+    const first = await dispatch.execute({ role: 'SS', task: 'a' }, execFor(root))
+    const second = await dispatch.execute({ role: 'SS', task: 'b' }, execFor(root))
+    assert.equal(first.ok && second.ok, true)
+    const third = await dispatch.execute({ role: 'SS', task: 'c' }, execFor(root))
+    assert.equal(third.ok, false)
+    assert.equal(third.code, DISPATCH_ERRORS.WRITE_LIMIT_PROJECT)
+
+    const worktreeNames = await readdir(join(root, '.meetingstone', 'worktrees'))
+    assert.equal(worktreeNames.length, 2, '被拒的请求不得创建第三棵树')
+
+    subagents.pending[0].resolve({ stopReason: 'completed', output: [] })
+    await waitCompleted(root, first.taskRef.childId)
+    await delay(100) // 等 adapter 的 onFinish 释放槽位
+    const fourth = await dispatch.execute({ role: 'SS', task: 'd' }, execFor(root))
+    assert.equal(fourth.ok, true, JSON.stringify(fourth))
+
+    for (const pending of subagents.pending.slice(1)) {
+      pending.resolve({ stopReason: 'completed', output: [] })
+    }
+  } finally {
+    await removeRepo(root)
+  }
+})
+
+test('总额度 4（插件层）：跨项目合计超限被拒', async () => {
+  const repoA = await makeRepo()
+  const repoB = await makeRepo()
+  const repoC = await makeRepo()
+  try {
+    const subagents = controllableSubagents()
+    const { tool } = applyPlugin(repoA.root, subagents, {
+      maxParallelWritesPerProject: 2,
+      maxParallelWritesTotal: 4,
+    })
+    const dispatch = tool('meetingstone_dispatch')
+    for (const root of [repoA.root, repoA.root, repoB.root, repoB.root]) {
+      const res = await dispatch.execute({ role: 'SS', task: 'x' }, execFor(root))
+      assert.equal(res.ok, true, JSON.stringify(res))
+    }
+    // 第五个放到第三个项目：项目额度没满，但全局额度已满
+    const fifth = await dispatch.execute({ role: 'SS', task: 'x' }, execFor(repoC.root))
+    assert.equal(fifth.ok, false)
+    assert.equal(fifth.code, DISPATCH_ERRORS.WRITE_LIMIT_TOTAL)
+  } finally {
+    await removeRepo(repoA.root)
+    await removeRepo(repoB.root)
+    await removeRepo(repoC.root)
+  }
+})
+
+test('失败关闭（插件层）：非 git 项目拒绝派单，不启动 activation，额度不泄漏', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'mt-not-git-plugin-'))
+  try {
+    const subagents = controllableSubagents()
+    const { tool } = applyPlugin(root, subagents)
+    const dispatch = tool('meetingstone_dispatch')
+    const first = await dispatch.execute({ role: 'SS', task: 'x' }, execFor(root))
+    assert.equal(first.ok, false)
+    assert.equal(first.code, WORKTREE_ERRORS.NOT_GIT_REPOSITORY)
+    assert.ok(first.residualPath, '失败结果要给出预期残留位置')
+    assert.equal(subagents.calls.length, 0, '建树失败不得启动子 Agent')
+
+    const second = await dispatch.execute({ role: 'SS', task: 'x' }, execFor(root))
+    assert.equal(second.ok, false)
+    assert.equal(second.code, WORKTREE_ERRORS.NOT_GIT_REPOSITORY, '第二次应是建树失败，不是额度超限')
+  } finally {
+    await removeRepo(root)
+  }
+})
+
+test('取消：不删树，另一个任务不受影响，记录 cancelled + stopConfirmed', async () => {
+  const { root } = await makeRepo()
+  try {
+    const subagents = controllableSubagents()
+    const { tool } = applyPlugin(root, subagents)
+    const dispatch = tool('meetingstone_dispatch')
+    const a = await dispatch.execute({ role: 'SS', task: 'a' }, execFor(root))
+    const b = await dispatch.execute({ role: 'SS', task: 'b' }, execFor(root))
+    assert.equal(a.ok && b.ok, true)
+
+    const cancel = tool('meetingstone_cancel_task')
+    await cancel.execute({ childId: a.taskRef.childId }, execFor(root))
+    const cancelled = await waitFor(async () => {
+      const record = await readRun(root, a.taskRef.childId)
+      return record.status === 'cancelled' ? record : null
+    })
+    assert.equal(cancelled.stopConfirmed, true)
+    assert.equal(existsSync(a.worktree.path), true, '取消不得删除工作树')
+    assert.equal(existsSync(b.worktree.path), true)
+
+    const getTask = tool('meetingstone_get_task')
+    const stillRunning = await getTask.execute({ childId: b.taskRef.childId }, execFor(root))
+    assert.equal(stillRunning.status, 'running', '另一个任务不应被取消影响')
+
+    // a 的槽位释放后应还能再派一个（b + c = 2）
+    const c = await dispatch.execute({ role: 'SS', task: 'c' }, execFor(root))
+    assert.equal(c.ok, true, JSON.stringify(c))
+
+    subagents.pending.find((p) => p.childId === b.taskRef.childId)?.resolve({
+      stopReason: 'completed',
+      output: [],
+    })
+    await waitCompleted(root, b.taskRef.childId)
+  } finally {
+    await removeRepo(root)
+  }
+})
+
+test('卸载：写 interrupted 终态，不删除工作树', async () => {
+  const { root } = await makeRepo()
+  try {
+    const subagents = controllableSubagents()
+    const { tool, disposers } = applyPlugin(root, subagents)
+    const dispatch = tool('meetingstone_dispatch')
+    const res = await dispatch.execute({ role: 'SS', task: '长任务' }, execFor(root))
+    assert.equal(res.ok, true)
+
+    for (const dispose of disposers) if (typeof dispose === 'function') await dispose()
+
+    const record = await waitFor(async () => {
+      const parsed = await readRun(root, res.taskRef.childId)
+      return parsed.status === 'interrupted' ? parsed : null
+    })
+    assert.equal(record.stopReason, 'plugin-disposed')
+    assert.equal(record.stopConfirmed, true)
+    assert.equal(existsSync(res.worktree.path), true, '卸载不得删除工作树')
+  } finally {
+    await removeRepo(root)
+  }
+})
+
+// ─── 重叠预警 ────────────────────────────────────────────────────────────────
+
+test('重叠：两棵树改同一文件 → 双方 overlapWarnings 命中；未跟踪与重命名也算', async () => {
+  const { root } = await makeRepo({
+    'shared.txt': 'shared\n',
+    'old.txt': 'old\n',
+    'base.txt': 'base\n',
+  })
+  try {
+    const subagents = controllableSubagents({
+      onStart: async (item) => {
+        const cwd = item.spec.request.cwd
+        if (item.childId === 'child-1') {
+          git(cwd, 'mv', 'old.txt', 'renamed.txt')
+          await writeFile(join(cwd, 'untracked-same.txt'), 'a\n', 'utf8')
+        } else if (item.childId === 'child-2') {
+          await writeFile(join(cwd, 'shared.txt'), 'shared-b\n', 'utf8')
+          await writeFile(join(cwd, 'old.txt'), 'old-b\n', 'utf8')
+          await writeFile(join(cwd, 'untracked-same.txt'), 'b\n', 'utf8')
+          await writeFile(join(cwd, 'only-b.txt'), 'b\n', 'utf8')
+        }
+      },
+    })
+    const { tool } = applyPlugin(root, subagents)
+    const dispatch = tool('meetingstone_dispatch')
+    const a = await dispatch.execute({ role: 'SS', task: 'a' }, execFor(root))
+    const b = await dispatch.execute({ role: 'SS', task: 'b' }, execFor(root))
+    assert.equal(a.ok && b.ok, true, JSON.stringify({ a, b }))
+
+    subagents.pending.find((p) => p.childId === a.taskRef.childId)?.resolve({
+      stopReason: 'completed',
+      output: [],
+    })
+    subagents.pending.find((p) => p.childId === b.taskRef.childId)?.resolve({
+      stopReason: 'completed',
+      output: [],
+    })
+    await waitCompleted(root, a.taskRef.childId)
+    await waitCompleted(root, b.taskRef.childId)
+
+    const listRuns = tool('meetingstone_list_runs')
+    const listed = await listRuns.execute({}, execFor(root))
+    const byId = Object.fromEntries(listed.runs.map((run) => [run.childId, run]))
+
+    const aWarning = byId[a.taskRef.childId].overlapWarnings.find(
+      (w) => w.childId === b.taskRef.childId,
+    )
+    const bWarning = byId[b.taskRef.childId].overlapWarnings.find(
+      (w) => w.childId === a.taskRef.childId,
+    )
+    assert.ok(aWarning, 'A 应警告与 B 的重叠')
+    assert.ok(bWarning, 'B 应警告与 A 的重叠')
+    for (const file of ['old.txt', 'untracked-same.txt']) {
+      assert.ok(aWarning.files.includes(file), `A 的预警应含 ${file}：${aWarning.files}`)
+      assert.ok(bWarning.files.includes(file), `B 的预警应含 ${file}：${bWarning.files}`)
+    }
+    assert.equal(aWarning.files.includes('shared.txt'), false, 'shared.txt 只有 B 改，不应误报给 A')
+    assert.equal(bWarning.files.includes('renamed.txt'), false, 'renamed.txt 只有 A 改，不应误报给 B')
+
+    const getTask = tool('meetingstone_get_task')
+    const got = await getTask.execute({ childId: a.taskRef.childId }, execFor(root))
+    assert.ok(
+      got.overlapWarnings.some((w) => w.childId === b.taskRef.childId),
+      'get_task 也必须返回 overlapWarnings',
+    )
+
+    // 不同文件不误报
+    await delay(100) // 等 A/B 的 onFinish 释放项目额度
+    const c = await dispatch.execute({ role: 'SS', task: 'c' }, execFor(root))
+    const d = await dispatch.execute({ role: 'SS', task: 'd' }, execFor(root))
+    assert.equal(c.ok && d.ok, true, JSON.stringify({ c, d }))
+    await writeFile(join(c.worktree.path, 'only-c.txt'), 'c\n', 'utf8')
+    await writeFile(join(d.worktree.path, 'only-d.txt'), 'd\n', 'utf8')
+    subagents.pending.find((p) => p.childId === c.taskRef.childId)?.resolve({
+      stopReason: 'completed',
+      output: [],
+    })
+    subagents.pending.find((p) => p.childId === d.taskRef.childId)?.resolve({
+      stopReason: 'completed',
+      output: [],
+    })
+    await waitCompleted(root, c.taskRef.childId)
+    await waitCompleted(root, d.taskRef.childId)
+
+    const later = await listRuns.execute({}, execFor(root))
+    const laterById = Object.fromEntries(later.runs.map((run) => [run.childId, run]))
+    assert.equal(
+      laterById[c.taskRef.childId].overlapWarnings.some((w) => w.childId === d.taskRef.childId),
+      false,
+      '不同文件不应误报',
+    )
+    assert.equal(
+      laterById[d.taskRef.childId].overlapWarnings.some((w) => w.childId === c.taskRef.childId),
+      false,
+      '不同文件不应误报',
+    )
+  } finally {
+    await removeRepo(root)
+  }
+})
+
+test('changedFilesUnknown：记录标注未知且不参与重叠比较', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'mt-overlap-unknown-'))
+  try {
+    const store = createRunStore({ root })
+    await store.writeRun({
+      childId: 'known',
+      status: 'completed',
+      worktree: { path: '/tmp/known', baseSha: 'b', branch: 'meetingstone/known', operationId: 'known' },
+      changedFiles: ['shared.txt'],
+      changedFilesUnknown: false,
+    })
+    await store.writeRun({
+      childId: 'unknown',
+      status: 'completed',
+      worktree: { path: '/tmp/unknown', baseSha: 'b', branch: 'meetingstone/unknown', operationId: 'unknown' },
+      changedFiles: ['shared.txt'],
+      changedFilesUnknown: true,
+    })
+
+    const runs = await store.listRuns()
+    const known = runs.find((run) => run.childId === 'known')
+    const unknown = runs.find((run) => run.childId === 'unknown')
+    assert.equal(known.changedFilesUnknown, false)
+    assert.deepEqual(known.overlapWarnings, [], '未知记录不参与比较，不能当成有交集')
+    assert.equal(unknown.changedFilesUnknown, true, '必须标注未知')
+    assert.deepEqual(unknown.overlapWarnings, [])
+
+    const loaded = await store.loadRun('unknown')
+    assert.equal(loaded.changedFilesUnknown, true)
+    assert.deepEqual(loaded.overlapWarnings, [])
+  } finally {
+    await removeRepo(root)
+  }
+})
+
+test('淘汰保护：带 worktree 的记录不被 100 条/30 天清理', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'mt-prune-worktree-'))
+  try {
+    let clock = Date.now()
+    const store = createRunStore({ root, maxRuns: 2, maxAgeMs: 1000, now: () => clock })
+    await store.writeRun({
+      childId: 'wt-keep',
+      status: 'completed',
+      worktree: { path: '/tmp/wt-keep', baseSha: 'b', branch: 'meetingstone/wt-keep', operationId: 'wt-keep' },
+      changedFiles: ['x.txt'],
+    })
+    for (let i = 0; i < 6; i += 1) {
+      await store.writeRun({ childId: `plain-${i}`, status: 'completed' })
+      await delay(5)
+    }
+
+    let names = await readdir(join(root, RUNS_RELATIVE_DIR))
+    assert.ok(names.includes('wt-keep.json'), '带 worktree 的记录不得被条数清理')
+    assert.equal(names.filter((name) => name.startsWith('plain-')).length, 2, '普通记录仍按 2 条上限清理')
+
+    // 时长清理也不能删它
+    clock += 60_000
+    const result = await store.pruneRuns()
+    assert.ok(result.protected >= 1)
+    names = await readdir(join(root, RUNS_RELATIVE_DIR))
+    assert.ok(names.includes('wt-keep.json'), '带 worktree 的记录不得被时长清理')
+    assert.equal(names.filter((name) => name.startsWith('plain-')).length, 0)
+  } finally {
+    await removeRepo(root)
+  }
+})
+
+test('重启后：list_runs 保留 worktree 元数据，旧 running 投影为 interrupted', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'mt-restart-worktree-'))
+  try {
+    const oldStore = createRunStore({ root, runtimeId: 'runtime-old' })
+    await oldStore.writeRun({
+      childId: 'old-run',
+      status: 'running',
+      runtimeId: 'runtime-old',
+      operationId: 'op-old',
+      worktree: {
+        path: join(root, '.meetingstone', 'worktrees', 'op-old'),
+        branch: 'meetingstone/op-old',
+        baseSha: 'abc',
+        repositoryRoot: root,
+        operationId: 'op-old',
+      },
+    })
+
+    const newStore = createRunStore({ root, runtimeId: 'runtime-new' })
+    const [run] = await newStore.listRuns()
+    assert.equal(run.status, 'interrupted')
+    assert.equal(run.interrupted, true)
+    assert.equal(run.worktree.branch, 'meetingstone/op-old')
+    assert.equal(run.operationId, 'op-old')
+
+    const loaded = await newStore.loadRun('old-run')
+    assert.equal(loaded.status, 'interrupted')
+    assert.equal(loaded.worktree.path, join(root, '.meetingstone', 'worktrees', 'op-old'))
+    assert.deepEqual(loaded.overlapWarnings, [])
+  } finally {
+    await removeRepo(root)
+  }
+})
+
+test('listRuns 保留 worktree/changedFiles/operationId（悟空指出的丢失字段）', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'mt-list-worktree-'))
+  try {
+    const store = createRunStore({ root })
+    await store.writeRun({
+      childId: 'run-wt',
+      status: 'completed',
+      operationId: 'op-1',
+      worktree: {
+        path: '/tmp/wt',
+        branch: 'meetingstone/op-1',
+        baseSha: 'abc',
+        repositoryRoot: '/tmp/repo',
+        operationId: 'op-1',
+      },
+      changedFiles: ['a.txt', 'b.txt'],
+      stopConfirmed: true,
+    })
+    const [run] = await store.listRuns()
+    assert.equal(run.operationId, 'op-1')
+    assert.equal(run.worktree.path, '/tmp/wt')
+    assert.equal(run.worktree.branch, 'meetingstone/op-1')
+    assert.equal(run.worktree.baseSha, 'abc')
+    assert.deepEqual(run.changedFiles, ['a.txt', 'b.txt'])
+    assert.equal(run.stopConfirmed, true)
+  } finally {
+    await removeRepo(root)
+  }
+})

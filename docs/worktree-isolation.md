@@ -1,23 +1,78 @@
-# 工作树隔离（手动流程）
+# 工作树隔离（自动 + 手动）
 
-> 状态：2026-11-11，**手动流程**。插件**不会**自动创建、合并或清理工作树。
-> 自动的「任务级工作树隔离 / 并行多任务」仍在设计中，见 [并行多任务方案](plan/2026-11-11-parallel-plan.md)。
-> 本文**复用宿主 `create_worktree` 工具**（由已启用的 `dsh-experimental-tool-worktree` bundle 提供），
-> 不在插件里新写 git 管理代码；建树之后的合并与清理全部由人按标准 git 命令完成。
-
-> ⚠️ 本文中的命令**只用于照抄执行，本文档自身不执行任何会改动仓库的操作**。
+> 状态：2026-11-11。**`meetingstone_dispatch` 默认自动为每个任务创建独立 git 工作树**
+> （`limits.defaultIsolation: 'worktree'`），同一项目最多 2 个、全局最多 4 个并行写任务。
+> 本文同时保留**手动流程**：用于不想开自动隔离、或需要自己控制建树/合并/清理的场景。
+>
+> ⚠️ **隔离的准确含义：文件布局隔离，不是权限沙箱。**
+> 子 Agent 默认 cwd 是工作树，改动不会直接落到主工作区；但它仍在同一系统账号下运行，
+> 可以主动 `cd` 到主工作区写文件，也共享同一份 git 元数据。不要把它当安全边界。
+>
+> ⚠️ 本文命令**只用于照抄执行，本文档自身不执行任何会改动仓库的操作**。
 > 合并前请先 `git status` 看清当前改动，必要时先备份。
 
-## 1. 什么时候用
+## 1. 两种方式怎么选
 
-`meetingstone_dispatch` 默认在**主工作区**执行，多个任务直接改同一份文件会互相覆盖。
-在自动隔离落地之前，如果你想让一次派单的改动与主工作区隔开，可以：
+| | 自动隔离（默认） | 手动流程 |
+| --- | --- | --- |
+| 谁建树 | 插件（`src/worktree.js`，literal argv） | 宿主 `create_worktree` 工具或你手敲 git |
+| 路径 | `<projectRoot>/.meetingstone/worktrees/<operationId>` | 你指定（必须在项目根内） |
+| 分支 | `meetingstone/<operationId>` | 你指定 |
+| 并行 | 默认开（2/项目、4/全局） | 需要自己关掉 `serializeWrites` 或显式 `isolation:'none'` |
+| 合并/清理 | 不自动，人工（§5） | 不自动，人工（§5） |
+| 记录 | `worktree` / `changedFiles` / `overlapWarnings` 自动落盘 | 插件不感知，记录里没有 worktree 字段 |
 
-1. 用宿主 `create_worktree` 工具建一棵隔离工作树；
-2. 派单时把 `cwd` 指向这棵工作树（片段见 [examples/worktree-dispatch.jsonc](../examples/worktree-dispatch.jsonc)）；
+### 1.1 自动隔离（默认行为）
+
+```text
+meetingstone_dispatch({
+  "role": "沙僧",
+  "task": "重构 src/foo 模块并补单测"
+})
+```
+
+会发生什么：
+
+1. 生成 `operationId`（UUID），在**任何异步操作之前**预占项目/全局两级额度；
+2. `git worktree add -b meetingstone/<operationId> .meetingstone/worktrees/<operationId> <baseSha>`；
+3. 用 `cwd = 工作树路径` 启动子 Agent；
+4. 终态时计算 `changedFiles` 并落盘；**不删除**工作树与分支。
+
+失败关闭：项目不是 git 仓库、建树超时/失败、路径或分支已存在、实际路径逃出项目根，
+都会**拒绝派单**并返回 `WORKTREE_*` 错误码；**绝不退回主工作区执行**。
+
+想临时关闭隔离（回到主工作区串行）：
+
+```text
+meetingstone_dispatch({
+  "role": "沙僧",
+  "task": "只改一个文件",
+  "isolation": "none"
+})
+```
+
+`isolation:'none'` 与隔离任务**不得混跑**：同项目已有任一方向的任务在执行时，派单会被
+`WRITE_CONFLICT` 拒绝。关闭隔离时仍受 `limits.serializeWrites` 约束（默认 `true`，同项目串行）。
+
+全局默认值在插件配置里（`cordis.patch.yml`）：
+
+```yaml
+limits:
+  defaultIsolation: worktree    # worktree | none
+  maxParallelWritesPerProject: 2
+  maxParallelWritesTotal: 4
+  serializeWrites: true         # 仅 isolation:none 时生效
+```
+
+### 1.2 手动流程（需要自己控制时）
+
+1. 用宿主 `create_worktree` 工具建一棵隔离工作树（或手工 `git worktree add`）；
+2. 派单时把 `cwd` 指向这棵工作树（片段见 [examples/worktree-dispatch.jsonc](../examples/worktree-dispatch.jsonc)），
+   并传 `isolation: "none"`；
 3. 任务完成后**人工**把改动合回主干，再清理工作树。
 
-这只是一个**人肉流程**：插件不感知工作树、不自动合并、不自动清理，也不保证并行。
+这只是一个**人肉流程**：插件不会感知这棵树、不会自动合并、不会自动清理。
+`cwd` 边界校验仍会检查路径在项目根内（§2.2）。
 
 ## 2. 三条硬约束（先看）
 
@@ -30,8 +85,12 @@
 - `dist/`、`build/`、`coverage/` 等构建产物
 - `.meetingstone/` 里的派单记录与本机数据
 
-因此：**需要装依赖 / 读本地配置 / 跑构建的任务，进工作树后要先自行准备**，否则子任务很可能因为缺依赖或读不到配置而失败。准备方式见 §3 Step 2。
+因此：**需要装依赖 / 读本地配置 / 跑构建的任务，进工作树后要先自行准备**，否则子任务很可能因为缺依赖或读不到配置而失败。准备方式见 §4 Step 2。
 另外，不要把含密钥的文件提交进仓库；复制 `.env` 是人工决定，插件不会替你读取或注入凭据。
+
+> 建议把 `.meetingstone/` 加进项目的 `.gitignore`。自动工作树就建在这个目录下；
+> 不忽略的话，主工作区的 `git status` 会显示这一大坨未跟踪目录（不影响功能，但很吵）。
+> 本仓库的 `.gitignore` 已经忽略 `.meetingstone/`。
 
 ### 2.2 `cwd` 必须在项目根内（适配器有边界校验）
 
@@ -42,23 +101,59 @@
 
 项目根取自 `exec.agent.session.header.cwd`（见 [配置参考](configuration.md) §4）。所以：
 
-- 宿主 `create_worktree` 返回的**路径必须落在项目根内**；建议放到项目内的
-  `.meetingstone/worktrees/<name>`（该目录已在 `.gitignore` 里，不会污染 `git status`）。
+- 自动隔离的工作树固定建在 `<projectRoot>/.meetingstone/worktrees/`，天然在项目内；
+- 手动建树时，宿主 `create_worktree` 返回的**路径必须落在项目根内**；建议也放到
+  `.meetingstone/worktrees/<name>`（该目录已在 `.gitignore` 里，不会污染 `git status`）；
 - 若工具把工作树建到项目根**之外**（例如仓库的兄弟目录），**不要**直接把它的路径当 `cwd` 传进去，派单会被拒绝；
-  请改用项目根内的目录，或放弃 `cwd` 隔离。不要绕过这道校验。
 - 边界校验只保证「路径在项目内」，**不保证**该路径是 git 工作树；路径写错请自己核对。
 
-### 2.3 建树 ≠ 并行：`serializeWrites` 仍然生效
+### 2.3 并行不是权限沙箱
 
-并发计数键 `projectKey` 取自**会话项目根**，不是 `cwd`。插件全局配置里
-`limits.serializeWrites` 默认 `true`（见 [配置参考](configuration.md) §1），
-所以同一项目根下的派单**仍默认串行**，建两棵工作树并不会自动变成并行。
+| 能做到 | 做不到 |
+| --- | --- |
+| 默认 cwd 不同，改动不直接落主工作区 | 阻止子 Agent 主动写主工作区（同账号、同文件系统） |
+| 每任务独立分支/工作树，便于人工合并 | 进程级/系统级隔离（没有 sandbox、没有独立用户） |
+| 共享 git 对象库，建树快、省磁盘 | 独立仓库（共享 common-dir，git 元数据是同一份） |
 
-- 只要想「一次一个任务、把改动隔离出来」，默认配置即可，不用改任何东西。
-- 若确实要并行，需先在**插件全局配置**里把 `serializeWrites` 设为 `false`（会失去串行保护，风险自负），
-  或等 [并行多任务方案](plan/2026-11-11-parallel-plan.md) 落地。项目级 `.meetingstone.json` **不提供** `limits`。
+真正的权限边界请按 provider 行配置并自行验收（见 [安全与权限边界](security.md)）。
 
-## 3. 步骤
+## 3. 自动隔离的额度、错误与记录
+
+### 3.1 额度
+
+- 同项目：`maxParallelWritesPerProject`，默认 2
+- 全局：`maxParallelWritesTotal`，默认 4（所有 provider 共用）
+- 超限返回**可重试**错误码：`WRITE_LIMIT_PROJECT` / `WRITE_LIMIT_TOTAL`
+- 项目键先归一化（Windows 大小写、尾斜杠），`D:/P` 与 `d:/p/` 不会绕过额度
+
+### 3.2 错误码
+
+| 错误码 | 含义 |
+| --- | --- |
+| `WORKTREE_UNAVAILABLE` | 请求隔离但工作树服务缺失 |
+| `WORKTREE_NOT_GIT_REPOSITORY` | 项目根不是 git 工作区 |
+| `WORKTREE_BASE_INVALID` | `base` 无法解析为 commit |
+| `WORKTREE_PATH_EXISTS` | 工作树路径已存在或已被 git 登记 |
+| `WORKTREE_BRANCH_EXISTS` | `meetingstone/<operationId>` 已存在 |
+| `WORKTREE_GIT_FAILED` | 其他 git 失败 |
+| `WORKTREE_TIMEOUT` | git 命令超时（建树 30s / 计算改动 10s） |
+| `WORKTREE_PATH_OUTSIDE` | 实际路径逃出项目根（junction/symlink） |
+| `INVALID_ISOLATION` | `isolation` 不是 `none`/`worktree` |
+
+### 3.3 记录与重叠预警
+
+`meetingstone_get_task` / `meetingstone_list_runs` 会返回：
+
+- `worktree: { path, branch, baseSha, repositoryRoot, operationId }`
+- `changedFiles: string[]`（已提交/暂存/未暂存/未跟踪/重命名的新旧路径）
+- `changedFilesUnknown: boolean`（计算失败时为 true；**不能当成无改动**）
+- `overlapWarnings: [{ childId, files }]`（同项目、带工作树、改动文件有交集的记录）
+- `stopConfirmed`（取消/卸载时是否确认进程已停）
+
+**带 worktree 的记录不参与"100 条 / 30 天"自动清理**：元数据是人工合并/清理的唯一线索。
+代价是这类记录会一直保留，请在合并后人工删除。
+
+## 4. 手动流程步骤
 
 以下命令用 PowerShell 演示；`$PROJ` 换成你的项目根，`$NAME` 换成任务代号。
 
@@ -96,16 +191,18 @@ Copy-Item "$PROJ\.env" "$WT\.env"
 
 **Step 3 · 派单，`cwd` 指向工作树**
 
-把 `meetingstone_dispatch` 的 `cwd` 设为 `$WT`（必须在项目根内）。
-可照抄的片段见 [examples/worktree-dispatch.jsonc](../examples/worktree-dispatch.jsonc)。
+把 `meetingstone_dispatch` 的 `cwd` 设为 `$WT`（必须在项目根内），并显式关闭自动隔离：
 
 ```text
 meetingstone_dispatch({
   "role": "沙僧",
   "task": "在工作树里重构 src/foo 模块并补单测",
-  "cwd": "D:/MeetingStone/.meetingstone/worktrees/issue-42"
+  "cwd": "D:/MeetingStone/.meetingstone/worktrees/issue-42",
+  "isolation": "none"
 })
 ```
+
+> 不传 `isolation:'none'` 时，插件会忽略你给的 `cwd`，另外建一棵自动工作树。
 
 **Step 4 · 等结果**
 
@@ -116,11 +213,11 @@ git -C $WT status --short
 git -C $WT log --oneline main..HEAD
 ```
 
-**Step 5 · 人工合回**（三选一，见 §4）
+**Step 5 · 人工合回**（三选一，见 §5）
 
-**Step 6 · 清理工作树**（见 §5）
+**Step 6 · 清理工作树**（见 §6）
 
-## 4. 合并：三条人工路径
+## 5. 合并：三条人工路径
 
 合回前先确认主工作区干净、并已切到要合入的分支（如 `main`）：
 
@@ -163,43 +260,48 @@ Get-ChildItem "$PROJ\.meetingstone\patches\*.patch" | Sort-Object Name | ForEach
 git -C $PROJ status --short    # 核对后再自行 commit
 ```
 
-三种方式都**不自动合并**：冲突保留双方，由人裁决（与 [并行多任务方案](plan/2026-11-11-parallel-plan.md) §3 的「不做自动合并」一致）。
+三种方式都**不自动合并**：冲突保留双方，由人裁决（与 [并行多任务方案](plan/2026-11-11-parallel-plan.md) §4 的「不做自动合并」一致）。
 
-## 5. 清理
+## 6. 清理
 
 合并完成后：
 
 ```powershell
-# 移除已合并的工作树（有未提交改动会拒绝；确认要丢弃才加 --force）
+# 自动隔离的树：路径来自 get_task/list_runs 的 worktree.path
+git -C $PROJ worktree remove <worktree.path>
+# 手动流程的树
 git -C $PROJ worktree remove $WT
 # 清理残留的管理元数据（例如手工删过工作树目录之后）
 git -C $PROJ worktree prune
 # 可选：删除已合并分支
-git -C $PROJ branch -d $BR
+git -C $PROJ branch -d meetingstone/<operationId>
 git -C $PROJ worktree list    # 确认已清干净
 ```
 
 注意：
 
 - `git worktree remove` 遇到未提交改动会拒绝，避免误删未合并代码；`--force` 前务必确认。
-- 取消任务 / 插件重启 / 卸载**不会**自动删工作树，未合并的改动可能留在里面；请定期 `git worktree list` 检查孤儿。
+- 插件**不会**自动删工作树/分支：取消任务 / 插件重启 / 卸载都不会删，未合并的改动可能留在里面；
+  请定期 `git worktree list` 检查孤儿。
 - `prune` 只清理 git 的登记元数据，不会帮你恢复被删目录里的未提交改动。
+- 如果不再需要记录，可手工删除 `.meetingstone/runs/<childId>.json`；带 worktree 的记录不会自动淘汰。
 
-## 6. 边界与注意
+## 7. 边界与注意
 
-| 事项 | 结论 |
-| --- | --- |
-| 谁建树 | 宿主 `create_worktree` 工具；插件不写 git 管理代码 |
-| 未跟踪/忽略文件 | 不复制，需人工准备（§2.1 / Step 2） |
-| `cwd` 越界 | `PATH_OUTSIDE_PROJECT` 拒绝启动（§2.2） |
-| 并行 | 不自动并行，`serializeWrites` 仍默认串行（§2.3） |
-| 合并 | 不自动合并，人工 merge / cherry-pick / patch（§4） |
-| 清理 | 不自动清理，人工 `worktree remove` / `prune`（§5） |
-| 结果落盘 | 仍在项目根的 `.meetingstone/runs/`，与工作树路径无关 |
+| 事项 | 自动隔离 | 手动流程 |
+| --- | --- | --- |
+| 谁建树 | 插件 `src/worktree.js` | 宿主工具或你 |
+| 未跟踪/忽略文件 | 不复制 | 不复制，需人工准备 |
+| `cwd` 越界 | 拒绝（路径构造 + realpath 校验） | `PATH_OUTSIDE_PROJECT` 拒绝启动 |
+| 并行 | 默认 2/项目、4/全局 | 需 `isolation:'none'` 并调整 `serializeWrites` |
+| 合并 | 不自动，人工 merge / cherry-pick / patch | 同左 |
+| 清理 | 不自动，人工 `worktree remove` / `prune` | 同左 |
+| 结果落盘 | 项目根 `.meetingstone/runs/`，含 worktree/changedFiles | 仍在项目根，但没有 worktree 字段 |
+| 安全边界 | **文件布局隔离，不是权限沙箱** | 同左 |
 
-## 7. 相关文档
+## 8. 相关文档
 
-- [并行多任务方案（自动隔离，设计中）](plan/2026-11-11-parallel-plan.md)
-- [配置参考：`cwd` 边界、`serializeWrites`、项目级配置](configuration.md)
+- [并行多任务方案（悟空裁决与实现）](plan/2026-11-11-parallel-plan.md)
+- [配置参考：`limits`、`isolation`、错误码](configuration.md)
 - [安全与权限边界](security.md)
 - [可照抄的派单片段](../examples/worktree-dispatch.jsonc)

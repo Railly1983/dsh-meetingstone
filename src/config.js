@@ -87,8 +87,24 @@ export const Config = compile(
       .default('.meetingstone.json')
       .description('项目级配置文件（相对项目根）'),
     limits: S.object({
-      serializeWrites: S.boolean().default(true).description('同项目任务串行'),
-    }).default({ serializeWrites: true }),
+      serializeWrites: S.boolean()
+        .default(true)
+        .description('defaultIsolation=none 时同项目任务串行（隔离模式下不影响并行额度）'),
+      maxParallelWritesPerProject: S.number()
+        .default(2)
+        .description('同一项目并行写任务上限（含隔离工作树；默认 2）'),
+      maxParallelWritesTotal: S.number()
+        .default(4)
+        .description('所有项目合计的并行写任务上限（所有 provider 共用；默认 4）'),
+      defaultIsolation: S.union(['none', 'worktree'])
+        .default('worktree')
+        .description('默认隔离方式：worktree=每任务独立工作树；none=主工作区串行'),
+    }).default({
+      serializeWrites: true,
+      maxParallelWritesPerProject: 2,
+      maxParallelWritesTotal: 4,
+      defaultIsolation: 'worktree',
+    }),
   }),
 )
 

@@ -19,7 +19,7 @@
 | 取消任务 | ✅ stop | ✅ `meetingstone_cancel_task` |
 | 结果回读 | ✅ 读输出 | ✅ `get_task` 返回真实输出（已验 PONG） |
 | 并发纪律 | 由插件内部管理 | ✅ 同项目串行/按项目隔离（只读限流已随只读通道移除） |
-| 并行多任务 | ✅ 多 worker 并行 | 🔄 设计中（见 `docs/plan/2026-11-11-parallel-plan.md`）：当前同项目写任务默认串行；手动隔离流程见 `docs/worktree-isolation.md` |
+| 并行多任务 | ✅ 多 worker 并行 | ✅ 已实现（2026-11-11，路 2）：每任务独立 git 工作树，2/项目、4/全局；失败关闭；不自动清理（见 `docs/plan/2026-11-11-parallel-plan.md`）。隔离是文件布局，不是权限沙箱 |
 | 本机 CLI 状态 | ✅ | ✅ 多源探测（含商店应用 Appx 路径） |
 | 配置位置 | worker 配置/项目文件 | ✅ 插件 Config + 项目 `.meetingstone.json`（热读取） |
 
@@ -30,14 +30,15 @@
 | ~~CodeBuddy（acp 通道）~~ | ✅ **2026-11-10 已打通**：装 `@deepseek-ai/dsh-subagent-acp` + `insert` 一行；关键是 stdin 必须保持打开、用 node 启动 bin | 已解决 |
 | **Claude Code 通道** | bundle 存在，但本机未安装 Claude CLI；provider 自带 pinned CLI，未实测 | 若需要 Claude 角色，需单独验证 |
 | **会话续聊（followup）** | 我们现在是一次性 activation；宿主有 `prepareContinuable`，但未接 | 不能像 CLIWorker 那样"让沙僧接着改" |
-| **隔离副本 + 合回（merge back）** | CLIWorker 每个 worker 在隔离副本里干活再合回；我们直接在宿主 workspace 执行 | 多 worker 并行改同一仓库时，没有它的"隔离→合并"保护（宿主有 `dsh-experimental-tool-worktree` 可考虑接入） |
+| **隔离副本 + 合回（merge back）** | 2026-11-11 已实现任务级 git worktree（`src/worktree.js`）：每任务独立树/分支，改动不直接落主工作区；但**不自动合回**，人工 merge/cherry-pick/patch，且隔离只是文件布局，不是权限沙箱 | 并行写同一仓库已有隔离保护；合回仍需人工 |
 | **多 CLI 混合编队** | CLIWorker 可在一次任务里混用不同 CLI | 我们现在是"一个角色一次派单" |
 
 ## 3. 建议的关停顺序
 
 1. **先补 acp 通道**（CodeBuddy）：装 `@deepseek-ai/dsh-subagent-acp@0.2.2-rc.1` + 配置行 + 实跑 PONG。
 2. **再补续聊**（若你确实需要"继续改"）：接宿主 `prepareContinuable`。
-3. **隔离与合回**：评估用宿主 worktree 工具替代，或承认差距（并行写同一仓库时不推荐）。
+3. ~~**隔离与合回**~~：2026-11-11 已实现任务级 worktree 隔离（默认开启，2/项目、4/全局），
+   合回仍按人工 merge / cherry-pick / patch 处理（`docs/worktree-isolation.md`）。
 4. 以上三项里，**第 1 项是硬前提**；第 2、3 项可按你的实际使用习惯决定是否等。
 
 ## 4. 结论
@@ -45,9 +46,11 @@
 **2026-11-10 更新：三条通道（codex / codebuddy-acp / in-process）均已真机验证通过，角色人设注入已实现。**
 CLIWorker 已在 profile 里 `disabled: true`（可逆，删掉那两行或改 false 即恢复）。
 
-剩余差异只有两项，按需再补：
+剩余差异只有一项：
 
 | 差异 | 影响 | 何时需要补 |
 | --- | --- | --- |
 | **会话续聊（followup）** | 不能对同一个子 Agent 追加指令，只能重新派单 | 当你需要"让沙僧接着改刚才那段"时 |
-| **隔离副本 + 合回** | 多个 worker 并行改同一仓库没有隔离保护 | 当你需要并行派多个写任务时（可考虑接宿主 worktree 工具） |
+
+> 并行隔离已于 2026-11-11 实现（路 2：自建 git worktree）；隔离是文件布局隔离，不是权限沙箱，
+> 合回仍需人工。见 `docs/plan/2026-11-11-parallel-plan.md`。

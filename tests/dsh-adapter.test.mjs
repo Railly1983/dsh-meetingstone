@@ -196,6 +196,35 @@ test('start 成功：把 role/task/cwd 透传给宿主 startActivation', async (
   assert.doesNotThrow(() => JSON.stringify(res.taskRef))
 })
 
+test('隔离启动：taskRef 带 operationId，running 记录带 worktree 元数据', async () => {
+  const started = []
+  const { adapter } = makeAdapter(fakeSubagents({ providers: { acp: {} } }), {
+    onRunStart: (record) => started.push(record),
+  })
+  const worktree = {
+    path: 'D:/MeetingStone/.meetingstone/worktrees/op-1',
+    branch: 'meetingstone/op-1',
+    baseSha: 'abc123',
+    repositoryRoot: 'D:/MeetingStone',
+    operationId: 'op-1',
+  }
+  const res = await adapter.start({
+    role: role(),
+    task: 'x',
+    timeoutMs: 0,
+    cwd: worktree.path,
+    isolation: 'worktree',
+    operationId: 'op-1',
+    worktree,
+    context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
+  })
+  assert.equal(res.taskRef.operationId, 'op-1')
+  assert.equal(started.length, 1)
+  assert.equal(started[0].operationId, 'op-1')
+  assert.deepEqual(started[0].worktree, worktree)
+  assert.equal(started[0].isolation, 'worktree')
+})
+
 test('start 抛错时向上抛，不吞、不降级成成功', async () => {
   const { adapter } = makeAdapter(
     fakeSubagents({ providers: { acp: {} }, startError: new Error('spawn ENOENT') }),

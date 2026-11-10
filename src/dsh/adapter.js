@@ -1,5 +1,6 @@
 // @ts-check
-import { relative, resolve } from 'node:path'
+import { promises as fs } from 'node:fs'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { composePromptWithContinuation } from '../context-replay.js'
 /**
  * DSH 接线层 · 适配器（阶段 2）。
@@ -137,6 +138,7 @@ export function providerNameFor(role) {
  *   `SubagentRuntime.listDescendants()` / `ctx.sessionQuery` 查询，出处 subagent.md）
  * @property {string} name      `SubagentActivation.name`（模型可见名）
  * @property {number} startedAt 本适配器记录的启动时间（Date.now()）
+ * @property {string} [operationId] 隔离工作树的 operationId（仅隔离任务有）
  */
 
 /** @param {unknown} err */
@@ -484,7 +486,10 @@ export function createDshAdapter(ctx, options = {}) {
           'PROJECT_ROOT_UNKNOWN: 无法从当前会话确定项目根，拒绝在未校验的 cwd 下启动',
         )
       }
-      if (!isInside(cwd, projectRoot)) {
+      // 项目根可能是 junction/symlink、大小写也可能不同：优先用 realpath 判断。
+      // realpath 失败（路径不存在等）时退回字符串判断，保持原有失败关闭语义。
+      const insideReal = await isInsideReal(cwd, projectRoot)
+      if (insideReal === null ? !isInside(cwd, projectRoot) : !insideReal) {
         throw new Error(
           `PATH_OUTSIDE_PROJECT: cwd ${cwd} 不在项目根 ${projectRoot} 之内，已拒绝启动`,
         )
@@ -522,6 +527,12 @@ export function createDshAdapter(ctx, options = {}) {
     }
 
     const childId = String(activation.childId)
+    const operationId =
+      typeof input?.operationId === 'string' && input.operationId
+        ? input.operationId
+        : typeof input?.worktree?.operationId === 'string'
+          ? input.worktree.operationId
+          : null
     /** @type {MeetingstoneTaskRef} */
     const taskRef = {
       kind: 'subagent-activation',
@@ -529,6 +540,8 @@ export function createDshAdapter(ctx, options = {}) {
       childId,
       name: typeof activation.name === 'string' ? activation.name : childId,
       startedAt: now(),
+      // operationId → childId 的即时映射；落盘记录里也有同样一对字段
+      ...(operationId ? { operationId } : {}),
     }
 
     // 5. 取消信号：我们自己的 AbortController（spec.signal）+ activation.dispose()。
@@ -548,6 +561,16 @@ export function createDshAdapter(ctx, options = {}) {
       status: 'running',
       createdAt: taskRef.startedAt,
       startedAt: taskRef.startedAt,
+      // 并行隔离元数据：记录与 childId 的映射，便于审计"这个 childId 用了哪棵树"
+      operationId:
+        typeof input?.operationId === 'string' && input.operationId
+          ? input.operationId
+          : typeof input?.worktree?.operationId === 'string'
+            ? input.worktree.operationId
+            : null,
+      worktree:
+        input?.worktree && typeof input.worktree === 'object' ? input.worktree : null,
+      isolation: input?.isolation === 'none' || input?.isolation === 'worktree' ? input.isolation : null,
     }
     handles.set(childId, { activation, controller, timer, onFinish: input?.onFinish, runBase })
 
@@ -565,6 +588,8 @@ export function createDshAdapter(ctx, options = {}) {
           const settled = {
             status: 'completed',
             stopReason: result?.stopReason ?? 'completed',
+            // 子 Agent 已正常结束；宿主返回了终态，视为进程已确认停止
+            stopConfirmed: true,
             output: resultText(result),
             ...(result?.diagnostic ? { diagnostic: String(result.diagnostic) } : {}),
             at: now(),
@@ -586,6 +611,8 @@ export function createDshAdapter(ctx, options = {}) {
           const settled = {
             status: 'failed',
             stopReason: 'error',
+            // 执行已经以错误结束；进程不再存活
+            stopConfirmed: true,
             output: '',
             diagnostic: errorMessage(err),
             at: now(),
@@ -691,6 +718,8 @@ export function createDshAdapter(ctx, options = {}) {
           const settled = {
             status: 'cancelled',
             stopReason: 'cancelled',
+            // dispose 成功 = 确认已停；超时/失败时如实标 false（进程可能还活着）
+            stopConfirmed: !disposeError,
             output: '',
             at: now(),
             ...(disposeError
@@ -758,6 +787,8 @@ export function createDshAdapter(ctx, options = {}) {
               const settled = {
                 status: 'interrupted',
                 stopReason: 'plugin-disposed',
+                // dispose 成功 = 确认已停；超时/失败时如实标 false
+                stopConfirmed: !disposeError,
                 output: '',
                 diagnostic: disposeError
                   ? `插件卸载：任务被中断（activation.dispose 失败 ${disposeError.code}：${disposeError.message}）`
@@ -811,7 +842,23 @@ function readProjectRoot(agent) {
 function isInside(child, root) {
   const rel = relative(resolve(root), resolve(child))
   if (rel === '') return true
-  return !rel.startsWith('..') && !rel.startsWith('/') && !/^[A-Za-z]:/.test(rel)
+  return rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)
+}
+
+/**
+ * realpath 版边界判断，处理 junction / symlink / Windows 大小写。
+ * 返回 null 表示无法 realpath（调用方退回字符串判断，而不是放行）。
+ * @param {string} child
+ * @param {string} root
+ * @returns {Promise<boolean | null>}
+ */
+async function isInsideReal(child, root) {
+  try {
+    const [realChild, realRoot] = await Promise.all([fs.realpath(child), fs.realpath(root)])
+    return isInside(realChild, realRoot)
+  } catch {
+    return null
+  }
 }
 
 export default createDshAdapter

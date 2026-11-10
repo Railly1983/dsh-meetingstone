@@ -15,10 +15,34 @@
     dispatchNotes: "常规实现优先沙僧；关键改动交悟空复核。"
     projectConfigFile: .meetingstone.json
     limits:
-      serializeWrites: true
+      serializeWrites: true              # isolation:none 时同项目串行
+      maxParallelWritesPerProject: 2     # 同项目并行写任务上限
+      maxParallelWritesTotal: 4          # 全局并行写任务上限（所有 provider 共用）
+      defaultIsolation: worktree         # worktree | none
 ```
 
 > ⚠️ patch 是**整值替换**：覆盖这一行时要把整个 `config` 写全，不是深合并。
+
+### 1.1 并行与工作树隔离
+
+`meetingstone_dispatch` 默认 `isolation:'worktree'`：每个任务在
+`<projectRoot>/.meetingstone/worktrees/<operationId>` 的独立 git 工作树里执行，
+分支为 `meetingstone/<operationId>`。详见 [工作树隔离](worktree-isolation.md)。
+
+| 配置 | 默认 | 说明 |
+| --- | --- | --- |
+| `limits.defaultIsolation` | `worktree` | `worktree`=每任务独立工作树；`none`=主工作区 |
+| `limits.maxParallelWritesPerProject` | `2` | 同项目并行写任务上限；超限返回 `WRITE_LIMIT_PROJECT`（可重试） |
+| `limits.maxParallelWritesTotal` | `4` | 所有项目合计上限；超限返回 `WRITE_LIMIT_TOTAL`（可重试） |
+| `limits.serializeWrites` | `true` | 仅在 `isolation:none` 时生效：同项目串行 |
+
+纪律：
+
+- 两级额度在**首次异步操作前**一起预占（含建树）；所有 provider 共用同一计数器。
+- `isolation:none` 与隔离任务**不得混跑**，同项目任一方向有活动任务就返回 `WRITE_CONFLICT`。
+- 请求隔离但建树失败 / 服务缺失 → **拒绝派单**，绝不退回主工作区。
+- 完成 / 失败 / 取消 / 卸载都**不删除**工作树与分支。
+- **隔离是文件布局隔离，不是权限沙箱**（同账号、同文件系统、共享 git 元数据）。
 
 ## 2. `channels`（通道实例表）
 
@@ -87,7 +111,19 @@
 | 模型与实例不一致 | `MODEL_UNSUPPORTED`，给出双方取值 |
 | `cwd` 越出项目根 | `PATH_OUTSIDE_PROJECT` |
 | 拿不到项目根却指定 `cwd` | `PROJECT_ROOT_UNKNOWN` |
-| 同项目已有任务 | `WRITE_CONFLICT`（`serializeWrites` 默认开） |
+| 同项目已有任务（`isolation:none` + `serializeWrites`） | `WRITE_CONFLICT` |
+| 同项目已有未隔离任务，或隔离任务遇到未隔离任务 | `WRITE_CONFLICT`（不得混跑） |
+| 同项目并行写任务达上限 | `WRITE_LIMIT_PROJECT`（可重试） |
+| 全局并行写任务达上限 | `WRITE_LIMIT_TOTAL`（可重试） |
+| 请求隔离但工作树服务缺失 | `WORKTREE_UNAVAILABLE` |
+| 项目根不是 git 工作区 | `WORKTREE_NOT_GIT_REPOSITORY` |
+| `base` 无法解析为 commit | `WORKTREE_BASE_INVALID` |
+| 工作树路径已存在/已被 git 登记 | `WORKTREE_PATH_EXISTS` |
+| `meetingstone/<operationId>` 分支已存在 | `WORKTREE_BRANCH_EXISTS` |
+| 其他 git 失败 | `WORKTREE_GIT_FAILED` |
+| git 命令超时（建树 30s / 计算改动 10s） | `WORKTREE_TIMEOUT` |
+| 工作树实际路径逃出项目根 | `WORKTREE_PATH_OUTSIDE` |
+| `isolation` 不是 `none`/`worktree` | `INVALID_ISOLATION` |
 | 取消/卸载时宿主 `dispose()` 超时 | `ADAPTER_DISPOSE_TIMEOUT`：按超时兜底，记录后仍然释放并发槽位并写终态 |
 | 取消/卸载时宿主 `dispose()` 抛错 | `ADAPTER_DISPOSE_FAILED`：记录错误后仍然释放并发槽位并写终态 |
 
@@ -102,6 +138,11 @@
   `status: 'interrupted'` + `interrupted: true`；只改返回值，不回写磁盘。
 - **插件卸载**：对内存中仍存活的任务写 `interrupted` 终态（`stopReason: 'plugin-disposed'`），
   不会在磁盘留下假 `running`。
+- **工作树记录**：终态记录包含 `worktree: { path, branch, baseSha, repositoryRoot, operationId }`、
+  `changedFiles`、`changedFilesUnknown`、`stopConfirmed`。带 `worktree` 的记录**不参与**
+  100 条/30 天自动清理（保护未合并成果的元数据）；工作树/分支本身一律不自动删除。
+- **重叠预警**：`get_task` / `list_runs` 返回 `overlapWarnings: [{ childId, files }]`；
+  `changedFilesUnknown: true` 的记录不参与比较，但会在结果里标注未知。
 
 ## 7. 示例
 

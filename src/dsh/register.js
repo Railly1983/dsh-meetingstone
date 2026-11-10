@@ -58,7 +58,11 @@
  */
 
 import { providerNameFor } from './adapter.js'
+import { normalizeProjectKey } from '../dispatch/dispatcher.js'
 import { resolveContinuation } from '../context-replay.js'
+
+// 兼容旧引用：归一化实现只在 dispatcher 里维护一份，避免两处逻辑漂移。
+export { normalizeProjectKey }
 
 /**
  * 插件模块级 inject：等待工具注册表就绪。
@@ -86,24 +90,6 @@ export const CLI_STATUS_CLIS = Object.freeze(['codex', 'codebuddy', 'claude'])
  */
 function renderObject(_args, value) {
   return [{ type: 'text', text: JSON.stringify(value ?? null) }]
-}
-
-/**
- * 归一化并发计数键。
- *
- * 为什么需要：`dispatcher` 用**精确字符串**比较 projectKey，`D:/P` 与 `d:/p/`
- * 会被当成两个项目，从而绕过"同项目写任务串行"（沙僧审计实测）。
- * Windows 大小写不敏感、尾斜杠等价，统一折叠；POSIX 只去尾斜杠，避免误并不同目录。
- *
- * @param {unknown} value
- * @returns {string | null}
- */
-export function normalizeProjectKey(value) {
-  if (typeof value !== 'string') return null
-  let key = value.trim().replace(/[\\/]+$/, '')
-  if (!key) return null
-  if (process.platform === 'win32') key = key.toLowerCase()
-  return key
 }
 
 /**
@@ -350,11 +336,18 @@ export function registerTools(ctx, deps) {
     {
       name: TOOL_NAMES.DISPATCH,
       description:
-        '按角色把一次任务派发给宿主 provider。同一项目的派单默认串行；本项目不提供只读通道。',
+        '按角色把一次任务派发给宿主 provider。默认每个任务在独立 git 工作树里执行（默认并行上限 2/项目、4/全局）；' +
+        'isolation=none 时退回主工作区串行。工作树只隔离文件布局，不是权限沙箱。',
       parameters: {
         role: { type: 'string', required: true, description: '角色名、别名或 roleId' },
         task: { type: 'string', required: true, description: '任务内容' },
-        cwd: { type: 'string', description: '目标目录；调用方须先校验在项目内' },
+        cwd: { type: 'string', description: '目标目录；隔离模式下由工作树路径覆盖，调用方须先校验在项目内' },
+        isolation: {
+          type: 'string',
+          enum: ['none', 'worktree'],
+          description:
+            '本次隔离方式：worktree=独立工作树（默认）；none=主工作区串行。请求隔离但建树失败会拒绝派单，不会退回主工作区',
+        },
         continuesFrom: {
           type: 'string',
           description:
@@ -365,6 +358,19 @@ export function registerTools(ctx, deps) {
       async execute(args, exec) {
         // TODO(P2-approval)：审批必须挂在这里，dispatcher.dispatch() 之前，见文件头第 5 条。
         // 第一版按要求不接审批：不调用 ctx.approval，也不假装已授权。
+
+        // 0) 隔离方式只接受闭集；非法值直接拒绝，不交给下游猜
+        if (
+          args?.isolation !== undefined &&
+          args.isolation !== 'none' &&
+          args.isolation !== 'worktree'
+        ) {
+          return {
+            ok: false,
+            code: 'INVALID_ISOLATION',
+            message: `isolation 必须是 none | worktree，收到 ${JSON.stringify(args.isolation)}`,
+          }
+        }
 
         // 1) 按当前会话的项目根取「全局 + 项目覆盖」的注册表
         const effective = await registryFor(exec)
@@ -395,10 +401,13 @@ export function registerTools(ctx, deps) {
           role: args?.role,
           task: args?.task,
           ...(typeof args?.cwd === 'string' ? { cwd: args.cwd } : {}),
+          ...(args?.isolation ? { isolation: args.isolation } : {}),
           ...(continuation ? { continuation } : {}),
           // 并发计数按项目隔离：不传的话 dispatcher 会把所有项目算成 default（真机审计发现）。
           // 必须归一化：Windows 大小写不敏感、尾斜杠等价，否则 'D:/P' 与 'd:/p/' 会被当成两个项目而绕过串行。
           ...(normalizeProjectKey(projectRoot) ? { projectKey: normalizeProjectKey(projectRoot) } : {}),
+          // 原始项目根：建工作树需要真实路径（projectKey 是归一化后的计数键，不能拿来建树）
+          ...(typeof projectRoot === 'string' && projectRoot ? { projectRoot } : {}),
           registry: effective.registry,
           ...(agent || projectRoot
             ? { context: { ...(agent ? { agent } : {}), ...(projectRoot ? { projectRoot } : {}) } }
@@ -417,9 +426,10 @@ export function registerTools(ctx, deps) {
     {
       name: TOOL_NAMES.LIST_RUNS,
       description:
-        '列出当前项目最近的派单记录（新的在前）：childId、角色、通道、模型、状态、耗时与 200 字预览。' +
+        '列出当前项目最近的派单记录（新的在前）：childId、角色、通道、模型、状态、耗时、工作树路径/分支、改动文件（changedFiles）、' +
+        '同项目任务之间的 overlapWarnings 与 200 字预览。' +
         '数据来自 `.meetingstone/runs/`，DSH 重启后仍可查；上一个进程遗留的 running 会显示为 interrupted。' +
-        '用于回答"我派过哪些任务、现在什么状态"。',
+        '带工作树的记录不会被 100 条/30 天自动清理，用于保护未合并成果的元数据。',
       parameters: {
         limit: { type: 'number', description: '最多返回多少条（默认 20，上限 200）' },
       },
@@ -435,8 +445,9 @@ export function registerTools(ctx, deps) {
     {
       name: TOOL_NAMES.GET_TASK,
       description:
-        '按 childId 查询一次派发的结果：status（running/completed/failed/cancelled/interrupted/unknown）、输出文本、停止原因。' +
-        '先查本进程内存（最近 20 条），查不到再读项目内 `.meetingstone/runs/<childId>.json`，因此 DSH 重启后仍可查到终态；' +
+        '按 childId 查询一次派发的结果：status（running/completed/failed/cancelled/interrupted/unknown）、输出文本、停止原因、' +
+        '工作树路径/分支、改动文件（changedFiles）与同项目其他任务的 overlapWarnings。' +
+        '先查本进程内存（最近 20 条），终态再读项目内 `.meetingstone/runs/<childId>.json` 补隔离元数据，因此 DSH 重启后仍可查到终态；' +
         '上一个进程留下的 running 会投影为 interrupted。',
       parameters: {
         childId: { type: 'string', required: true, description: 'meetingstone_dispatch 返回的 taskRef.childId' },
@@ -457,6 +468,35 @@ export function registerTools(ctx, deps) {
         if (live?.status === 'unknown') {
           const persisted = await loadPersistedRun?.(exec, id)
           if (persisted) return persisted
+        }
+        // 终态：内存结果没有 worktree/changedFiles/overlapWarnings，用磁盘记录补齐。
+        // 内存仍优先 status/output/诊断，磁盘只提供隔离元数据。
+        if (
+          live &&
+          ['completed', 'failed', 'cancelled', 'interrupted'].includes(String(live.status)) &&
+          typeof loadPersistedRun === 'function'
+        ) {
+          const persisted = await loadPersistedRun(exec, id)
+          if (persisted && persisted.status !== 'unknown') {
+            return {
+              ...persisted,
+              ...live,
+              operationId: persisted.operationId ?? live.operationId ?? null,
+              isolation: persisted.isolation ?? live.isolation ?? null,
+              worktree: persisted.worktree ?? live.worktree ?? null,
+              changedFiles: Array.isArray(persisted.changedFiles) ? persisted.changedFiles : null,
+              changedFilesUnknown: persisted.changedFilesUnknown === true,
+              overlapWarnings: Array.isArray(persisted.overlapWarnings)
+                ? persisted.overlapWarnings
+                : [],
+              stopConfirmed:
+                typeof persisted.stopConfirmed === 'boolean'
+                  ? persisted.stopConfirmed
+                  : typeof live.stopConfirmed === 'boolean'
+                    ? live.stopConfirmed
+                    : null,
+            }
+          }
         }
         return live
       },

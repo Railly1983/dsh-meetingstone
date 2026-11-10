@@ -128,7 +128,10 @@ test('适配器失败（throw 或没返回 taskRef）都转成 ADAPTER_FAILED', 
 })
 
 test('stats 反映活跃任务，释放后归零', async () => {
-  const { dispatcher } = makeDispatcher({}, { serializeWrites: false })
+  const { dispatcher } = makeDispatcher(
+    {},
+    { serializeWrites: false, maxParallelWritesPerProject: 10, maxParallelWritesTotal: 10 },
+  )
   const r1 = await dispatcher.dispatch({ role: 'SS', task: 'w1' })
   const r2 = await dispatcher.dispatch({ role: 'RV', task: 'w2' })
   const r3 = await dispatcher.dispatch({ role: 'RV', task: 'w3' })

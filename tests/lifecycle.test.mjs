@@ -183,6 +183,7 @@ test('A2：dispose 抛错也要释放槽位，并把 ADAPTER_DISPOSE_FAILED 记�
   assert.equal(finished.length, 1, '取消必须写终态')
   assert.equal(finished[0].status, 'cancelled')
   assert.equal(finished[0].error.code, ADAPTER_ERRORS.DISPOSE_FAILED)
+  assert.equal(finished[0].stopConfirmed, false, 'dispose 失败不能视为已确认停止')
   assert.match(finished[0].diagnostic, /teardown boom/)
   assert.equal(released, 1, 'dispose 抛错也必须释放槽位')
   assert.ok(warns.some((l) => l.includes(ADAPTER_ERRORS.DISPOSE_FAILED)), '错误必须记录')
@@ -214,6 +215,7 @@ test('A3：dispose 卡死时按 ADAPTER_DISPOSE_TIMEOUT 兜底，不会永久占
   const elapsed = Date.now() - t0
   assert.ok(elapsed < 1000, `超时兜底应立即返回，实际 ${elapsed}ms`)
   assert.equal(finished[0].error.code, ADAPTER_ERRORS.DISPOSE_TIMEOUT)
+  assert.equal(finished[0].stopConfirmed, false, 'dispose 超时不能视为已确认停止')
   assert.equal(released, 1, '超时后也必须释放槽位')
 })
 
@@ -240,6 +242,8 @@ function applyPlugin(root, subagents, extraRoles = []) {
   apply(ctx, {
     roles: [role(), ...extraRoles],
     channels: [],
+    // 这些用例不是 git 仓库，显式关闭隔离，保留原来的主工作区串行语义
+    limits: { defaultIsolation: 'none' },
   })
   const tool = (/** @type {string} */ name) => tools.find((t) => t.name === name)
   return { tools, tool, disposers, ctx }
@@ -263,6 +267,29 @@ async function readRunEventually(root, childId, timeoutMs = 3000) {
     }
   }
   throw lastError ?? new Error(`记录未出现：${childId}`)
+}
+
+/**
+ * 等到记录进入指定状态。不要用固定 sleep：测试文件并行跑时机器负载高，
+ * 终端写入可能晚于预期（B1 曾因此偶发把 running 当终态）。
+ */
+async function waitRunStatus(root, childId, status, timeoutMs = 10_000) {
+  const file = join(root, RUNS_RELATIVE_DIR, `${childId}.json`)
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    try {
+      const record = JSON.parse(await readFile(file, 'utf8'))
+      last = record
+      if (record.status === status) return record
+    } catch {
+      /* 文件还没出现或正在原子替换，下一轮再读 */
+    }
+    await delay(20)
+  }
+  throw new Error(
+    `记录 ${childId} 未在 ${timeoutMs}ms 内进入 ${status}；最后状态 ${last?.status ?? 'n/a'}`,
+  )
 }
 
 test('B1：快速完成的任务落盘最终必须是 completed，result 不被 running 覆盖', async () => {
@@ -289,11 +316,9 @@ test('B1：快速完成的任务落盘最终必须是 completed，result 不被 
       ids.push(res.taskRef.childId)
     }
 
-    // 给最后一条终态写入留出排队时间，然后一次性验最终态
-    await delay(300)
+    // 给最后一条终态写入留出排队时间，然后逐个等待终态（并发测试文件会拖慢磁盘写入）
     for (const childId of ids) {
-      const record = await readRunEventually(root, childId)
-      assert.equal(record.status, RUN_STATUS.COMPLETED, `${childId} 最终必须是 completed`)
+      const record = await waitRunStatus(root, childId, RUN_STATUS.COMPLETED)
       assert.equal(record.result, 'PONG', `${childId} 的 result 不能被 running 覆盖`)
       assert.equal(typeof record.runtimeId, 'string')
       assert.ok(record.runtimeId.length > 0, '每条记录都必须带 runtimeId')
@@ -363,6 +388,7 @@ test('C2：插件卸载时给内存中存活任务写 interrupted 终态，不�
     const record = await readRunEventually(root, childId)
     assert.equal(record.status, RUN_STATUS.INTERRUPTED, '卸载必须写终态')
     assert.equal(record.stopReason, 'plugin-disposed')
+    assert.equal(record.stopConfirmed, true, 'dispose 成功应确认已停止')
     assert.match(record.diagnostic ?? '', /插件卸载/)
   } finally {
     await rm(root, { recursive: true, force: true })

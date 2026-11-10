@@ -52,8 +52,8 @@ npm run verify                                              # 1) 门禁，必须
 | [配置参考](docs/configuration.md) | 全部字段、合并规则、错误码 |
 | [安装/卸载](docs/installation.md) | 门禁、安装、provider、配置、回滚 |
 | [安全与权限](docs/security.md) | 权限边界与"不提供只读通道"的原因 |
-| [工作树隔离（手动流程）](docs/worktree-isolation.md) | 用宿主 `create_worktree` 建隔离工作树、派单 `cwd` 指向、人工合并/清理 |
-| [并行多任务方案（设计中）](docs/plan/2026-11-11-parallel-plan.md) | 任务级工作树隔离与自动并行的设计稿 |
+| [工作树隔离（自动 + 手动）](docs/worktree-isolation.md) | 默认每任务独立工作树、失败关闭、人工合并/清理；文件布局隔离≠权限沙箱 |
+| [并行多任务方案（已实现）](docs/plan/2026-11-11-parallel-plan.md) | 悟空裁决、两级额度、失败关闭、不自动清理 |
 | [兼容性](docs/compatibility.md) | 宿主/provider/本机 CLI 的实测组合 |
 | [事故复盘](docs/audit/13-incident-tool-schema.md) | 2026-11-10 工具 schema 事故与门禁 |
 | [阶段 0 审计](docs/audit/00-summary.md) | A/B/C 分类与最小自研范围 |

@@ -30,6 +30,59 @@ export const DEFAULT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
 const MAX_FILE_BYTES = 1024 * 1024
 const CHILD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 
+/**
+ * 工作树元数据白名单：只保留契约里的字段，避免把调用方的任意对象写进记录。
+ * @param {unknown} value
+ * @returns {{ path: string, branch?: string, baseSha?: string, repositoryRoot?: string, operationId?: string } | null}
+ */
+function normalizeWorktree(value) {
+  if (!value || typeof value !== 'object') return null
+  const source = /** @type {Record<string, unknown>} */ (value)
+  if (typeof source.path !== 'string' || !source.path) return null
+  /** @type {{ path: string, branch?: string, baseSha?: string, repositoryRoot?: string, operationId?: string }} */
+  const out = { path: source.path }
+  for (const key of ['branch', 'baseSha', 'repositoryRoot', 'operationId']) {
+    if (typeof source[key] === 'string' && source[key]) out[key] = /** @type {string} */ (source[key])
+  }
+  return out
+}
+
+/**
+ * 两个记录之间的改动文件交集。
+ *
+ * 规则（与 docs/plan/2026-11-11-parallel-plan.md §4 一致）：
+ * - 只比较同项目、带工作树、仍保留在目录里的记录（同目录天然同项目）
+ * - `changedFilesUnknown` 的记录不参与比较（无法判断，不能当成空集）
+ * - 自己与自己不比
+ *
+ * @param {any} record
+ * @param {any[]} all
+ * @returns {Array<{ childId: string, files: string[] }>}
+ */
+export function overlapWarningsFor(record, all) {
+  if (!record || !record.worktree) return []
+  if (record.changedFilesUnknown === true) return []
+  if (!Array.isArray(record.changedFiles) || record.changedFiles.length === 0) return []
+  const mine = new Set(record.changedFiles.filter((/** @type {unknown} */ file) => typeof file === 'string'))
+  if (mine.size === 0) return []
+  /** @type {Array<{ childId: string, files: string[] }>} */
+  const warnings = []
+  for (const other of all) {
+    if (!other || other === record) continue
+    if (String(other.childId) === String(record.childId)) continue
+    if (!other.worktree) continue
+    if (other.changedFilesUnknown === true) continue
+    if (!Array.isArray(other.changedFiles)) continue
+    const files = other.changedFiles.filter(
+      (/** @type {unknown} */ file) => typeof file === 'string' && mine.has(file),
+    )
+    if (files.length > 0) {
+      warnings.push({ childId: String(other.childId), files: [...new Set(files)].sort() })
+    }
+  }
+  return warnings.sort((a, b) => a.childId.localeCompare(b.childId))
+}
+
 /** 任务状态常量（`interrupted` 只出现在读取投影里，不会写回磁盘）。 */
 export const RUN_STATUS = Object.freeze({
   RUNNING: 'running',
@@ -93,6 +146,29 @@ function sliceUtf8(buffer, start, end) {
   // 尾部：若 e 落在字符中间则回退到该字符起点
   while (e > s && (buffer[e] & 0b1100_0000) === 0b1000_0000) e -= 1
   return buffer.subarray(s, e).toString('utf8')
+}
+
+/**
+ * 原子替换目标文件；Windows 上目标可能正被读取/占用，rename 会偶发 EPERM/EBUSY。
+ * 短重试而不是立刻放弃：一次占用不应该让终态退回 running。
+ * @param {string} from
+ * @param {string} to
+ */
+async function renameWithRetry(from, to) {
+  /** @type {any} */
+  let lastError = null
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await fs.rename(from, to)
+      return
+    } catch (error) {
+      lastError = error
+      const code = /** @type {any} */ (error)?.code
+      if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') throw error
+      await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)))
+    }
+  }
+  throw lastError
 }
 
 /**
@@ -162,7 +238,17 @@ export function createRunStore(options) {
       resultTruncated: result.truncated,
       error: err,
       continuation: record.continuation ?? null,
-      worktree: record.worktree ?? null,
+      // 并行隔离元数据（P0）：operationId 与 childId 的映射、工作树位置、改动文件
+      operationId:
+        typeof record.operationId === 'string' && record.operationId ? record.operationId : null,
+      isolation:
+        record.isolation === 'none' || record.isolation === 'worktree' ? record.isolation : null,
+      worktree: normalizeWorktree(record.worktree),
+      changedFiles: Array.isArray(record.changedFiles)
+        ? record.changedFiles.filter((/** @type {unknown} */ file) => typeof file === 'string')
+        : null,
+      changedFilesUnknown: record.changedFilesUnknown === true,
+      stopConfirmed: typeof record.stopConfirmed === 'boolean' ? record.stopConfirmed : null,
     }
   }
 
@@ -193,7 +279,7 @@ export function createRunStore(options) {
     try {
       await fs.mkdir(dir, { recursive: true })
       await fs.writeFile(tmp, payload, 'utf8')
-      await fs.rename(tmp, target)
+      await renameWithRetry(tmp, target)
     } catch (error) {
       await fs.rm(tmp, { force: true }).catch(() => {})
       throw new RunStoreError(
@@ -205,6 +291,42 @@ export function createRunStore(options) {
     // 清理是"尽力而为"：失败不影响本次写入结果
     await pruneRuns().catch(() => {})
     return { ok: true, path: target, bytes: Buffer.byteLength(payload) }
+  }
+
+  /**
+   * 读取目录里的全部合法记录（新的在前由调用方排序）。
+   * 单条坏记录跳过，不影响列表；超过体积上限的记录也跳过（防止被塞巨型文件）。
+   * @returns {Promise<any[]>}
+   */
+  async function readRecords() {
+    let names
+    try {
+      names = await fs.readdir(dir)
+    } catch {
+      return []
+    }
+    /** @type {any[]} */
+    const records = []
+    for (const name of names) {
+      if (!name.endsWith('.json')) continue
+      const full = join(dir, name)
+      try {
+        const stat = await fs.stat(full)
+        if (stat.size > MAX_FILE_BYTES) continue
+        const text = await fs.readFile(full, 'utf8')
+        const parsed = projectInterrupted(JSON.parse(text))
+        if (parsed && typeof parsed === 'object') {
+          // 兼容旧记录/坏记录：childId 缺失时退回文件名
+          if (typeof parsed.childId !== 'string' || !parsed.childId) {
+            parsed.childId = name.replace(/\.json$/, '')
+          }
+          records.push(parsed)
+        }
+      } catch {
+        /* 单条坏记录跳过，不影响其余记录 */
+      }
+    }
+    return records
   }
 
   /**
@@ -232,13 +354,20 @@ export function createRunStore(options) {
     } catch (error) {
       throw new RunStoreError('RUN_READ_FAILED', `读取派单结果失败：${errorMessage(error)}`, error)
     }
+    let record
     try {
       const parsed = JSON.parse(text)
       if (!parsed || typeof parsed !== 'object') throw new Error('not an object')
-      return projectInterrupted(parsed)
+      record = projectInterrupted(parsed)
     } catch (error) {
       throw new RunStoreError('RUN_CORRUPT', `记录文件不是合法 JSON：${childId}`, error)
     }
+
+    // 单条查询也要给出重叠预警：需要同项目的其他记录一起比较。
+    // 没有工作树的旧记录不必多读一遍目录。
+    if (!record.worktree) return { ...record, overlapWarnings: [] }
+    const all = await readRecords()
+    return { ...record, overlapWarnings: overlapWarningsFor(record, all) }
   }
 
   /**
@@ -250,49 +379,45 @@ export function createRunStore(options) {
    */
   async function listRuns(options = {}) {
     const limit = Math.max(1, Math.min(200, Math.floor(options.limit ?? 20)))
-    let names
-    try {
-      names = await fs.readdir(dir)
-    } catch {
-      return []
-    }
-    const records = []
-    for (const name of names) {
-      if (!name.endsWith('.json')) continue
-      try {
-        const text = await fs.readFile(join(dir, name), 'utf8')
-        const parsed = projectInterrupted(JSON.parse(text))
-        if (!parsed || typeof parsed !== 'object') continue
-        records.push({
-          childId: parsed.childId ?? name.replace(/\.json$/, ''),
-          runtimeId: parsed.runtimeId ?? null,
-          role: parsed.role ?? null,
-          channel: parsed.channel ?? null,
-          provider: parsed.provider ?? null,
-          model: parsed.model ?? null,
-          status: parsed.status ?? 'unknown',
-          ...(parsed.interrupted === true ? { interrupted: true } : {}),
-          stopReason: parsed.stopReason ?? null,
-          // 诊断摘要：同样只取前 200 字符（与 preview 一致），避免列表膨胀
-          diagnostic: typeof parsed.diagnostic === 'string' ? parsed.diagnostic.slice(0, 200) : '',
-          createdAt: parsed.createdAt ?? null,
-          finishedAt: parsed.finishedAt ?? null,
-          resultBytes: parsed.resultBytes ?? 0,
-          resultTruncated: parsed.resultTruncated === true,
-          error: parsed.error ?? null,
-          // 摘要：只取前 200 字符，避免把整份结果塞进列表
-          preview: typeof parsed.result === 'string' ? parsed.result.slice(0, 200) : '',
-        })
-      } catch {
-        /* 单条坏记录跳过，不影响列表 */
-      }
-    }
+    const all = await readRecords()
+    const records = all.map((parsed) => ({
+      childId: parsed.childId ?? 'unknown',
+      runtimeId: parsed.runtimeId ?? null,
+      role: parsed.role ?? null,
+      channel: parsed.channel ?? null,
+      provider: parsed.provider ?? null,
+      model: parsed.model ?? null,
+      status: parsed.status ?? 'unknown',
+      ...(parsed.interrupted === true ? { interrupted: true } : {}),
+      stopReason: parsed.stopReason ?? null,
+      stopConfirmed: typeof parsed.stopConfirmed === 'boolean' ? parsed.stopConfirmed : null,
+      // 诊断摘要：同样只取前 200 字符（与 preview 一致），避免列表膨胀
+      diagnostic: typeof parsed.diagnostic === 'string' ? parsed.diagnostic.slice(0, 200) : '',
+      createdAt: parsed.createdAt ?? null,
+      finishedAt: parsed.finishedAt ?? null,
+      resultBytes: parsed.resultBytes ?? 0,
+      resultTruncated: parsed.resultTruncated === true,
+      error: parsed.error ?? null,
+      // 并行隔离：worktree 与改动文件必须在列表里可见（手动合并/清理依赖它）
+      operationId: parsed.operationId ?? null,
+      isolation: parsed.isolation ?? null,
+      worktree: parsed.worktree ?? null,
+      changedFiles: Array.isArray(parsed.changedFiles) ? parsed.changedFiles : null,
+      changedFilesUnknown: parsed.changedFilesUnknown === true,
+      overlapWarnings: overlapWarningsFor(parsed, all),
+      // 摘要：只取前 200 字符，避免把整份结果塞进列表
+      preview: typeof parsed.result === 'string' ? parsed.result.slice(0, 200) : '',
+    }))
     records.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
     return records.slice(0, limit)
   }
 
   /**
    * 清理：先按条数，再按时长。只处理本目录下的 `.json`。
+   *
+   * **带 worktree 的记录永不参与清理**（既不被删，也不占用 100 条额度）：
+   * 工作树里可能有未合并的成果，元数据是人工合并/清理的唯一线索。
+   * 代价是这类记录会一直保留；请人工合并后自行删除记录与工作树。
    */
   async function pruneRuns() {
     let names
@@ -301,6 +426,7 @@ export function createRunStore(options) {
     } catch {
       return { removed: 0 }
     }
+    /** @type {Array<{ name: string, mtimeMs: number }>} */
     const entries = []
     for (const name of names) {
       if (!name.endsWith('.json')) continue
@@ -313,12 +439,52 @@ export function createRunStore(options) {
     }
     entries.sort((a, b) => b.mtimeMs - a.mtimeMs)
     const nowMs = now()
+    const tooManyPossible = entries.length > maxRuns
+    const tooOldPossible = entries.some((entry) => nowMs - entry.mtimeMs > maxAgeMs)
+    // 快速路径：没有候选就不读文件内容。每次写盘都会触发 prune，
+    // 全量解析会让快速连续派单明显变慢（B1 回归过）。
+    if (!tooManyPossible && !tooOldPossible) return { removed: 0, protected: 0 }
+
+    /** @type {Array<{ name: string, mtimeMs: number, protected: boolean }>} */
+    const classified = []
+    for (const entry of entries) {
+      const full = join(dir, entry.name)
+      let protectedRecord = false
+      try {
+        const stat = await fs.stat(full)
+        if (stat.size <= MAX_FILE_BYTES) {
+          try {
+            const parsed = JSON.parse(await fs.readFile(full, 'utf8'))
+            protectedRecord = Boolean(
+              parsed &&
+                typeof parsed === 'object' &&
+                parsed.worktree &&
+                typeof parsed.worktree.path === 'string' &&
+                parsed.worktree.path,
+            )
+          } catch {
+            /* 坏记录不保护，交给条数/时长规则 */
+          }
+        }
+      } catch {
+        continue
+      }
+      classified.push({ ...entry, protected: protectedRecord })
+    }
+
+    // 受保护记录不参与清理：既不会被删，也不占用 100 条额度
+    const unprotected = classified.filter((entry) => !entry.protected)
     const doomed = []
-    entries.forEach((entry, index) => {
-      const tooMany = index >= maxRuns
-      const tooOld = nowMs - entry.mtimeMs > maxAgeMs
-      if (tooMany || tooOld) doomed.push(entry.name)
-    })
+    if (tooManyPossible) {
+      unprotected.forEach((entry, index) => {
+        if (index >= maxRuns || nowMs - entry.mtimeMs > maxAgeMs) doomed.push(entry.name)
+      })
+    } else {
+      for (const entry of unprotected) {
+        if (nowMs - entry.mtimeMs > maxAgeMs) doomed.push(entry.name)
+      }
+    }
+
     let removed = 0
     for (const name of doomed) {
       try {
@@ -328,7 +494,7 @@ export function createRunStore(options) {
         /* 删不掉就留着，下次再试 */
       }
     }
-    return { removed }
+    return { removed, protected: classified.length - unprotected.length }
   }
 
   return { root, dir, writeRun, loadRun, listRuns, pruneRuns, truncateUtf8 }

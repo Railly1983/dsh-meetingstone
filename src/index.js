@@ -22,6 +22,7 @@ import { randomUUID } from 'node:crypto'
 import { toRegistryInput } from './project/config-file.js'
 import { createNodeProjectConfigStore } from './project/load.js'
 import { createRunStore } from './run-store.js'
+import { createWorktreeManager } from './worktree.js'
 
 /**
  * 宿主运行时把 `@deepseek-ai/dsh-tools` 作为 shared package 提供。
@@ -146,8 +147,15 @@ export function apply(ctx, config = {}) {
    */
   const persistQueues = new Map()
 
+  // 任务级工作树隔离（路 2）：只接管 git 工作树，不碰父会话 cwd。
+  // 建树/计算改动都由 dispatcher 与落盘层共用同一个管理器。
+  const worktrees = createWorktreeManager()
+
   /**
    * 真正写一次盘。永不 reject：失败只记 `persistenceWarning`，不影响任务真实结果。
+   *
+   * 终态记录若带工作树，先计算相对 baseSha 的改动文件（`changedFiles`）。
+   * 计算失败时写 `changedFilesUnknown: true`，**绝不伪装成无改动**——重叠检测依赖这个区分。
    * @param {any} record
    * @returns {Promise<void>}
    */
@@ -155,8 +163,28 @@ export function apply(ctx, config = {}) {
     const store = storeFor(record?.projectRoot)
     if (!store) return
     const childId = String(record?.childId ?? '')
+    let enriched = record
+    if (
+      record?.worktree &&
+      record.status !== 'running' &&
+      record.changedFiles === undefined &&
+      typeof record.worktree.path === 'string' &&
+      typeof record.worktree.baseSha === 'string'
+    ) {
+      try {
+        const changed = await worktrees.computeChangedFiles(
+          record.worktree.path,
+          record.worktree.baseSha,
+        )
+        enriched = changed.unknown
+          ? { ...record, changedFiles: [], changedFilesUnknown: true }
+          : { ...record, changedFiles: changed.files ?? [], changedFilesUnknown: false }
+      } catch {
+        enriched = { ...record, changedFiles: [], changedFilesUnknown: true }
+      }
+    }
     try {
-      await store.writeRun(record)
+      await store.writeRun(enriched)
       persistenceWarnings.delete(childId)
     } catch (err) {
       persistenceWarnings.set(childId, {
@@ -235,6 +263,8 @@ export function apply(ctx, config = {}) {
     registry: globalRegistry,
     adapter,
     limits: cfg.limits ?? {},
+    // 路 2：插件自己管理 git worktree（不调用宿主 ctx.worktrees，避免切走父会话 cwd）
+    worktrees,
   })
 
   let registered = false
