@@ -23,6 +23,7 @@
 | `in-process` | 无需额外安装（`dsh-subagent-*-in-process` 随宿主） | 是 | ✅ 可用 |
 | `codex` | `@deepseek-ai/dsh-subagent-codex@0.2.2-rc.1` | 是（declares `dsh.bundle`） | ✅ 隔离安装实测 |
 | `acp-cli` | `@deepseek-ai/dsh-subagent-acp@0.2.2-rc.1` | **否**：还要手写 `subagent-acp` 行（`command`/`args`） | ✅ 隔离安装实测 |
+| `codex`（模型限制） | provider 自带 Codex **0.153.4** | 实测 ChatGPT 账号下只有 **`gpt-5.6-sol`** 可用；`gpt-6.1-sol`/`gpt-6-sol`/`gpt-5-codex`/`gpt-6-luna` 均返回 400 `model_not_found` | ⚠️ 必须在 provider 行显式配置 `model`（见 §4） |
 | `claude-code` | `@deepseek-ai/dsh-subagent-claude-code@0.2.2-rc.1` | 是 | ⚠️ 未验证（本机未装 Claude CLI，也不影响 provider 自带） |
 
 版本必须写精确值：`next` = `0.2.2-rc.1`；`latest` 是 2026-08 的 `0.0.1-rc.1`，与宿主不匹配。
