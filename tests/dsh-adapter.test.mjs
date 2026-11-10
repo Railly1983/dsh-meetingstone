@@ -372,7 +372,17 @@ test('meetingstone_dispatch：直接返回 dispatcher 的结果，并把入参�
   registerTools(ctx, deps)
   const out = await registered[1].execute({ role: 'SS', task: '改个函数', cwd: 'D:/x', readOnly: true })
   assert.equal(out.ok, true)
-  assert.deepEqual(dispatchCalls[0], { role: 'SS', task: '改个函数', cwd: 'D:/x', readOnly: true })
+  // dispatcher 还会收到 registry（按项目上下文注入的注册表），这里只校验透传的业务字段
+  assert.deepEqual(
+    {
+      role: dispatchCalls[0].role,
+      task: dispatchCalls[0].task,
+      cwd: dispatchCalls[0].cwd,
+      readOnly: dispatchCalls[0].readOnly,
+    },
+    { role: 'SS', task: '改个函数', cwd: 'D:/x', readOnly: true },
+  )
+  assert.ok(dispatchCalls[0].registry, '必须把按项目解析出的注册表传给 dispatcher')
 })
 
 test('meetingstone_cli_status：只透传探测字段，不返回余额、不编造认证状态', async () => {

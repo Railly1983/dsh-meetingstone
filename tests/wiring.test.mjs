@@ -130,3 +130,75 @@ test('插件标识与版本', () => {
   assert.equal(name, 'meetingstone')
   assert.match(PLUGIN_VERSION, /^\d+\.\d+\.\d+$/)
 })
+
+// ─── 项目级配置接线（P2-02 剩余部分）────────────────────────────────────────
+
+test('list_roles 按当前会话项目根读取 .meetingstone.json（项目角色可见）', async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-wiring-'))
+  fs.writeFileSync(
+    path.join(dir, '.meetingstone.json'),
+    JSON.stringify({
+      version: 1,
+      roles: [
+        {
+          roleId: 'role-scout',
+          name: '斥候',
+          aliases: ['SC'],
+          channel: { kind: 'in-process' },
+          permissionPreset: 'read-only',
+        },
+      ],
+      roleOverrides: { 'role-sashi': { permissionPreset: 'read-only' } },
+    }),
+    'utf8',
+  )
+
+  try {
+    const { ctx, tools } = makeCtx()
+    apply(ctx, config)
+    const listTool = tools.find((t) => t.name === 'meetingstone_list_roles')
+
+    // 没有 exec.agent（无法确定项目根）→ 只有全局角色，并如实说明未启用项目域
+    const globalOnly = await listTool.execute({})
+    assert.equal(globalOnly.roles.length, 2)
+    assert.equal(globalOnly.projectScoped, true, '注入了 resolveRegistry 就应标记为项目域可用')
+
+    // 给出会话项目根 → 项目角色出现，且全局角色的权限被收紧
+    const exec = { agent: { session: { header: { cwd: dir } } } }
+    const scoped = await listTool.execute({}, exec)
+    const ids = scoped.roles.map((r) => r.roleId).sort()
+    assert.deepEqual(ids, ['role-reviewer', 'role-sashi', 'role-scout'], '项目新增角色应出现')
+
+    const sashi = scoped.roles.find((r) => r.roleId === 'role-sashi')
+    assert.equal(sashi.permissionPreset, 'read-only', '项目覆盖应把权限收紧')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('项目配置文件损坏时：仍能列角色，并把解析错误一起返回', async () => {
+  const fs = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-wiring-bad-'))
+  fs.writeFileSync(path.join(dir, '.meetingstone.json'), '{ broken json', 'utf8')
+
+  try {
+    const { ctx, tools } = makeCtx()
+    apply(ctx, config)
+    const listTool = tools.find((t) => t.name === 'meetingstone_list_roles')
+    const res = await listTool.execute({}, { agent: { session: { header: { cwd: dir } } } })
+    assert.equal(res.roles.length, 2, '坏文件不应影响全局角色')
+    assert.ok(
+      res.errors.some((e) => e.code === 'PROJECT_CONFIG_INVALID_JSON'),
+      '必须把解析错误暴露出来，不能静默忽略',
+    )
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

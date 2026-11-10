@@ -41,6 +41,7 @@ export const DEFAULT_PROJECT_KEY = 'default'
  * @property {string} [projectKey] 并发计数键（通常传项目根路径）；省略视为 default
  * @property {boolean} [readOnly] 覆盖角色的只读判定（只能在更严方向覆盖）
  * @property {object} [context] 宿主上下文（如 exec.agent），原样透传给适配器
+ * @property {object} [registry] 覆盖本次解析用的注册表（按项目上下文注入全局+项目覆盖）
  */
 
 /**
@@ -121,13 +122,19 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
       return fail(DISPATCH_ERRORS.INVALID_TASK, '任务内容不能为空')
     }
 
-    // 1. 解析角色
-    const role = registry.resolve(req.role)
+    // 1. 解析角色（允许调用方按项目上下文传入专用注册表：全局 + 项目覆盖）
+    const effectiveRegistry = req.registry ?? registry
+    const role = effectiveRegistry.resolve(req.role)
     if (!role) {
       // 区分「不存在」与「有歧义」：否则用户看到"找不到角色"却明明有这个名字
-      if (typeof registry.isAmbiguousRef === 'function' && registry.isAmbiguousRef(req.role)) {
+      if (
+        typeof effectiveRegistry.isAmbiguousRef === 'function' &&
+        effectiveRegistry.isAmbiguousRef(req.role)
+      ) {
         const ids =
-          typeof registry.conflictsFor === 'function' ? registry.conflictsFor(req.role) : []
+          typeof effectiveRegistry.conflictsFor === 'function'
+            ? effectiveRegistry.conflictsFor(req.role)
+            : []
         const hint = ids.length ? `，可选：${ids.join(' / ')}` : '（可用 meetingstone_list_roles 查看）'
         return fail(
           DISPATCH_ERRORS.ROLE_AMBIGUOUS,

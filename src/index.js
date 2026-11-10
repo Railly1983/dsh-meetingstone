@@ -17,6 +17,8 @@ import { createProbe } from './cli/probe.js'
 import { createDefaultResolvers, runCommand } from './cli/resolvers.js'
 import { createDshAdapter } from './dsh/adapter.js'
 import { inject as toolsInject, registerTools } from './dsh/register.js'
+import { toRegistryInput } from './project/config-file.js'
+import { createNodeProjectConfigStore } from './project/load.js'
 
 export { Config }
 // 工具注册需要宿主注入 tools 服务（dsh-tools 的 defineTool 走这一层）
@@ -40,9 +42,24 @@ export function apply(ctx, config = {}) {
   // Loader 通常已校验过；这里再兜一次，避免直接调用时拿到脏值。
   const cfg = Config(/** @type {any} */ (config) ?? {})
 
-  // 角色来源：第一版只有全局配置里的角色表。
-  // 项目级 .meetingstone.json 的 IO 接线是下一步（P2-02 剩余部分）。
-  const registry = createRegistry({ globalRoles: cfg.roles ?? [] })
+  // 角色来源：全局配置 + 当前会话项目根的 `.meetingstone.json`（按 mtime 缓存）
+  const projectStore = createNodeProjectConfigStore()
+
+  /** @type {import('./roles/registry.js').RoleRegistry} */
+  const globalRegistry = createRegistry({ globalRoles: cfg.roles ?? [] })
+
+  /**
+   * 按当前执行上下文构造项目级注册表。
+   * 项目根取 `exec.agent.session.header.cwd`（docs/audit/07-config-extension.md §4.2）。
+   * @param {any} exec
+   */
+  async function resolveRegistry(exec) {
+    const projectRoot = exec?.agent?.session?.header?.cwd
+    const loaded = projectStore.get(projectRoot, cfg.projectConfigFile)
+    const registry = createRegistry(toRegistryInput(cfg, loaded.config))
+    // 项目文件解析错误 + 注册表语义错误（别名冲突、权限放宽等）一起交给工具层展示
+    return { registry, projectErrors: [...(loaded.errors ?? []), ...(registry.errors ?? [])] }
+  }
 
   // 本机 CLI 探测：多源解析（PATH → Appx → npm 全局 → 常见目录）
   const probe = createProbe({
@@ -55,7 +72,7 @@ export function apply(ctx, config = {}) {
   const adapter = createDshAdapter(ctx, { channels: cfg.channels ?? [] })
 
   const dispatcher = createDispatcher({
-    registry,
+    registry: globalRegistry,
     adapter,
     limits: cfg.limits ?? {},
   })
@@ -63,10 +80,10 @@ export function apply(ctx, config = {}) {
   let registered = false
 
   ctx.effect(() => {
-    registerTools(ctx, { registry, dispatcher, probe })
+    registerTools(ctx, { registry: globalRegistry, dispatcher, probe, resolveRegistry })
     registered = true
 
-    const line = `[${name}] loaded v${PLUGIN_VERSION} (roles=${registry.list().length})`
+    const line = `[${name}] loaded v${PLUGIN_VERSION} (roles=${globalRegistry.list().length})`
     if (typeof ctx.logger?.info === 'function') ctx.logger.info(line)
     else console.log(line)
 
@@ -75,6 +92,7 @@ export function apply(ctx, config = {}) {
       if (!registered) return
       registered = false
       probe.invalidate()
+      projectStore.invalidate()
       if (typeof ctx.logger?.info === 'function') ctx.logger.info(`[${name}] disposed`)
       else console.log(`[${name}] disposed`)
     }

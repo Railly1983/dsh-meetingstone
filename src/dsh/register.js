@@ -167,6 +167,36 @@ export function registerTools(ctx, deps) {
   const defineTool =
     typeof deps.defineTool === 'function' ? deps.defineTool : (/** @type {object} */ spec) => spec
 
+  // 按「当前会话的项目根」构造注册表（全局角色 + 项目 .meetingstone.json 覆盖）。
+  // 未注入时退回静态 registry（只有全局角色），并在返回里如实说明，不假装项目配置生效。
+  const resolveRegistry =
+    typeof deps.resolveRegistry === 'function' ? deps.resolveRegistry : null
+
+  /**
+   * @param {any} exec
+   * @returns {Promise<{ registry: any, projectErrors: any[] }>}
+   */
+  async function registryFor(exec) {
+    if (!resolveRegistry) return { registry, projectErrors: [] }
+    try {
+      const res = await resolveRegistry(exec)
+      if (res && res.registry) return res
+      return { registry, projectErrors: [] }
+    } catch (err) {
+      return {
+        registry,
+        projectErrors: [
+          {
+            code: 'PROJECT_CONFIG_LOAD_FAILED',
+            message: `项目配置加载失败，已退回全局角色表：${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          },
+        ],
+      }
+    }
+  }
+
   /** @type {Array<object>} */
   const tools = [
     {
@@ -175,10 +205,16 @@ export function registerTools(ctx, deps) {
         '列出集合石已配置的角色（roleId/名称/别名/通道/权限档位/启用状态/可用性/来源）与注册表的错误；不派单、不探测本机 CLI。',
       parameters: {},
       output: { schema: { type: 'object' }, render: renderObject },
-      async execute() {
-        const roles = registry.list().map((/** @type {object} */ role) => toRoleView(role, ctx))
-        const errors = Array.isArray(registry.errors) ? [...registry.errors] : []
-        return { roles, errors }
+      async execute(_args, exec) {
+        const effective = await registryFor(exec)
+        const roles = effective.registry
+          .list()
+          .map((/** @type {object} */ role) => toRoleView(role, ctx))
+        const errors = [
+          ...(Array.isArray(effective.registry.errors) ? effective.registry.errors : []),
+          ...(effective.projectErrors ?? []),
+        ]
+        return { roles, errors, projectScoped: Boolean(resolveRegistry) }
       },
     },
     {
@@ -196,18 +232,32 @@ export function registerTools(ctx, deps) {
         // TODO(P2-approval)：审批必须挂在这里，dispatcher.dispatch() 之前，见文件头第 5 条。
         // 第一版按要求不接审批：不调用 ctx.approval，也不假装已授权。
 
-        // 宿主执行上下文（exec.agent）随请求透传给适配器，作为 startActivation 的 parent。
+        // 1) 按当前会话的项目根取「全局 + 项目覆盖」的注册表
+        const effective = await registryFor(exec)
+
+        // 2) 宿主执行上下文（exec.agent）随请求透传给适配器，作为 startActivation 的 parent；
+        //    同时给出项目根，供适配器做 cwd 边界校验。
+        const agent = exec && typeof exec === 'object' ? exec.agent : undefined
+        const projectRoot = exec?.agent?.session?.header?.cwd
 
         const input = {
           role: args?.role,
           task: args?.task,
           ...(typeof args?.cwd === 'string' ? { cwd: args.cwd } : {}),
           ...(typeof args?.readOnly === 'boolean' ? { readOnly: args.readOnly } : {}),
-          ...(exec && typeof exec === 'object' ? { context: { agent: exec.agent } } : {}),
+          registry: effective.registry,
+          ...(agent || projectRoot
+            ? { context: { ...(agent ? { agent } : {}), ...(projectRoot ? { projectRoot } : {}) } }
+            : {}),
         }
         // 直接用 dispatcher 的返回（成功 { ok:true, taskRef, role, readOnly, ... } /
-        // 失败 { ok:false, code, message, ... }），不二次包装。
-        return dispatcher.dispatch(input)
+        // 失败 { ok:false, code, message, ... }），不二次包装；
+        // 唯一附加字段是项目配置的解析错误，避免"配置有错但悄悄忽略"。
+        const result = await dispatcher.dispatch(input)
+        if (Array.isArray(effective.projectErrors) && effective.projectErrors.length > 0) {
+          return { ...result, projectErrors: effective.projectErrors }
+        }
+        return result
       },
     },
     {
