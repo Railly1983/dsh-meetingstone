@@ -11,6 +11,8 @@ import {
   MAX_RESULT_BYTES,
   MAX_CHANGED_FILES,
   MAX_FILE_BYTES,
+  MAX_OVERLAP_FILES,
+  MAX_OVERLAP_BYTES,
   RUNS_RELATIVE_DIR,
 } from '../src/run-store.js'
 import { registerTools } from '../src/dsh/register.js'
@@ -277,14 +279,22 @@ test('overlap 落盘：A→B 与 B→A 两种写入顺序，原始 JSON 与读�
       for (const id of order) await store.writeRun(make(id))
       const [first, second] = order
 
-      // 后写的记录必须把重叠写进原始 JSON；先写的记录字段存在（当时对方还不存在，允许为空）
+      // F3：后写记录不仅自己要有交集，还要**回写**先写记录——两份原始 JSON 都自证冲突；
+      // 与并发结束顺序无关（下面另有并发用例）。
       const rawFirst = JSON.parse(await readFile(join(root, RUNS_RELATIVE_DIR, `${first}.json`), 'utf8'))
       const rawSecond = JSON.parse(await readFile(join(root, RUNS_RELATIVE_DIR, `${second}.json`), 'utf8'))
-      assert.ok(Array.isArray(rawFirst.overlapWarnings), `${first} 磁盘记录必须含 overlapWarnings 字段`)
-      assert.deepEqual(rawFirst.overlapWarnings, [], '先写入时对方尚不存在，交集为空')
-      const warning = rawSecond.overlapWarnings.find((w) => w.childId === first)
-      assert.ok(warning, `${second} 的原始 JSON 必须记录与 ${first} 的重叠：${JSON.stringify(rawSecond.overlapWarnings)}`)
-      assert.deepEqual(warning.files.slice().sort(), shared.slice().sort(), '换行/制表符文件名必须原样往来')
+      for (const [owner, raw, otherId] of [
+        [first, rawFirst, second],
+        [second, rawSecond, first],
+      ]) {
+        assert.ok(Array.isArray(raw.overlapWarnings), `${owner} 磁盘记录必须含 overlapWarnings 字段`)
+        const warning = raw.overlapWarnings.find((w) => w.childId === otherId)
+        assert.ok(
+          warning,
+          `${owner} 的原始 JSON 必须记录与 ${otherId} 的重叠：${JSON.stringify(raw.overlapWarnings)}`,
+        )
+        assert.deepEqual(warning.files.slice().sort(), shared.slice().sort(), '换行/制表符文件名必须原样往来')
+      }
 
       // 读取时重算：双方都能看到对方（与写入顺序无关）
       const loadedFirst = await store.loadRun(first)
@@ -298,5 +308,196 @@ test('overlap 落盘：A→B 与 B→A 两种写入顺序，原始 JSON 与读�
     } finally {
       await rm(root, { recursive: true, force: true })
     }
+  }
+})
+
+test('overlap 并发落盘：同时写入两棵工作树的终态，两份原始 JSON 都含交集（F3）', async () => {
+  const root = await tempRoot()
+  try {
+    const store = createRunStore({ root })
+    const shared = ['shared.txt', 'same-dir/file.txt']
+    const make = (id) => ({
+      childId: id,
+      status: 'completed',
+      worktree: {
+        path: `/tmp/${id}`,
+        baseSha: 'base',
+        branch: `meetingstone/${id}`,
+        operationId: id,
+      },
+      changedFiles: shared,
+    })
+    // 真正并发：两个 writeRun 同时进入，互斥必须保证“写当前 + 回写对方”都完成
+    await Promise.all([store.writeRun(make('a')), store.writeRun(make('b'))])
+
+    for (const [id, other] of [
+      ['a', 'b'],
+      ['b', 'a'],
+    ]) {
+      const raw = JSON.parse(
+        await readFile(join(root, RUNS_RELATIVE_DIR, `${id}.json`), 'utf8'),
+      )
+      const warning = raw.overlapWarnings.find((w) => w.childId === other)
+      assert.ok(
+        warning,
+        `${id} 的原始 JSON 必须包含与 ${other} 的交集：${JSON.stringify(raw.overlapWarnings)}`,
+      )
+      assert.deepEqual(warning.files.slice().sort(), shared.slice().sort())
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('overlap 上限：5000 条共同路径不会撑爆记录，超限写 overlapTruncated/overlapTotal（F4）', async () => {
+  const root = await tempRoot()
+  try {
+    const store = createRunStore({ root })
+    const files = Array.from(
+      { length: 5000 },
+      (_, i) => `dir/${'z'.repeat(200)}-${i}.txt`,
+    )
+    const make = (id) => ({
+      childId: id,
+      status: 'completed',
+      worktree: {
+        path: `/tmp/${id}`,
+        baseSha: 'base',
+        branch: `meetingstone/${id}`,
+        operationId: id,
+      },
+      changedFiles: files,
+    })
+    // 旧实现第三份会 RUN_TOO_LARGE（overlap 各 1.4MB/2.8MB），磁盘遗留 running
+    for (const id of ['r1', 'r2', 'r3']) await store.writeRun(make(id))
+
+    for (const id of ['r1', 'r2', 'r3']) {
+      const raw = JSON.parse(
+        await readFile(join(root, RUNS_RELATIVE_DIR, `${id}.json`), 'utf8'),
+      )
+      assert.equal(raw.status, 'completed', `${id} 必须是终态，不能遗留 running`)
+      const others = ['r1', 'r2', 'r3'].filter((candidate) => candidate !== id)
+      for (const other of others) {
+        const warning = raw.overlapWarnings.find((w) => w.childId === other)
+        assert.ok(warning, `${id} 必须记录与 ${other} 的重叠`)
+        assert.ok(
+          warning.files.length <= MAX_OVERLAP_FILES,
+          `每对最多 ${MAX_OVERLAP_FILES} 个文件，实际 ${warning.files.length}`,
+        )
+      }
+      const bytes = Buffer.byteLength(JSON.stringify(raw.overlapWarnings), 'utf8')
+      assert.ok(
+        bytes <= MAX_OVERLAP_BYTES,
+        `overlapWarnings 必须受 ${MAX_OVERLAP_BYTES} 字节约束，实际 ${bytes}`,
+      )
+      assert.equal(raw.overlapTruncated, true, '必须标注 overlap 被截断')
+      assert.equal(
+        raw.overlapTotal,
+        others.length * files.length,
+        '必须记录截断前的原始文件总数',
+      )
+
+      const size = (await stat(join(root, RUNS_RELATIVE_DIR, `${id}.json`))).size
+      assert.ok(size <= MAX_FILE_BYTES, `${id} 记录体积必须可读，实际 ${size}`)
+    }
+
+    // 读取侧（get_task / list_runs）也不能返回超限的 overlap
+    const [listed] = await store.listRuns({ limit: 1 })
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(listed.overlapWarnings), 'utf8') <= MAX_OVERLAP_BYTES,
+    )
+    assert.equal(listed.overlapTruncated, true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('体积闸兜底：超限时同时裁剪 changedFiles 与 overlapWarnings，记录仍可读（F4）', async () => {
+  const root = await tempRoot()
+  try {
+    const store = createRunStore({ root })
+    const shared = Array.from({ length: MAX_OVERLAP_FILES }, (_, i) => `shared-${i}.txt`)
+    // 先写一条真实存在交集的小记录，保证 huge-run 真的会算出 overlapWarnings
+    await store.writeRun({
+      childId: 'other',
+      status: 'completed',
+      worktree: {
+        path: '/tmp/other',
+        baseSha: 'base',
+        branch: 'meetingstone/other',
+        operationId: 'other',
+      },
+      changedFiles: shared,
+    })
+    const files = [...shared, ...Array.from({ length: 5000 }, (_, i) => `${'q'.repeat(500)}-${i}`)]
+    // 用超长 worktree.path 把记录推过 MAX_FILE_BYTES（normalize 不裁剪 path）
+    await store.writeRun({
+      childId: 'huge-run',
+      status: 'completed',
+      result: 'x'.repeat(MAX_RESULT_BYTES),
+      worktree: {
+        path: `/tmp/${'p'.repeat(700 * 1024)}`,
+        baseSha: 'base',
+        branch: 'meetingstone/huge',
+        operationId: 'huge',
+      },
+      changedFiles: files,
+      overlapWarnings: [{ childId: 'other', files: shared }],
+    })
+
+    const record = await store.loadRun('huge-run')
+    assert.deepEqual(record.changedFiles, [], '体积闸必须裁剪 changedFiles')
+    assert.equal(record.changedFilesTruncated, true)
+    assert.deepEqual(record.overlapWarnings, [], '体积闸必须同时裁剪 overlapWarnings')
+    assert.equal(record.overlapTruncated, true)
+    assert.equal(record.overlapTotal, shared.length, '必须保留截断前的原始总数')
+    assert.equal(record.worktree.branch, 'meetingstone/huge', 'worktree 元数据必须保住')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('回写 overlap 不丢旧记录的 changedFilesTotal（截断记录被重写时）', async () => {
+  const root = await tempRoot()
+  try {
+    const store = createRunStore({ root })
+    const files = Array.from({ length: MAX_CHANGED_FILES + 1000 }, (_, i) => `f-${i}.txt`)
+    const worktree = (id) => ({
+      path: `/tmp/${id}`,
+      baseSha: 'base',
+      branch: `meetingstone/${id}`,
+      operationId: id,
+    })
+    await store.writeRun({
+      childId: 'old',
+      status: 'completed',
+      worktree: worktree('old'),
+      changedFiles: files,
+    })
+    const before = JSON.parse(
+      await readFile(join(root, RUNS_RELATIVE_DIR, 'old.json'), 'utf8'),
+    )
+    assert.equal(before.changedFilesTotal, files.length)
+    assert.equal(before.changedFiles.length, MAX_CHANGED_FILES)
+
+    // 新记录与 old 有交集 → 触发 old 的 overlap 回写（old 会被 normalize 重写一次）
+    await store.writeRun({
+      childId: 'new',
+      status: 'completed',
+      worktree: worktree('new'),
+      changedFiles: files.slice(0, 3),
+    })
+    const after = JSON.parse(
+      await readFile(join(root, RUNS_RELATIVE_DIR, 'old.json'), 'utf8'),
+    )
+    assert.equal(
+      after.changedFilesTotal,
+      files.length,
+      '回写不得把原始总数从 6000 降成 5000',
+    )
+    assert.equal(after.changedFiles.length, MAX_CHANGED_FILES)
+    assert.ok(after.overlapWarnings.some((w) => w.childId === 'new'))
+  } finally {
+    await rm(root, { recursive: true, force: true })
   }
 })

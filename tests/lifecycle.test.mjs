@@ -16,7 +16,7 @@ import { join } from 'node:path'
 
 import { apply } from '../src/index.js'
 import { createDshAdapter, ADAPTER_ERRORS } from '../src/dsh/adapter.js'
-import { createDispatcher } from '../src/dispatch/dispatcher.js'
+import { createDispatcher, DISPATCH_ERRORS } from '../src/dispatch/dispatcher.js'
 import { createRunStore, RUN_STATUS, RUNS_RELATIVE_DIR } from '../src/run-store.js'
 
 const delay = (/** @type {number} */ ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -545,7 +545,7 @@ test('C4：卸载 dispose 失败时写 interrupted + stopConfirmed:false，且�
   assert.equal(subagents.disposed.length, 1, '重复卸载不得重复 dispose')
 })
 
-test('C5：启动中卸载——占位被取消；activation 返回后立即 dispose 且拒绝登记', async () => {
+test('C5：启动中卸载——占位被冻结；activation 返回并 dispose 确认后才释放槽位，拒绝登记', async () => {
   /** @type {() => void} */
   let releaseStart
   const gate = new Promise((resolve) => {
@@ -590,11 +590,16 @@ test('C5：启动中卸载——占位被取消；activation 返回后立即 dis
   await delay(10) // 让 start 进入 startActivation 等待
 
   for (const dispose of disposers) if (typeof dispose === 'function') await dispose()
-  assert.equal(released, 1, '卸载必须取消启动中的占位并释放其槽位')
+  assert.equal(
+    released,
+    0,
+    '卸载后、迟到 activation 返回前不能释放槽位：停止状态尚未确认（F1）',
+  )
 
   releaseStart()
   await assert.rejects(() => starting, /ADAPTER_DISPOSED/)
   assert.equal(disposed.length, 1, '启动返回后必须立即 dispose，不得留下存活 activation')
+  assert.equal(released, 1, 'dispose 确认停止后才释放占位槽位')
   assert.equal(started.length, 0, '卸载后不得再登记 running 记录')
   assert.equal(finished.length, 0, '没有 childId 的启动不应写终态')
 
@@ -606,4 +611,177 @@ test('C5：启动中卸载——占位被取消；activation 返回后立即 dis
     () => a.start({ role: role(), task: 'x', timeoutMs: 0, context: dispatchContext }),
     /ADAPTER_DISPOSED/,
   )
+})
+
+// ─── D. 第二轮复核：迟到 activation 与卸载交错（F1/F2） ──────────────────────
+
+for (const mode of ['抛错', '超时']) {
+  test(`D1（${mode}）：启动中卸载后迟到 activation 的 dispose 未确认——保留槽位、写终态、错误码透传（F1）`, async () => {
+    /** @type {() => void} */
+    let releaseStart
+    const gate = new Promise((resolve) => {
+      releaseStart = resolve
+    })
+    /** @type {(value?: any) => void} */
+    let settleResult
+    const disposed = []
+    const subagents = {
+      getProvider() {
+        return { name: 'acp' }
+      },
+      async startActivation() {
+        await gate
+        return {
+          childId: 'late-child',
+          name: 'late-child',
+          result: new Promise((resolve) => {
+            settleResult = resolve
+          }),
+          async dispose() {
+            disposed.push('late-child')
+            if (mode === '抛错') throw new Error('late dispose boom')
+            await new Promise(() => {}) // 永不完成 → 走超时兜底
+          },
+        }
+      },
+    }
+    const finished = []
+    const { dispatcher, disposers, warns } = makeDispatchPair(subagents, {
+      disposeTimeoutMs: 30,
+      onRunFinish: (r) => finished.push(r),
+    })
+
+    const pending = dispatcher.dispatch({
+      role: 'SS',
+      task: '慢启动',
+      projectKey: 'p-late',
+      context: dispatchContext,
+    })
+    await delay(10) // 让 start 进入 startActivation 等待
+
+    for (const dispose of disposers) if (typeof dispose === 'function') await dispose()
+    assert.equal(
+      dispatcher.stats().active,
+      1,
+      '卸载后、迟到 activation 返回前不能释放槽位（停止状态未确认）',
+    )
+
+    releaseStart()
+    const res = await pending
+    assert.equal(res.ok, false)
+    assert.equal(
+      res.code,
+      DISPATCH_ERRORS.ADAPTER_DISPOSED,
+      'ADAPTER_DISPOSED 必须原样透传，不能被归为 ADAPTER_FAILED',
+    )
+    assert.equal(disposed.length, 1)
+    assert.equal(dispatcher.stats().active, 1, 'dispose 未确认必须保留并发槽位')
+
+    assert.equal(finished.length, 1, '迟到 activation 必须写终态，不能只留 running')
+    assert.equal(finished[0].childId, 'late-child')
+    assert.equal(finished[0].status, 'interrupted')
+    assert.equal(finished[0].stopReason, 'plugin-disposed')
+    assert.equal(finished[0].stopConfirmed, false, 'dispose 未确认不得报告已停止')
+    assert.ok(
+      String(finished[0].error?.code ?? '').startsWith('ADAPTER_DISPOSE_'),
+      `终态必须带 dispose 错误码：${JSON.stringify(finished[0].error)}`,
+    )
+    assert.match(String(finished[0].diagnostic ?? ''), /dispose/)
+    assert.ok(
+      warns.some((line) => line.includes('ADAPTER_DISPOSE')),
+      'dispose 错误必须记录日志，不能静默丢弃',
+    )
+
+    const got = await dispatcher.getTask('late-child')
+    assert.equal(got.status, 'interrupted', '迟到 activation 必须可查，不能是 unknown')
+    assert.equal(got.stopConfirmed, false)
+
+    // result 落定 = 可验证停止：这时才释放保留的槽位
+    settleResult({ stopReason: 'completed', output: [] })
+    await delay(30)
+    assert.equal(dispatcher.stats().active, 0, 'result 落定后才释放保留的槽位')
+  })
+}
+
+test('D2：卸载时前一个 dispose 阻塞，不影响后一个的终态落盘（F2）', async () => {
+  /** @type {Array<{ childId: string, settle: (value?: any) => void }>} */
+  const items = []
+  const subagents = {
+    getProvider() {
+      return { name: 'acp' }
+    },
+    async startActivation() {
+      const seq = items.length + 1
+      const childId = `child-${seq}`
+      /** @type {any} */
+      const item = { childId }
+      item.result = new Promise((resolve) => {
+        item.settle = resolve
+      })
+      items.push(item)
+      return {
+        childId,
+        name: childId,
+        result: item.result,
+        async dispose() {
+          // 第一个 dispose 阻塞到超时；第二个立即成功
+          if (childId === 'child-1') await new Promise(() => {})
+        },
+      }
+    },
+  }
+  const finished = []
+  const { ctx, disposers } = fakeCtx({ subagents })
+  const a = createDshAdapter(ctx, {
+    getParent: () => ({ id: 'agent-root' }),
+    disposeTimeoutMs: 200,
+    onRunFinish: (r) => finished.push(r),
+  })
+  let released = 0
+  const first = await a.start({
+    role: role(),
+    task: '长任务 A',
+    timeoutMs: 0,
+    onFinish: () => {
+      released += 1
+    },
+    context: dispatchContext,
+  })
+  const second = await a.start({
+    role: role(),
+    task: '长任务 B',
+    timeoutMs: 0,
+    onFinish: () => {
+      released += 1
+    },
+    context: dispatchContext,
+  })
+
+  // 开始卸载（不 await）：第一个 dispose 会阻塞到 200ms 超时
+  const unloading = Promise.all(
+    disposers.map((dispose) => (typeof dispose === 'function' ? dispose() : undefined)),
+  )
+  await delay(20)
+  // 卸载进行中，第二个任务的 result 落定 → 旧实现会 cleanup 后跳过它，磁盘遗留 running
+  items[1].settle({ stopReason: 'completed', output: [] })
+  await unloading
+
+  const firstRecord = finished.find((r) => r.childId === first.taskRef.childId)
+  const secondRecord = finished.find((r) => r.childId === second.taskRef.childId)
+  assert.ok(firstRecord, '第一个任务的终态必须写')
+  assert.ok(secondRecord, '第二个任务的终态不得因共享 cleanup 被跳过')
+  assert.equal(firstRecord.status, 'interrupted')
+  assert.equal(firstRecord.stopConfirmed, false, '第一个 dispose 超时，不得报告已停止')
+  assert.equal(secondRecord.status, 'interrupted')
+  assert.equal(
+    secondRecord.stopConfirmed,
+    true,
+    '第二个任务 result 已落定 = 可验证停止，终态必须如实记录 stopConfirmed:true',
+  )
+  assert.equal(released, 1, '第二个槽位因 result 落定释放；第一个仍保留')
+
+  // 收尾：第一个 result 落定后释放保留的槽位
+  items[0].settle({ stopReason: 'completed', output: [] })
+  await delay(30)
+  assert.equal(released, 2, '第一个 result 落定后释放保留的槽位')
 })

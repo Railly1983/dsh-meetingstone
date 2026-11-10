@@ -92,6 +92,8 @@ export const PROVIDER_BY_KIND = Object.freeze({
 export const ADAPTER_ERRORS = Object.freeze({
   DISPOSE_TIMEOUT: 'ADAPTER_DISPOSE_TIMEOUT',
   DISPOSE_FAILED: 'ADAPTER_DISPOSE_FAILED',
+  // 卸载期间拒绝启动/登记：dispatcher 必须原样透传，不能归入 ADAPTER_FAILED
+  DISPOSED: 'ADAPTER_DISPOSED',
 })
 
 /** 等待宿主 `activation.dispose()` 的默认上限（毫秒）。 */
@@ -203,6 +205,54 @@ async function disposeActivation(activation, timeoutMs) {
     return { code, message: errorMessage(err) }
   } finally {
     if (timer) clearTimeout(timer)
+  }
+}
+
+/**
+ * 安全调用释放回调。释放回调失败不应影响任务收尾；重复调用由 dispatcher 侧幂等。
+ * @param {{ onFinish?: Function } | null | undefined} holder
+ */
+function callOnFinish(holder) {
+  if (!holder || typeof holder.onFinish !== 'function') return
+  try {
+    holder.onFinish()
+  } catch {
+    /* 释放回调失败不应影响任务收尾 */
+  }
+}
+
+/**
+ * 落盘用的基础信息（不含终态）。正常启动与「卸载后迟到 activation」共用同一形状，
+ * 保证两条路径写出的记录字段一致。
+ *
+ * @param {object} args
+ * @param {any} args.input
+ * @param {any} args.role
+ * @param {string} args.provider
+ * @param {string} args.childId
+ * @param {number} args.startedAt
+ */
+function buildRunBase({ input, role, provider, childId, startedAt }) {
+  return {
+    childId,
+    projectRoot: typeof input?.context?.projectRoot === 'string' ? input.context.projectRoot : null,
+    role: role?.roleId ?? null,
+    channel: role?.channel?.kind ?? null,
+    provider,
+    model: role?.channel?.model ?? null,
+    status: 'running',
+    createdAt: startedAt,
+    startedAt,
+    // 并行隔离元数据：记录与 childId 的映射，便于审计"这个 childId 用了哪棵树"
+    operationId:
+      typeof input?.operationId === 'string' && input.operationId
+        ? input.operationId
+        : typeof input?.worktree?.operationId === 'string'
+          ? input.worktree.operationId
+          : null,
+    worktree:
+      input?.worktree && typeof input.worktree === 'object' ? input.worktree : null,
+    isolation: input?.isolation === 'none' || input?.isolation === 'worktree' ? input.isolation : null,
   }
 }
 
@@ -426,7 +476,7 @@ export function createDshAdapter(ctx, options = {}) {
 
   async function start(input) {
     if (disposed) {
-      throw new Error('ADAPTER_DISPOSED: 插件正在卸载，拒绝启动新任务')
+      throw lifecycleError(ADAPTER_ERRORS.DISPOSED, '插件正在卸载，拒绝启动新任务')
     }
     const { role, task, cwd, timeoutMs } = input ?? {}
     // 执行路由**必须**以引用的通道实例为准，不能只信角色自己的声明。
@@ -547,7 +597,7 @@ export function createDshAdapter(ctx, options = {}) {
     // 若已卸载就立即 dispose、拒绝登记，绝不让它变成卸载后的存活 activation。
     // 进入这里前的 cwd 校验含 await，卸载可能在期间发生：再查一次，避免占位漏给卸载。
     if (disposed) {
-      throw new Error('ADAPTER_DISPOSED: 插件已卸载，拒绝启动')
+      throw lifecycleError(ADAPTER_ERRORS.DISPOSED, '插件已卸载，拒绝启动')
     }
     const startKey = operationId ? `op:${operationId}` : `start:${(startSeq += 1)}`
     /** @type {{ controller: AbortController, cancelled: boolean, onFinish?: Function }} */
@@ -558,13 +608,86 @@ export function createDshAdapter(ctx, options = {}) {
       activation = await subagents.startActivation(spec)
     } catch (err) {
       pendingStarts.delete(startKey)
+      // 卸载时不再立刻释放占位槽位（见卸载 disposer）：启动失败由这里补释放，
+      // 因为没有真实 activation 需要保留。
+      if (placeholder.cancelled) callOnFinish(placeholder)
       throw err
     }
     pendingStarts.delete(startKey)
     if (placeholder.cancelled || disposed) {
-      // 卸载已经发生：这个 activation 不允许登记，立即释放宿主资源后向上抛。
-      await disposeActivation(activation, disposeTimeoutMs)
-      throw new Error('ADAPTER_DISPOSED: 插件已卸载，拒绝登记启动结果')
+      // 卸载已经发生：这个 activation 不允许登记为存活任务，先 dispose 再拒绝。
+      const disposeError = await disposeActivation(activation, disposeTimeoutMs)
+      if (!disposeError) {
+        // 已确认停止，占位槽位现在才释放（卸载时延迟到这一刻）。
+        callOnFinish(placeholder)
+        throw lifecycleError(ADAPTER_ERRORS.DISPOSED, '插件已卸载，拒绝登记启动结果')
+      }
+      const lateChildId =
+        activation && activation.childId !== undefined && activation.childId !== null
+          ? String(activation.childId)
+          : ''
+      if (!lateChildId) {
+        // 没有 childId 就无法追踪 result、也无法在日后确认停止；如实释放并带上 dispose 错误。
+        callOnFinish(placeholder)
+        throw lifecycleError(
+          ADAPTER_ERRORS.DISPOSED,
+          `插件已卸载，迟到 activation 的 dispose 未确认（${disposeError.code}：${disposeError.message}），` +
+            '且缺少 childId，无法追踪',
+          disposeError,
+        )
+      }
+      // dispose 超时/失败：进程可能仍存活。必须保留句柄与并发槽位，写 interrupted 终态，
+      // 等 activation.result 落定后再释放（与 cancel 的 stopConfirmed 门控一致）。
+      // 绝不吞掉 dispose 错误——记录、返回值、日志三处都要能看见。
+      if (typeof ctx?.logger?.warn === 'function') {
+        ctx.logger.warn(
+          `[meetingstone] unload: late activation ${lateChildId} dispose ${disposeError.code}: ${disposeError.message}`,
+        )
+      }
+      const startedAt = now()
+      const lateRunBase = buildRunBase({ input, role, provider, childId: lateChildId, startedAt })
+      /** @type {any} */
+      const lateHandle = {
+        activation,
+        controller,
+        timer: null,
+        onFinish: placeholder.onFinish,
+        runBase: lateRunBase,
+        cancelling: true,
+      }
+      handles.set(lateChildId, lateHandle)
+      claimSettlement(lateHandle)
+      const settled = {
+        status: 'interrupted',
+        stopReason: 'plugin-disposed',
+        stopConfirmed: false,
+        output: '',
+        diagnostic:
+          `插件卸载：迟到 activation 的 dispose 失败（${disposeError.code}：${disposeError.message}），` +
+          '进程可能仍存活，槽位保留至结果落定',
+        at: startedAt,
+      }
+      rememberFinished(lateChildId, settled)
+      // 先挂结果监听再写盘：写盘期间 result 落定也能清掉句柄/槽位。
+      watchActivationResult(lateChildId)
+      await emitRunFinish({
+        ...lateRunBase,
+        ...settled,
+        result: settled.output,
+        error: disposeError,
+        finishedAt: settled.at,
+      })
+      const err = lifecycleError(
+        ADAPTER_ERRORS.DISPOSED,
+        `插件已卸载，迟到 activation 的 dispose 未确认（${disposeError.code}：${disposeError.message}）`,
+        disposeError,
+      )
+      // 明确告知 dispatcher：停止未确认，槽位必须保留到 activation.result 落定。
+      // @ts-expect-error 自定义字段，dispatcher 用它决定是否 release
+      err.slotPreserved = true
+      // @ts-expect-error 同上
+      err.stopConfirmed = false
+      throw err
     }
     if (!activation || !activation.childId) {
       throw new Error('ADAPTER_FAILED: startActivation 未返回有效 activation（缺 childId）')
@@ -589,95 +712,89 @@ export function createDshAdapter(ctx, options = {}) {
       timer = setTimeout(() => controller.abort(new Error('meetingstone: timeout')), timeoutMs)
     }
     /** 落盘用的基础信息（不含终态），cancel 也需要它 */
-    const runBase = {
-      childId,
-      projectRoot: typeof input?.context?.projectRoot === 'string' ? input.context.projectRoot : null,
-      role: role?.roleId ?? null,
-      channel: role?.channel?.kind ?? null,
-      provider,
-      model: role?.channel?.model ?? null,
-      status: 'running',
-      createdAt: taskRef.startedAt,
-      startedAt: taskRef.startedAt,
-      // 并行隔离元数据：记录与 childId 的映射，便于审计"这个 childId 用了哪棵树"
-      operationId:
-        typeof input?.operationId === 'string' && input.operationId
-          ? input.operationId
-          : typeof input?.worktree?.operationId === 'string'
-            ? input.worktree.operationId
-            : null,
-      worktree:
-        input?.worktree && typeof input.worktree === 'object' ? input.worktree : null,
-      isolation: input?.isolation === 'none' || input?.isolation === 'worktree' ? input.isolation : null,
-    }
+    const runBase = buildRunBase({ input, role, provider, childId, startedAt: taskRef.startedAt })
     handles.set(childId, { activation, controller, timer, onFinish: input?.onFinish, runBase })
 
     // 先记 running（结果落盘），再挂终态钩子
     emitRunStart(runBase)
-
-    // 任务自己结束后记录结果并释放内部句柄（result 是 subagent.md 确认的 Promise）。
-    if (activation.result && typeof activation.result.then === 'function') {
-      void activation.result.then(
-        (result) => {
-          const handleForResult = handles.get(childId)
-          if (!handleForResult) return
-          // 取消/卸载已经开始收尾时，由那条路径写终态，避免"先 cancelled、又被 completed 覆盖"；
-          // 但 result 落定本身就是"进程已停止"的可验证证据，此时才允许释放保留的槽位。
-          if (handleForResult.cancelling) {
-            cleanup(childId)
-            return
-          }
-          if (!claimSettlement(handleForResult)) return
-          const settled = {
-            status: 'completed',
-            stopReason: result?.stopReason ?? 'completed',
-            // 子 Agent 已正常结束；宿主返回了终态，视为进程已确认停止
-            stopConfirmed: true,
-            output: resultText(result),
-            ...(result?.diagnostic ? { diagnostic: String(result.diagnostic) } : {}),
-            at: now(),
-          }
-          rememberFinished(childId, settled)
-          void emitRunFinish({
-            ...runBase,
-            ...settled,
-            // 落盘字段叫 result：这里显式映射，否则磁盘记录会是空串（真机踩过）
-            result: settled.output,
-            finishedAt: settled.at,
-          })
-          cleanup(childId)
-        },
-        (err) => {
-          const handleForResult = handles.get(childId)
-          if (!handleForResult) return
-          if (handleForResult.cancelling) {
-            cleanup(childId)
-            return
-          }
-          if (!claimSettlement(handleForResult)) return
-          const settled = {
-            status: 'failed',
-            stopReason: 'error',
-            // 执行已经以错误结束；进程不再存活
-            stopConfirmed: true,
-            output: '',
-            diagnostic: errorMessage(err),
-            at: now(),
-          }
-          rememberFinished(childId, settled)
-          void emitRunFinish({
-            ...runBase,
-            ...settled,
-            result: settled.output,
-            error: { code: 'ADAPTER_ERROR', message: errorMessage(err) },
-            finishedAt: settled.at,
-          })
-          cleanup(childId)
-        },
-      )
-    }
+    watchActivationResult(childId)
 
     return { taskRef }
+  }
+
+  /**
+   * 订阅宿主 activation.result 的落定。
+   * - 正常路径：完成/失败各写一次终态（claimSettlement 保证只写一次）
+   * - 取消/卸载路径（cancelling）：终态由那条路径负责，这里只记录「进程已停止」的证据
+   *   （`resultSettled`）并释放保留的槽位——结果落定是可验证的停止证据。
+   *
+   * @param {string} childId
+   */
+  function watchActivationResult(childId) {
+    const handle = handles.get(childId)
+    const result = handle?.activation?.result
+    if (!result || typeof result.then !== 'function') return
+    void result.then(
+      (value) => {
+        const current = handles.get(childId)
+        if (!current) return
+        // 无论谁写终态，result 落定都意味着进程已停止；卸载/取消用它确认 stopConfirmed
+        current.resultSettled = true
+        // 取消/卸载已经开始收尾时，由那条路径写终态，避免"先 cancelled、又被 completed 覆盖"；
+        // 但 result 落定本身就是"进程已停止"的可验证证据，此时才允许释放保留的槽位。
+        if (current.cancelling) {
+          cleanup(childId)
+          return
+        }
+        if (!claimSettlement(current)) return
+        const settled = {
+          status: 'completed',
+          stopReason: value?.stopReason ?? 'completed',
+          // 子 Agent 已正常结束；宿主返回了终态，视为进程已确认停止
+          stopConfirmed: true,
+          output: resultText(value),
+          ...(value?.diagnostic ? { diagnostic: String(value.diagnostic) } : {}),
+          at: now(),
+        }
+        rememberFinished(childId, settled)
+        void emitRunFinish({
+          ...current.runBase,
+          ...settled,
+          // 落盘字段叫 result：这里显式映射，否则磁盘记录会是空串（真机踩过）
+          result: settled.output,
+          finishedAt: settled.at,
+        })
+        cleanup(childId)
+      },
+      (err) => {
+        const current = handles.get(childId)
+        if (!current) return
+        current.resultSettled = true
+        if (current.cancelling) {
+          cleanup(childId)
+          return
+        }
+        if (!claimSettlement(current)) return
+        const settled = {
+          status: 'failed',
+          stopReason: 'error',
+          // 执行已经以错误结束；进程不再存活
+          stopConfirmed: true,
+          output: '',
+          diagnostic: errorMessage(err),
+          at: now(),
+        }
+        rememberFinished(childId, settled)
+        void emitRunFinish({
+          ...current.runBase,
+          ...settled,
+          result: settled.output,
+          error: { code: 'ADAPTER_ERROR', message: errorMessage(err) },
+          finishedAt: settled.at,
+        })
+        cleanup(childId)
+      },
+    )
   }
 
   /**
@@ -804,19 +921,23 @@ export function createDshAdapter(ctx, options = {}) {
     return handle.cancelPromise
   }
 
-  // 插件卸载：单一 disposer 内串行 await 全部收尾（02-plugin-spec.md §2.4 的硬要求，
+  // 插件卸载：单一 disposer 内收尾全部存活任务（02-plugin-spec.md §2.4 的硬要求，
   // 不拆成多个并列 ctx.effect，避免异步 disposer 并发导致子进程清理顺序不确定）。
   // 必须给每个存活任务写终态（interrupted），否则重启后磁盘里会留下假 running。
   //
   // P1 修复：卸载也必须按「可验证停止」释放槽位——
-  // - 启动中（startActivation 未返回）的占位：取消占位并释放其槽位（还没有真实 activation）；
+  // - 启动中（startActivation 未返回）的占位：只标记取消 + abort，**不立即释放槽位**。
+  //   activation 可能随时返回；在返回并 dispose 成功之前，停止状态未确认，
+  //   释放槽位会让「迟到且无法停止」的进程绕过并发纪律（F1）。
   // - 已启动的 activation：dispose 成功才释放；超时/抛错时保留句柄与槽位，并记 stopConfirmed:false，
   //   等 result 落定后再释放。绝不无条件 handoff 给 dispatcher。
   if (typeof ctx?.effect === 'function') {
     ctx.effect(() => {
       return async () => {
         disposed = true
-        // 1) 取消尚未返回的启动：它们没有 childId，只能按占位收尾。
+        // 1) 取消尚未返回的启动：它们没有 childId，只能按占位冻结。
+        //    **不调用 onFinish**：槽位保留到 activation 返回并确认 dispose 之后
+        //    （见 start() 的迟到分支；启动直接抛错时由 start 的 catch 补释放）。
         for (const [key, placeholder] of [...pendingStarts]) {
           pendingStarts.delete(key)
           placeholder.cancelled = true
@@ -824,13 +945,6 @@ export function createDshAdapter(ctx, options = {}) {
             placeholder.controller.abort(new Error('meetingstone: plugin disposed'))
           } catch {
             /* abort 不应失败 */
-          }
-          if (typeof placeholder.onFinish === 'function') {
-            try {
-              placeholder.onFinish()
-            } catch {
-              /* 释放回调失败不影响清理 */
-            }
           }
         }
 
@@ -851,58 +965,63 @@ export function createDshAdapter(ctx, options = {}) {
           }
         }
 
-        // 3) 逐个收尾已登记的 activation。注意**不要**先 handles.clear()：
-        //    未确认停止的句柄必须保留，等 result 落定后再释放。
-        for (const [id, handle] of snapshot) {
-          // 取消流程已经在收尾：复用同一个 promise，避免对同一个 activation 调两次 dispose。
-          // 是否释放由 cancel 自己按 dispose 结果决定（未确认时它不会 cleanup）。
-          if (handle.cancelPromise) {
+        // 3) 每个句柄独立收尾：自己的 dispose、自己的终态、自己的 try/finally。
+        //    前一个 dispose 阻塞不能拖住后一个的终态写入（F2）。
+        //    **不要**先 handles.clear()：未确认停止的句柄必须保留，等 result 落定后再释放。
+        //    result 在等待期间落定并 cleanup 的句柄也**不能跳过**——那正是 F2 漏写终态的场景；
+        //    此时 resultSettled 就是可验证的停止证据，终态仍要写，stopConfirmed 记 true。
+        await Promise.all(
+          snapshot.map(async ([id, handle]) => {
+            let confirmed = false
             try {
-              await handle.cancelPromise
-            } catch {
-              /* cancel 自己会记录错误 */
-            }
-            continue
-          }
-          // 冻结之后 result 可能已经落定并 cleanup；已清理的句柄不再 dispose
-          if (handle.cleaned || !handles.has(id)) continue
-          let disposeError = null
-          try {
-            disposeError = await disposeActivation(handle.activation, disposeTimeoutMs)
-            if (disposeError) {
-              // 清理失败不阻断其余任务的收尾；只记日志，不静默吞掉成「成功」。
-              if (typeof ctx?.logger?.warn === 'function') {
-                ctx.logger.warn(
-                  `[meetingstone] activation dispose ${disposeError.code}: ${disposeError.message}`,
-                )
+              // 取消流程已经在收尾：复用同一个 promise，避免对同一个 activation 调两次 dispose。
+              // 是否释放由 cancel 自己按 dispose 结果决定（未确认时它不会 cleanup）。
+              if (handle.cancelPromise) {
+                try {
+                  await handle.cancelPromise
+                } catch {
+                  /* cancel 自己会记录错误 */
+                }
+                return
               }
-            }
-            if (claimSettlement(handle)) {
-              const settled = {
-                status: 'interrupted',
-                stopReason: 'plugin-disposed',
-                // dispose 成功 = 确认已停；超时/失败时如实标 false
-                stopConfirmed: !disposeError,
-                output: '',
-                diagnostic: disposeError
-                  ? `插件卸载：任务被中断（activation.dispose 失败 ${disposeError.code}：${disposeError.message}）`
-                  : '插件卸载：任务被中断',
-                at: now(),
+              const disposeError = await disposeActivation(handle.activation, disposeTimeoutMs)
+              if (disposeError) {
+                // 清理失败不阻断其余任务的收尾；只记日志，不静默吞掉成「成功」。
+                if (typeof ctx?.logger?.warn === 'function') {
+                  ctx.logger.warn(
+                    `[meetingstone] activation dispose ${disposeError.code}: ${disposeError.message}`,
+                  )
+                }
               }
-              rememberFinished(handle.runBase.childId, settled)
-              await emitRunFinish({
-                ...handle.runBase,
-                ...settled,
-                result: settled.output,
-                ...(disposeError ? { error: disposeError } : {}),
-                finishedAt: settled.at,
-              })
+              // dispose 成功或 result 已落定（进程确实结束）都算可验证停止
+              confirmed = !disposeError || handle.resultSettled === true
+              if (claimSettlement(handle)) {
+                const settled = {
+                  status: 'interrupted',
+                  stopReason: 'plugin-disposed',
+                  // dispose 成功 / result 落定 = 确认已停；否则如实标 false
+                  stopConfirmed: confirmed,
+                  output: '',
+                  diagnostic: disposeError
+                    ? `插件卸载：任务被中断（activation.dispose 失败 ${disposeError.code}：${disposeError.message}）`
+                    : '插件卸载：任务被中断',
+                  at: now(),
+                }
+                rememberFinished(id, settled)
+                await emitRunFinish({
+                  ...handle.runBase,
+                  ...settled,
+                  result: settled.output,
+                  ...(disposeError ? { error: disposeError } : {}),
+                  finishedAt: settled.at,
+                })
+              }
+            } finally {
+              // 只有确认停止才释放槽位；未确认时保留句柄（result 落定后由回调 cleanup）
+              if (confirmed) cleanup(id)
             }
-          } finally {
-            // 只有确认停止才释放槽位；未确认时保留句柄（result 落定后由回调 cleanup）
-            if (!disposeError) cleanup(id)
-          }
-        }
+          }),
+        )
       }
     }, 'meetingstone: activation-cleanup')
   }

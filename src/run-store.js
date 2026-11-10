@@ -15,7 +15,7 @@
  * 明文提示：文件是本机明文，输出可能包含源码片段。不要在文档里承诺"机密安全"。
  */
 import { promises as fs } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 /** 相对项目根的默认目录。 */
 export const RUNS_RELATIVE_DIR = '.meetingstone/runs'
@@ -32,6 +32,20 @@ export const MAX_ERROR_BYTES = 16 * 1024
 export const MAX_CHANGED_FILES = 5000
 /** changedFiles 的字节预算（按 JSON 转义后大小计，保证整条记录体积可控）。 */
 const MAX_CHANGED_FILES_BYTES = 2 * 1024 * 1024
+/**
+ * `overlapWarnings` 的落盘上限（悟空复核 F4）：
+ * - 每对记录最多保留 `MAX_OVERLAP_FILES` 个文件
+ * - 整个字段最多 `MAX_OVERLAP_BYTES` 字节（JSON 转义后）
+ * 没有上限时，三份记录各注入 5000 条共同路径就能把单条记录撑到 1.4MB/2.8MB，
+ * 第三份直接 `RUN_TOO_LARGE`，磁盘遗留 running。
+ * 超限时写 `overlapTruncated:true` / `overlapTotal:<原始文件总数>`。
+ */
+export const MAX_OVERLAP_FILES = 50
+export const MAX_OVERLAP_BYTES = 64 * 1024
+/** 单条记录最多保留多少对 overlap（字节预算之外的条数兜底）。 */
+const MAX_OVERLAP_PAIRS = 50
+/** 单次写入最多回写多少条历史记录（并发 overlap 的“有界”回写，F3）。 */
+const MAX_OVERLAP_BACKFILL_RECORDS = 20
 /** 默认保留条数 / 时长。 */
 export const DEFAULT_MAX_RUNS = 100
 export const DEFAULT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
@@ -185,6 +199,41 @@ async function renameWithRetry(from, to) {
 }
 
 /**
+ * 项目级写锁（按 runs 目录索引，跨 store 实例共享）。
+ *
+ * F3：并发终态写入必须串行「读现有记录 → 写当前记录 → 回写交集记录」。
+ * 否则两个任务都读到对方尚不存在，各自写出的原始 JSON 里 overlapWarnings 都是 []，
+ * 只有读取时重算才能看到交集。
+ *
+ * @type {Map<string, Promise<void>>}
+ */
+const runWriteLocks = new Map()
+
+/**
+ * @template T
+ * @param {string} key
+ * @param {() => Promise<T>} task
+ * @returns {Promise<T>}
+ */
+async function withRunLock(key, task) {
+  const previous = runWriteLocks.get(key) ?? Promise.resolve()
+  /** @type {() => void} */
+  let release = () => {}
+  const gate = new Promise((resolveGate) => {
+    release = /** @type {() => void} */ (resolveGate)
+  })
+  const queued = previous.then(() => gate)
+  runWriteLocks.set(key, queued)
+  await previous
+  try {
+    return await task()
+  } finally {
+    release()
+    if (runWriteLocks.get(key) === queued) runWriteLocks.delete(key)
+  }
+}
+
+/**
  * 建一个绑定到某项目根的存储。
  *
  * @param {object} options
@@ -200,6 +249,8 @@ export function createRunStore(options) {
   const root = String(options?.root ?? '')
   if (!root) throw new RunStoreError('RUN_STORE_NO_ROOT', '缺少项目根，无法落盘派单结果')
   const dir = join(root, options.dir ?? RUNS_RELATIVE_DIR)
+  // 同一目录的不同 store 实例（例如同一项目的不同别名路径）必须共享同一把写锁
+  const lockKey = process.platform === 'win32' ? resolve(dir).toLowerCase() : resolve(dir)
   const maxRuns = options.maxRuns ?? DEFAULT_MAX_RUNS
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS
   const maxResultBytes = options.maxResultBytes ?? MAX_RESULT_BYTES
@@ -253,24 +304,102 @@ export function createRunStore(options) {
     return {
       changedFiles: files,
       changedFilesTruncated: truncated || existingTruncated === true,
-      changedFilesTotal: all.length,
+      // 回写旧记录时必须保留原始总数：磁盘上的 changedFiles 已经截断过一次，
+      // 再 normalize 时不能把 changedFilesTotal 从 16000 降成 5000。
+      changedFilesTotal:
+        existingTruncated === true && Number.isInteger(existingTotal)
+          ? Math.max(all.length, /** @type {number} */ (existingTotal))
+          : all.length,
     }
   }
 
   /**
-   * 规范化 overlapWarnings（落盘白名单）。
+   * 规范化 overlapWarnings（落盘白名单 + 条数/字节双上限）。
+   *
+   * 上限的目的不是省空间，而是**保证记录可读**：overlap 与 changedFiles 一样可能膨胀到
+   * MB 级，超过读取上限后整条记录会被读取侧拒绝（F4）。
+   * 超限时保留前面的文件（重叠检测优先），并写 `overlapTruncated` / `overlapTotal`。
+   *
    * @param {unknown} value
+   * @param {unknown} [existingTruncated]
+   * @param {unknown} [existingTotal]
+   * @returns {{ overlapWarnings: Array<{ childId: string, files: string[] }>, overlapTruncated: boolean, overlapTotal: number }}
    */
-  function normalizeOverlapWarnings(value) {
-    if (!Array.isArray(value)) return null
-    return value
-      .filter((/** @type {any} */ item) => item && typeof item === 'object' && typeof item.childId === 'string')
-      .map((/** @type {any} */ item) => ({
-        childId: String(item.childId),
-        files: Array.isArray(item.files)
-          ? item.files.filter((/** @type {unknown} */ file) => typeof file === 'string')
-          : [],
-      }))
+  function normalizeOverlapWarnings(value, existingTruncated, existingTotal) {
+    const priorTotal = Number.isInteger(existingTotal) ? /** @type {number} */ (existingTotal) : 0
+    if (!Array.isArray(value)) {
+      return {
+        overlapWarnings: [],
+        overlapTruncated: existingTruncated === true,
+        overlapTotal: priorTotal,
+      }
+    }
+    let total = 0
+    let truncated = false
+    let bytes = 0
+    /** @type {Array<{ childId: string, files: string[] }>} */
+    const warnings = []
+    /** @type {Array<{ childId: string, files: string[] }>} */
+    const items = []
+    for (const item of value) {
+      if (!item || typeof item !== 'object' || typeof item.childId !== 'string') continue
+      const files = Array.isArray(item.files)
+        ? item.files.filter((/** @type {unknown} */ file) => typeof file === 'string')
+        : []
+      items.push({ childId: String(item.childId), files })
+      // 先完整统计原始总数（即使后面被截断/丢弃），overlapTotal 要如实反映规模
+      total += files.length
+    }
+    outer: for (const item of items) {
+      const { childId, files: allFiles } = item
+      if (warnings.length >= MAX_OVERLAP_PAIRS) {
+        truncated = true
+        continue
+      }
+      // 预扣这一对的结构开销，保证整个字段（含 childId）不超预算
+      let pairBytes = Buffer.byteLength(
+        JSON.stringify({ childId, files: [] }),
+        'utf8',
+      )
+      /** @type {string[]} */
+      const files = []
+      for (const file of allFiles) {
+        if (files.length >= MAX_OVERLAP_FILES) {
+          truncated = true
+          break
+        }
+        const size = Buffer.byteLength(JSON.stringify(file), 'utf8') + 1
+        if (bytes + pairBytes + size > MAX_OVERLAP_BYTES) {
+          truncated = true
+          break outer
+        }
+        pairBytes += size
+        files.push(file)
+      }
+      if (files.length < allFiles.length) truncated = true
+      if (files.length === 0) {
+        truncated = true
+        continue
+      }
+      bytes += pairBytes
+      warnings.push({ childId, files })
+    }
+    // 最终保证整个字段（含外层括号/逗号）不超过字节预算：
+    // 逐项累加时只算了文件本身，这里按真实 JSON 体积兜底裁剪。
+    let payloadBytes = Buffer.byteLength(JSON.stringify(warnings), 'utf8')
+    while (payloadBytes > MAX_OVERLAP_BYTES && warnings.length > 0) {
+      const last = warnings[warnings.length - 1]
+      if (last.files.length > 0) last.files.pop()
+      if (last.files.length === 0) warnings.pop()
+      truncated = true
+      payloadBytes = Buffer.byteLength(JSON.stringify(warnings), 'utf8')
+    }
+    return {
+      overlapWarnings: warnings,
+      overlapTruncated: truncated || existingTruncated === true,
+      overlapTotal:
+        existingTruncated === true ? Math.max(total, priorTotal) : total,
+    }
   }
 
   /**
@@ -293,6 +422,11 @@ export function createRunStore(options) {
       record?.changedFiles,
       record?.changedFilesTotal,
       record?.changedFilesTruncated,
+    )
+    const overlap = normalizeOverlapWarnings(
+      record?.overlapWarnings,
+      record?.overlapTruncated,
+      record?.overlapTotal,
     )
     return {
       schemaVersion: 1,
@@ -327,7 +461,10 @@ export function createRunStore(options) {
       changedFilesTotal: changed.changedFilesTotal,
       // overlap 必须落盘（P2）：读取时仍可重算，但原始记录要能自证冲突。
       // 无交集/无法判断时写空数组（`changedFilesUnknown` 另有标记），保证字段始终存在。
-      overlapWarnings: normalizeOverlapWarnings(record.overlapWarnings) ?? [],
+      // 有上限（F4）：每对 ≤50 文件 / 整个字段 ≤64KB，超限写 truncated/total。
+      overlapWarnings: overlap.overlapWarnings,
+      overlapTruncated: overlap.overlapTruncated,
+      overlapTotal: overlap.overlapTotal,
       stopConfirmed: typeof record.stopConfirmed === 'boolean' ? record.stopConfirmed : null,
     }
   }
@@ -348,31 +485,25 @@ export function createRunStore(options) {
   }
 
   /**
-   * 写一条记录（原子替换）。失败抛 `RunStoreError`，由调用方转成 `persistenceWarning`。
+   * 原子写一条记录（内部先 normalize）。失败抛 `RunStoreError`。
+   *
+   * 体积闸兜底（F4）：超限时**同时**裁剪 changedFiles 与 overlapWarnings，
+   * 只丢 changedFiles 的话 overlap 仍可能把记录撑到读不回来。
+   *
    * @param {any} record
    */
-  async function writeRun(record) {
+  async function persistRecord(record) {
     const childId = String(record?.childId ?? '')
     const target = fileFor(childId)
-    // P2：终态记录必须把 overlapWarnings 一起落盘（读取仍可重算，但原始 JSON 要自证冲突）。
-    // 只对带工作树且有 changedFiles 的终态计算；running 记录没有改动列表，算不出交集。
-    let toWrite = { ...record, childId }
-    if (
-      record?.worktree &&
-      record.status !== RUN_STATUS.RUNNING &&
-      Array.isArray(record.changedFiles)
-    ) {
-      const all = await readRecords()
-      toWrite = { ...toWrite, overlapWarnings: overlapWarningsFor(record, all) }
-    }
-    let payload = `${JSON.stringify(normalize(toWrite), null, 2)}\n`
-    // 最后一道体积闸：写入约束（result 截断 + changedFiles 条数/字节预算）之外，
-    // 任何异常膨胀都先丢 changedFiles 保住 worktree 元数据，绝不写出自己读不回的记录。
+    const normalized = normalize(record)
+    let payload = `${JSON.stringify(normalized, null, 2)}\n`
     if (Buffer.byteLength(payload, 'utf8') > MAX_FILE_BYTES) {
-      const trimmed = normalize(toWrite)
-      trimmed.changedFiles = []
-      trimmed.changedFilesTruncated = true
-      payload = `${JSON.stringify(trimmed, null, 2)}\n`
+      normalized.changedFiles = []
+      normalized.changedFilesTruncated = true
+      const hadOverlap = normalized.overlapWarnings.length > 0 || normalized.overlapTotal > 0
+      normalized.overlapWarnings = []
+      if (hadOverlap) normalized.overlapTruncated = true
+      payload = `${JSON.stringify(normalized, null, 2)}\n`
       if (Buffer.byteLength(payload, 'utf8') > MAX_FILE_BYTES) {
         throw new RunStoreError(
           'RUN_TOO_LARGE',
@@ -393,17 +524,122 @@ export function createRunStore(options) {
         error,
       )
     }
-    // 清理是"尽力而为"：失败不影响本次写入结果
-    await pruneRuns().catch(() => {})
     return { ok: true, path: target, bytes: Buffer.byteLength(payload) }
+  }
+
+  /**
+   * 两组 overlapWarnings 是否等价（childId + files 顺序都要一致）。
+   * 只用于决定是否需要回写，不做语义合并。
+   * @param {Array<{ childId: string, files: string[] }>} a
+   * @param {Array<{ childId: string, files: string[] }>} b
+   */
+  function sameOverlap(a, b) {
+    if (a.length !== b.length) return false
+    for (let i = 0; i < a.length; i += 1) {
+      if (String(a[i].childId) !== String(b[i].childId)) return false
+      const af = Array.isArray(a[i].files) ? a[i].files : []
+      const bf = Array.isArray(b[i].files) ? b[i].files : []
+      if (af.length !== bf.length) return false
+      for (let j = 0; j < af.length; j += 1) {
+        if (af[j] !== bf[j]) return false
+      }
+    }
+    return true
+  }
+
+  /**
+   * 把当前记录与历史记录的交集**回写**到历史记录（F3）。
+   *
+   * 有界：只处理「与当前记录有交集、且字段确实变化」的记录，最多
+   * `MAX_OVERLAP_BACKFILL_RECORDS` 条。这样并发结束顺序任意，
+   * 双方原始 JSON 都包含交集，同时不会因为一次写入重写整个目录。
+   *
+   * @param {any} current 刚写入的记录（带 overlapWarnings）
+   * @param {any[]} others 历史记录（不含当前 childId）
+   */
+  async function backfillOverlap(current, others) {
+    const warnings = Array.isArray(current.overlapWarnings) ? current.overlapWarnings : []
+    if (warnings.length === 0) return
+    const participants = new Set(warnings.map((/** @type {any} */ item) => String(item.childId)))
+    const all = [...others, current]
+    let written = 0
+    for (const other of others) {
+      if (written >= MAX_OVERLAP_BACKFILL_RECORDS) break
+      if (!participants.has(String(other.childId))) continue
+      const computed = overlapWarningsFor(other, all)
+      const capped = normalizeOverlapWarnings(
+        computed,
+        other.overlapTruncated,
+        other.overlapTotal,
+      )
+      const stored = normalizeOverlapWarnings(
+        other.overlapWarnings,
+        other.overlapTruncated,
+        other.overlapTotal,
+      )
+      if (
+        sameOverlap(stored.overlapWarnings, capped.overlapWarnings) &&
+        stored.overlapTruncated === capped.overlapTruncated &&
+        stored.overlapTotal === capped.overlapTotal
+      ) {
+        continue
+      }
+      await persistRecord({ ...other, overlapWarnings: computed })
+      written += 1
+    }
+  }
+
+  /**
+   * 写一条记录（原子替换）。失败抛 `RunStoreError`，由调用方转成 `persistenceWarning`。
+   *
+   * 整个「读现有记录 → 写当前 → 回写交集」在同一把项目级异步互斥里完成（F3）：
+   * 并发结束顺序任意，两份磁盘 JSON 都必须含交集。
+   *
+   * @param {any} record
+   */
+  async function writeRun(record) {
+    const childId = String(record?.childId ?? '')
+    fileFor(childId) // 先校验 childId（防路径穿越），再排队
+    // 只有「带工作树的终态 + changedFiles」才需要 overlap 计算/回写；
+    // running 记录与普通记录直接写，避免每次派单都全量读目录。
+    const wantsOverlap =
+      record?.worktree &&
+      record.status !== RUN_STATUS.RUNNING &&
+      Array.isArray(record.changedFiles)
+    if (!wantsOverlap) {
+      return withRunLock(lockKey, async () => {
+        const result = await persistRecord({ ...record, childId })
+        // 清理是"尽力而为"：失败不影响本次写入结果
+        await pruneRuns().catch(() => {})
+        return result
+      })
+    }
+    return withRunLock(lockKey, async () => {
+      // 用原始记录（不投影 interrupted）：回写不能把读取投影写回磁盘（C1）。
+      const existing = await readRecords({ project: false })
+      const others = existing.filter((/** @type {any} */ item) => String(item.childId) !== childId)
+      // P2：终态记录必须把 overlapWarnings 一起落盘（读取仍可重算，但原始 JSON 要自证冲突）。
+      const base = { ...record, childId }
+      const toWrite = { ...base, overlapWarnings: overlapWarningsFor(base, others) }
+      const result = await persistRecord(toWrite)
+      await backfillOverlap(toWrite, others)
+      // 清理是"尽力而为"：失败不影响本次写入结果
+      await pruneRuns().catch(() => {})
+      return result
+    })
   }
 
   /**
    * 读取目录里的全部合法记录（新的在前由调用方排序）。
    * 单条坏记录跳过，不影响列表；超过体积上限的记录也跳过（防止被塞巨型文件）。
+   *
+   * @param {{ project?: boolean }} [options] `project:false` 返回磁盘原样记录
+   *   （不把旧 runtimeId 的 running 投影成 interrupted；写入/回写路径必须用它，
+   *   否则会把投影状态写回磁盘）。
    * @returns {Promise<any[]>}
    */
-  async function readRecords() {
+  async function readRecords(options = {}) {
+    const project = options.project !== false
     let names
     try {
       names = await fs.readdir(dir)
@@ -419,7 +655,8 @@ export function createRunStore(options) {
         const stat = await fs.stat(full)
         if (stat.size > MAX_FILE_BYTES) continue
         const text = await fs.readFile(full, 'utf8')
-        const parsed = projectInterrupted(JSON.parse(text))
+        const raw = JSON.parse(text)
+        const parsed = project ? projectInterrupted(raw) : raw
         if (parsed && typeof parsed === 'object') {
           // 兼容旧记录/坏记录：childId 缺失时退回文件名
           if (typeof parsed.childId !== 'string' || !parsed.childId) {
@@ -470,9 +707,22 @@ export function createRunStore(options) {
 
     // 单条查询也要给出重叠预警：需要同项目的其他记录一起比较。
     // 没有工作树的旧记录不必多读一遍目录。
-    if (!record.worktree) return { ...record, overlapWarnings: [] }
+    if (!record.worktree) {
+      return { ...record, overlapWarnings: [] }
+    }
     const all = await readRecords()
-    return { ...record, overlapWarnings: overlapWarningsFor(record, all) }
+    // 读取侧同样应用条数/字节上限：避免 get_task 返回 MB 级 overlap（F4）。
+    const overlap = normalizeOverlapWarnings(
+      overlapWarningsFor(record, all),
+      record.overlapTruncated,
+      record.overlapTotal,
+    )
+    return {
+      ...record,
+      overlapWarnings: overlap.overlapWarnings,
+      overlapTruncated: overlap.overlapTruncated,
+      overlapTotal: overlap.overlapTotal,
+    }
   }
 
   /**
@@ -485,41 +735,50 @@ export function createRunStore(options) {
   async function listRuns(options = {}) {
     const limit = Math.max(1, Math.min(200, Math.floor(options.limit ?? 20)))
     const all = await readRecords()
-    const records = all.map((parsed) => ({
-      childId: parsed.childId ?? 'unknown',
-      runtimeId: parsed.runtimeId ?? null,
-      role: parsed.role ?? null,
-      channel: parsed.channel ?? null,
-      provider: parsed.provider ?? null,
-      model: parsed.model ?? null,
-      status: parsed.status ?? 'unknown',
-      ...(parsed.interrupted === true ? { interrupted: true } : {}),
-      stopReason: parsed.stopReason ?? null,
-      stopConfirmed: typeof parsed.stopConfirmed === 'boolean' ? parsed.stopConfirmed : null,
-      // 诊断摘要：同样只取前 200 字符（与 preview 一致），避免列表膨胀
-      diagnostic: typeof parsed.diagnostic === 'string' ? parsed.diagnostic.slice(0, 200) : '',
-      createdAt: parsed.createdAt ?? null,
-      finishedAt: parsed.finishedAt ?? null,
-      resultBytes: parsed.resultBytes ?? 0,
-      resultTruncated: parsed.resultTruncated === true,
-      error: parsed.error ?? null,
-      // 并行隔离：worktree 与改动文件必须在列表里可见（手动合并/清理依赖它）
-      operationId: parsed.operationId ?? null,
-      isolation: parsed.isolation ?? null,
-      worktree: parsed.worktree ?? null,
-      changedFiles: Array.isArray(parsed.changedFiles) ? parsed.changedFiles : null,
-      changedFilesUnknown: parsed.changedFilesUnknown === true,
-      changedFilesTruncated: parsed.changedFilesTruncated === true,
-      changedFilesTotal:
-        typeof parsed.changedFilesTotal === 'number'
-          ? parsed.changedFilesTotal
-          : Array.isArray(parsed.changedFiles)
-            ? parsed.changedFiles.length
-            : null,
-      overlapWarnings: overlapWarningsFor(parsed, all),
-      // 摘要：只取前 200 字符，避免把整份结果塞进列表
-      preview: typeof parsed.result === 'string' ? parsed.result.slice(0, 200) : '',
-    }))
+    const records = all.map((parsed) => {
+      const overlap = normalizeOverlapWarnings(
+        overlapWarningsFor(parsed, all),
+        parsed.overlapTruncated,
+        parsed.overlapTotal,
+      )
+      return {
+        childId: parsed.childId ?? 'unknown',
+        runtimeId: parsed.runtimeId ?? null,
+        role: parsed.role ?? null,
+        channel: parsed.channel ?? null,
+        provider: parsed.provider ?? null,
+        model: parsed.model ?? null,
+        status: parsed.status ?? 'unknown',
+        ...(parsed.interrupted === true ? { interrupted: true } : {}),
+        stopReason: parsed.stopReason ?? null,
+        stopConfirmed: typeof parsed.stopConfirmed === 'boolean' ? parsed.stopConfirmed : null,
+        // 诊断摘要：同样只取前 200 字符（与 preview 一致），避免列表膨胀
+        diagnostic: typeof parsed.diagnostic === 'string' ? parsed.diagnostic.slice(0, 200) : '',
+        createdAt: parsed.createdAt ?? null,
+        finishedAt: parsed.finishedAt ?? null,
+        resultBytes: parsed.resultBytes ?? 0,
+        resultTruncated: parsed.resultTruncated === true,
+        error: parsed.error ?? null,
+        // 并行隔离：worktree 与改动文件必须在列表里可见（手动合并/清理依赖它）
+        operationId: parsed.operationId ?? null,
+        isolation: parsed.isolation ?? null,
+        worktree: parsed.worktree ?? null,
+        changedFiles: Array.isArray(parsed.changedFiles) ? parsed.changedFiles : null,
+        changedFilesUnknown: parsed.changedFilesUnknown === true,
+        changedFilesTruncated: parsed.changedFilesTruncated === true,
+        changedFilesTotal:
+          typeof parsed.changedFilesTotal === 'number'
+            ? parsed.changedFilesTotal
+            : Array.isArray(parsed.changedFiles)
+              ? parsed.changedFiles.length
+              : null,
+        overlapWarnings: overlap.overlapWarnings,
+        overlapTruncated: overlap.overlapTruncated,
+        overlapTotal: overlap.overlapTotal,
+        // 摘要：只取前 200 字符，避免把整份结果塞进列表
+        preview: typeof parsed.result === 'string' ? parsed.result.slice(0, 200) : '',
+      }
+    })
     records.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
     return records.slice(0, limit)
   }

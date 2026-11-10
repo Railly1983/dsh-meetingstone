@@ -312,3 +312,106 @@ test('未知适配器错误仍归为 ADAPTER_FAILED', async () => {
   const res = await dispatcher.dispatch({ role: 'SS', task: 'x' })
   assert.equal(res.code, 'ADAPTER_FAILED')
 })
+
+// ─── 第二轮复核：ADAPTER_DISPOSED 透传 / WORKTREE 上下文贯通（F1/F5） ─────────
+
+test('ADAPTER_DISPOSED 原样透传，不被包成 ADAPTER_FAILED（F1）', async () => {
+  const registry = createRegistry({ globalRoles: roles })
+  const adapter = {
+    start: async () => {
+      throw new Error('ADAPTER_DISPOSED: 插件已卸载，拒绝登记启动结果')
+    },
+  }
+  const dispatcher = createDispatcher({ registry, adapter })
+  const res = await dispatcher.dispatch({ role: 'SS', task: 'x' })
+  assert.equal(res.ok, false)
+  assert.equal(res.code, DISPATCH_ERRORS.ADAPTER_DISPOSED)
+  assert.match(res.message, /ADAPTER_DISPOSED/)
+})
+
+test('WORKTREE_* 建树失败：path/branch/phase/residualPath 全部贯通（F5）', async () => {
+  const registry = createRegistry({ globalRoles: roles })
+  const failure = Object.assign(new Error('列出工作树失败'), {
+    code: 'WORKTREE_GIT_FAILED',
+    path: 'D:/proj/.meetingstone/worktrees/op-1',
+    branch: 'meetingstone/op-1',
+    phase: 'list-worktrees',
+  })
+  // WorktreeError 同时把三者放进 details；dispatcher 两种形状都必须能取到
+  failure.details = {
+    path: failure.path,
+    branch: failure.branch,
+    phase: failure.phase,
+  }
+  const worktrees = {
+    async create() {
+      throw failure
+    },
+  }
+  const adapter = { start: async () => ({ taskRef: { id: 't' } }) }
+  const dispatcher = createDispatcher({
+    registry,
+    adapter,
+    worktrees,
+    limits: { defaultIsolation: 'worktree' },
+  })
+  const res = await dispatcher.dispatch({
+    role: 'SS',
+    task: 'x',
+    projectKey: 'D:/proj',
+    projectRoot: 'D:/proj',
+  })
+  assert.equal(res.ok, false)
+  assert.equal(res.code, 'WORKTREE_GIT_FAILED')
+  assert.equal(res.path, failure.path)
+  assert.equal(res.branch, 'meetingstone/op-1')
+  assert.equal(res.phase, 'list-worktrees')
+  assert.equal(res.residualPath, failure.path)
+})
+
+test('带工作树启动失败/无 taskRef：失败结果仍保留 path/branch/residualPath（F5）', async () => {
+  const registry = createRegistry({ globalRoles: roles })
+  const worktree = {
+    path: 'D:/proj/.meetingstone/worktrees/op-2',
+    branch: 'meetingstone/op-2',
+    baseSha: 'abc',
+    repositoryRoot: 'D:/proj',
+    operationId: 'op-2',
+  }
+  const worktrees = { async create() { return worktree } }
+
+  const throwing = createDispatcher({
+    registry,
+    adapter: { start: async () => { throw new Error('spawn ENOENT') } },
+    worktrees,
+    limits: { defaultIsolation: 'worktree' },
+  })
+  const failed = await throwing.dispatch({
+    role: 'SS',
+    task: 'x',
+    projectKey: 'D:/proj',
+    projectRoot: 'D:/proj',
+  })
+  assert.equal(failed.ok, false)
+  assert.equal(failed.path, worktree.path)
+  assert.equal(failed.branch, worktree.branch)
+  assert.equal(failed.residualPath, worktree.path)
+
+  const empty = createDispatcher({
+    registry,
+    adapter: { start: async () => ({}) },
+    worktrees,
+    limits: { defaultIsolation: 'worktree' },
+  })
+  const noRef = await empty.dispatch({
+    role: 'SS',
+    task: 'x',
+    projectKey: 'D:/proj',
+    projectRoot: 'D:/proj',
+  })
+  assert.equal(noRef.ok, false)
+  assert.equal(noRef.code, DISPATCH_ERRORS.ADAPTER_FAILED)
+  assert.equal(noRef.path, worktree.path)
+  assert.equal(noRef.branch, worktree.branch)
+  assert.equal(noRef.residualPath, worktree.path)
+})

@@ -126,7 +126,7 @@
 | `isolation` 不是 `none`/`worktree` | `INVALID_ISOLATION` |
 | 取消/卸载时宿主 `dispose()` 超时 | `ADAPTER_DISPOSE_TIMEOUT`：写终态（`stopConfirmed:false`）并**保留**并发槽位/隔离互斥，等 activation.result 落定后自动释放 |
 | 取消/卸载时宿主 `dispose()` 抛错 | `ADAPTER_DISPOSE_FAILED`：写终态（`stopConfirmed:false`）并**保留**并发槽位/隔离互斥，等 activation.result 落定后自动释放 |
-| 插件已卸载时仍有启动请求 | `ADAPTER_DISPOSED`：拒绝启动；启动中的 activation 返回后立即 dispose，不登记为存活任务 |
+| 插件已卸载时仍有启动请求 | `ADAPTER_DISPOSED`：拒绝启动；启动中的 activation 在卸载后返回时先 dispose，确认停止才释放占位槽位。dispose 抛错/超时时**保留句柄与槽位**，写 `interrupted + stopConfirmed:false + error` 终态，等 result 落定后再释放；错误码原样透传，不归入 `ADAPTER_FAILED` |
 
 ## 6. 生命周期、runtimeId 与 interrupted
 
@@ -138,16 +138,25 @@
 - **重启后的假 running**：读取时若 `status === 'running'` 且 `runtimeId` 不是当前进程的，投影为
   `status: 'interrupted'` + `interrupted: true`；只改返回值，不回写磁盘。
 - **插件卸载**：对内存中仍存活的任务写 `interrupted` 终态（`stopReason: 'plugin-disposed'`），
-  不会在磁盘留下假 `running`。`dispose` 未确认的任务保留槽位并记 `stopConfirmed:false`；
-  "启动中"（`startActivation` 尚未返回）的 activation 也会被取消，返回后立即 dispose，绝不在卸载后登记。
+  不会在磁盘留下假 `running`。每个句柄独立收尾：一个 `dispose` 阻塞不会拖住其他句柄的终态。
+  `dispose` 未确认的任务保留槽位并记 `stopConfirmed:false`；等待期间 result 已落定的任务
+  也照常写终态，并记 `stopConfirmed:true`。
+  "启动中"（`startActivation` 尚未返回）的 activation 会被冻结；返回后确认 dispose 成功才释放
+  占位槽位，绝不在卸载后登记为存活任务。
 - **工作树记录**：终态记录包含 `worktree: { path, branch, baseSha, repositoryRoot, operationId }`、
   `changedFiles`、`changedFilesUnknown`、`changedFilesTruncated`、`changedFilesTotal`、`stopConfirmed`。
   `changedFiles` 最多写 5000 条（另有 2MB 字节预算），超出时 `changedFilesTruncated:true` 并保留总数。
+  体积闸兜底时**同时**裁剪 `changedFiles` 与 `overlapWarnings`，避免写出自己读不回的记录。
   带 `worktree` 的记录**不参与** 100 条/30 天自动清理（保护未合并成果的元数据）；
   超大或无法解析的记录同样按 fail-safe **不删除**。工作树/分支本身一律不自动删除。
 - **重叠预警**：`get_task` / `list_runs` 返回 `overlapWarnings: [{ childId, files }]`；
-  终态写入时也会把当时的交集写进原始 JSON（读取时仍可重算）。
+  终态写入时在**项目级异步互斥**内计算并回写：写当前记录后，把交集有界地回写到参与交集的
+  历史记录，因此并发结束顺序任意，双方原始 JSON 都含交集。
+  `overlapWarnings` 每对最多 50 个文件、整个字段最多 64KB（JSON 转义后），超限时写
+  `overlapTruncated:true` / `overlapTotal:<原始文件总数>`。
   `changedFilesUnknown: true` 的记录不参与比较，但会在结果里标注未知。
+- **失败上下文**：`WORKTREE_*` 失败结果保留 `path` / `branch` / `phase` / `residualPath`；
+  带工作树的启动失败同样保留工作树路径与分支，便于人工定位残留。
 
 ## 7. 示例
 

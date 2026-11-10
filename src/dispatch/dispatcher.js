@@ -43,6 +43,8 @@ export const DISPATCH_ERRORS = Object.freeze({
   INVALID_TASK: 'INVALID_TASK',
   INVALID_ISOLATION: 'INVALID_ISOLATION',
   ADAPTER_FAILED: 'ADAPTER_FAILED',
+  // 适配器生命周期错误码：原样透传，调用方才能区分「卸载拒绝」与「启动失败」
+  ADAPTER_DISPOSED: 'ADAPTER_DISPOSED',
   // 适配器的前置校验错误码：原样透传，便于调用方分支处理（而不是一律 ADAPTER_FAILED）
   MODEL_UNSUPPORTED: 'MODEL_UNSUPPORTED',
   PATH_OUTSIDE_PROJECT: 'PATH_OUTSIDE_PROJECT',
@@ -66,6 +68,7 @@ const PASSTHROUGH_PREFIXES = [
   'PROJECT_ROOT_UNKNOWN',
   'PARENT_AGENT_UNAVAILABLE',
   'PROVIDER_UNAVAILABLE',
+  'ADAPTER_DISPOSED',
 ]
 
 /** 工作树错误码前缀（dispatcher 自己抛/透传）。 */
@@ -84,6 +87,47 @@ export const ISOLATION_MODES = Object.freeze(['none', 'worktree'])
 function adapterErrorCode(raw) {
   const head = raw.split(':')[0]?.trim() ?? ''
   return PASSTHROUGH_PREFIXES.includes(head) ? head : DISPATCH_ERRORS.ADAPTER_FAILED
+}
+
+/**
+ * 提取失败上下文（工作树 path/branch/phase 等）。
+ *
+ * 为什么必须在 dispatcher 层做：`WORKTREE_*` 的三阶段异常（list / 预检分支 / 锁内分支检查）
+ * 在 worktree.js 里都带 path/branch/phase，但 dispatcher 原来只挑 residualPath，
+ * 调用方拿到失败结果后无法定位是哪一步、哪个分支（F5）。
+ * 顶层字段优先，其次 `details`（WorktreeError 两种都带）。
+ *
+ * @param {unknown} err
+ * @param {any} [worktree] 已创建的工作树元数据（适配器启动阶段失败时没有 err.path）
+ * @returns {{ path?: string, branch?: string, phase?: string, residualPath?: string }}
+ */
+function errorContext(err, worktree) {
+  const source = err && typeof err === 'object' ? /** @type {any} */ (err) : {}
+  const details =
+    source.details && typeof source.details === 'object' ? source.details : {}
+  /** @param {string} key */
+  const pick = (key) => {
+    const direct = source[key]
+    if (typeof direct === 'string' && direct) return direct
+    const nested = details[key]
+    if (typeof nested === 'string' && nested) return nested
+    return undefined
+  }
+  const path =
+    pick('path') ??
+    (typeof worktree?.path === 'string' && worktree.path ? worktree.path : undefined)
+  const branch =
+    pick('branch') ??
+    (typeof worktree?.branch === 'string' && worktree.branch ? worktree.branch : undefined)
+  const phase = pick('phase')
+  const residualPath =
+    pick('residualPath') ?? path
+  return {
+    ...(path ? { path } : {}),
+    ...(branch ? { branch } : {}),
+    ...(phase ? { phase } : {}),
+    ...(residualPath ? { residualPath } : {}),
+  }
 }
 
 /**
@@ -186,7 +230,8 @@ function positiveInteger(value, fallback) {
  * @typedef {{ ok: true, taskRef: object, role: object, startedAt: number, isolation?: string,
  *             operationId?: string, worktree?: object }
  *   | { ok: false, code: string, message: string, role?: object,
- *       operationId?: string, worktree?: object, residualPath?: string }} DispatchResult
+ *       operationId?: string, worktree?: object, residualPath?: string,
+ *       path?: string, branch?: string, phase?: string }} DispatchResult
  */
 
 /**
@@ -442,15 +487,10 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
           typeof rawCode === 'string' && rawCode.startsWith(WORKTREE_CODE_PREFIX)
             ? rawCode
             : DISPATCH_ERRORS.WORKTREE_GIT_FAILED
-        const residualPath =
-          typeof /** @type {any} */ (err)?.path === 'string'
-            ? /** @type {any} */ (err).path
-            : typeof /** @type {any} */ (err)?.details?.path === 'string'
-              ? /** @type {any} */ (err).details.path
-              : undefined
         return fail(code, `创建工作树失败：${errorMessage(err)}`, {
           operationId,
-          ...(residualPath ? { residualPath } : {}),
+          // path/branch/phase/residualPath 全部透传：三阶段异常都靠它们定位（F5）
+          ...errorContext(err),
         })
       }
       if (!worktree || typeof worktree.path !== 'string' || !worktree.path) {
@@ -493,18 +533,23 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
         onFinish,
       })
     } catch (err) {
-      release(token)
+      // 适配器明确要求保留槽位（例如卸载后迟到 activation 的 dispose 未确认）时不得释放：
+      // 停止状态未确认，释放槽位会让仍可能存活的进程绕过并发纪律（F1）。
+      const slotPreserved = /** @type {any} */ (err)?.slotPreserved === true
+      if (!slotPreserved) release(token)
       const raw = err instanceof Error ? err.message : String(err)
       return fail(adapterErrorCode(raw), `派发失败：${raw}`, {
         ...(operationId ? { operationId } : {}),
-        ...(worktree ? { worktree, residualPath: worktree.path } : {}),
+        ...(worktree ? { worktree } : {}),
+        ...errorContext(err, worktree),
       })
     }
     if (!started || !started.taskRef) {
       release(token)
       return fail(DISPATCH_ERRORS.ADAPTER_FAILED, '派发失败：适配器没有返回任务引用', {
         ...(operationId ? { operationId } : {}),
-        ...(worktree ? { worktree, residualPath: worktree.path } : {}),
+        ...(worktree ? { worktree } : {}),
+        ...errorContext(null, worktree),
       })
     }
 
@@ -590,7 +635,8 @@ function errorMessage(error) {
 /**
  * @param {string} code
  * @param {string} message
- * @param {{ operationId?: string, worktree?: object, residualPath?: string }} [extra]
+ * @param {{ operationId?: string, worktree?: object, residualPath?: string,
+ *           path?: string, branch?: string, phase?: string }} [extra]
  * @returns {{ ok: false, code: string, message: string }}
  */
 function fail(code, message, extra) {

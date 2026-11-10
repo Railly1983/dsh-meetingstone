@@ -11,10 +11,14 @@ import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 
 import { apply } from '../src/index.js'
-import { createDispatcher, DISPATCH_ERRORS } from '../src/dispatch/dispatcher.js'
+import {
+  createDispatcher,
+  DISPATCH_ERRORS,
+  resolveProjectKey,
+} from '../src/dispatch/dispatcher.js'
 import { createRegistry } from '../src/roles/registry.js'
 import { createRunStore, RUNS_RELATIVE_DIR } from '../src/run-store.js'
 import { WORKTREE_ERRORS } from '../src/worktree.js'
@@ -200,9 +204,17 @@ test('同仓库路径别名不绕限：尾斜杠/Windows 大小写折叠到同�
 
 test('同目录别名（原路径 vs src/..）不绕项目额度与隔离互斥（realpath）', async () => {
   const root = await mkdtemp(join(tmpdir(), 'mt-alias-'))
-  const alias = join(root, 'src', '..')
+  // 注意：不能用 join(root,'src','..')——path.join 会把它规范化成 root，
+  // 等于根本没测到别名（悟空复核指出）。必须保留 `..` 字面量。
+  const alias = `${root}${sep}src${sep}..`
   try {
     await mkdir(join(root, 'src'), { recursive: true })
+    assert.notEqual(alias, root, '别名输入必须与真实路径字面不同，否则测不到归一化')
+    assert.equal(
+      await resolveProjectKey(alias),
+      await resolveProjectKey(root),
+      'realpath 必须把 src/.. 折回同一个项目键',
+    )
     const { dispatcher } = makeDispatcher({
       limits: {
         defaultIsolation: 'worktree',
@@ -452,6 +464,17 @@ async function readRun(root, childId) {
   return JSON.parse(await readFile(join(root, RUNS_RELATIVE_DIR, `${childId}.json`), 'utf8'))
 }
 
+/**
+ * 真实执行区间是否重叠：`A.start < B.end && B.start < A.end`。
+ * 必须用落盘记录的 startedAt/finishedAt（真实执行区间），
+ * 不能用“检查时的 Date.now()”——悟空已用变异证明那种写法可假通过。
+ * @param {{ startedAt: number, finishedAt: number }} a
+ * @param {{ startedAt: number, finishedAt: number }} b
+ */
+function intervalsOverlap(a, b) {
+  return a.startedAt < b.finishedAt && b.startedAt < a.finishedAt
+}
+
 /** @param {string} root @param {string} childId */
 function waitCompleted(root, childId, timeoutMs = 8000) {
   return waitFor(async () => {
@@ -585,26 +608,71 @@ test('真实并行：两任务时间重叠、两棵不同工作树、各自真�
     assert.equal(existsSync(join(root, `${a.taskRef.childId}.txt`)), false, '改动不得落主工作区')
     assert.equal(existsSync(join(root, `${b.taskRef.childId}.txt`)), false)
 
-    // 时间重叠：B 启动时 A 仍在执行；A 结束后 B 才结束
-    const aFinishedAtBeforeB = Date.now()
-    assert.ok(a.startedAt <= b.startedAt, 'A 先启动')
-    assert.ok(b.startedAt < aFinishedAtBeforeB, `B 启动时 A 必须仍在执行（B=${b.startedAt} A-resolve=${aFinishedAtBeforeB}）`)
-
+    // 真实时间重叠：用落盘记录里的 startedAt/finishedAt（真实执行区间），
+    // 要求 A.start < B.end && B.start < A.end。
+    // 不能只看「B 启动时 Date.now() 早于 A 被 resolve」——provider 在启动返回前完成时，
+    // dispatch 返回的 startedAt 已经是执行结束之后，那种断言会假通过（悟空变异实证）。
     subagents.pending.find((p) => p.childId === a.taskRef.childId)?.resolve({
       stopReason: 'completed',
       output: [],
     })
     await waitCompleted(root, a.taskRef.childId)
-    const aFinishedAt = Date.now()
     subagents.pending.find((p) => p.childId === b.taskRef.childId)?.resolve({
       stopReason: 'completed',
       output: [],
     })
     await waitCompleted(root, b.taskRef.childId)
-    const bFinishedAt = Date.now()
 
-    const overlapMs = Math.min(aFinishedAt, bFinishedAt) - Math.max(a.startedAt, b.startedAt)
-    assert.ok(overlapMs > 0, `两个任务必须有真实时间重叠，实际 ${overlapMs}ms`)
+    const aRecord = await readRun(root, a.taskRef.childId)
+    const bRecord = await readRun(root, b.taskRef.childId)
+    assert.equal(typeof aRecord.startedAt, 'number', '记录必须带真实 startedAt')
+    assert.equal(typeof aRecord.finishedAt, 'number', '记录必须带真实 finishedAt')
+    assert.equal(typeof bRecord.startedAt, 'number', '记录必须带真实 startedAt')
+    assert.equal(typeof bRecord.finishedAt, 'number', '记录必须带真实 finishedAt')
+    assert.ok(aRecord.startedAt <= bRecord.startedAt, 'A 先启动')
+    assert.ok(
+      intervalsOverlap(aRecord, bRecord),
+      `两个任务的真实执行区间必须重叠：A=[${aRecord.startedAt},${aRecord.finishedAt}] ` +
+        `B=[${bRecord.startedAt},${bRecord.finishedAt}]`,
+    )
+  } finally {
+    await removeRepo(root)
+  }
+})
+
+test('反例：串行执行（A 完成后再启动 B）必须被真实区间断言判为不重叠', async () => {
+  const { root } = await makeRepo({ '.gitignore': '.meetingstone/\n' })
+  try {
+    const subagents = controllableSubagents()
+    const { tool } = applyPlugin(root, subagents)
+    const dispatch = tool('meetingstone_dispatch')
+
+    const a = await dispatch.execute({ role: 'SS', task: 'a' }, execFor(root))
+    assert.equal(a.ok, true, JSON.stringify(a))
+    subagents.pending.find((p) => p.childId === a.taskRef.childId)?.resolve({
+      stopReason: 'completed',
+      output: [],
+    })
+    await waitCompleted(root, a.taskRef.childId)
+    const aRecord = await readRun(root, a.taskRef.childId)
+
+    // A 的终态落盘后才启动 B：这是货真价实的串行
+    const b = await dispatch.execute({ role: 'SS', task: 'b' }, execFor(root))
+    assert.equal(b.ok, true, JSON.stringify(b))
+    subagents.pending.find((p) => p.childId === b.taskRef.childId)?.resolve({
+      stopReason: 'completed',
+      output: [],
+    })
+    await waitCompleted(root, b.taskRef.childId)
+    const bRecord = await readRun(root, b.taskRef.childId)
+
+    assert.ok(aRecord.finishedAt <= bRecord.startedAt, '串行区间必须首尾相接')
+    assert.equal(
+      intervalsOverlap(aRecord, bRecord),
+      false,
+      `串行执行不得被误判为重叠：A=[${aRecord.startedAt},${aRecord.finishedAt}] ` +
+        `B=[${bRecord.startedAt},${bRecord.finishedAt}]`,
+    )
   } finally {
     await removeRepo(root)
   }
@@ -913,6 +981,50 @@ test('重叠：两棵树改同一文件 → 双方 overlapWarnings 命中；未�
       false,
       '不同文件不应误报',
     )
+  } finally {
+    await removeRepo(root)
+  }
+})
+
+test('并发 overlap：两棵真实工作树同时改 shared.txt，并发落盘后双方原始 JSON 都含交集（F3）', async () => {
+  const { root } = await makeRepo({ 'shared.txt': 'shared\n' })
+  try {
+    const subagents = controllableSubagents({
+      onStart: async (item) => {
+        await writeFile(join(item.spec.request.cwd, 'shared.txt'), `${item.childId}\n`, 'utf8')
+      },
+    })
+    const { tool } = applyPlugin(root, subagents)
+    const dispatch = tool('meetingstone_dispatch')
+    const a = await dispatch.execute({ role: 'SS', task: 'a' }, execFor(root))
+    const b = await dispatch.execute({ role: 'SS', task: 'b' }, execFor(root))
+    assert.equal(a.ok && b.ok, true, JSON.stringify({ a, b }))
+
+    // 同时结束：两个终态写入必须互斥完成「写当前 + 回写对方」
+    subagents.pending.find((p) => p.childId === a.taskRef.childId)?.resolve({
+      stopReason: 'completed',
+      output: [],
+    })
+    subagents.pending.find((p) => p.childId === b.taskRef.childId)?.resolve({
+      stopReason: 'completed',
+      output: [],
+    })
+    await waitCompleted(root, a.taskRef.childId)
+    await waitCompleted(root, b.taskRef.childId)
+
+    for (const [own, other] of [
+      [a, b],
+      [b, a],
+    ]) {
+      const raw = await readRun(root, own.taskRef.childId)
+      const warning = raw.overlapWarnings.find((w) => w.childId === other.taskRef.childId)
+      assert.ok(
+        warning,
+        `${own.taskRef.childId} 的原始 JSON 必须记录与 ${other.taskRef.childId} 的交集：` +
+          JSON.stringify(raw.overlapWarnings),
+      )
+      assert.ok(warning.files.includes('shared.txt'), '交集必须包含 shared.txt')
+    }
   } finally {
     await removeRepo(root)
   }
