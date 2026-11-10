@@ -17,8 +17,7 @@
         "model": "gpt-6-astra"
       },
       "enabled": true,
-      "timeoutMs": 3600000,
-      "permissionPreset": "project-write"
+      "timeoutMs": 3600000
     },
     {
       "roleId": "role-wukong",
@@ -36,8 +35,7 @@
         "model": "gpt-6.1-sol"
       },
       "enabled": true,
-      "timeoutMs": 3600000,
-      "permissionPreset": "project-write"
+      "timeoutMs": 3600000
     },
     {
       "roleId": "role-bajie",
@@ -54,8 +52,7 @@
         "provider": "spawn"
       },
       "enabled": false,
-      "timeoutMs": 3600000,
-      "permissionPreset": "project-write"
+      "timeoutMs": 3600000
     },
     {
       "roleId": "role-sashi",
@@ -72,8 +69,7 @@
         "provider": "acp"
       },
       "enabled": true,
-      "timeoutMs": 3600000,
-      "permissionPreset": "project-write"
+      "timeoutMs": 3600000
     },
     {
       "roleId": "role-xiaobai",
@@ -90,8 +86,7 @@
         "provider": "acp-hy4"
       },
       "enabled": true,
-      "timeoutMs": 3600000,
-      "permissionPreset": "project-write"
+      "timeoutMs": 3600000
     }
   ],
   "dispatchNotes": "分工原则：唐僧能力最强、额度有限，只有最重要的事（架构/战略/关键决策/最终把关）才找他；悟空处理高难任务与审核验收；沙僧与小白是干活主力，常规任务优先给他们；八戒负责调度、监工、整合，一般不亲自干活。"
