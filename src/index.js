@@ -42,7 +42,18 @@ try {
   hostDefineTool = undefined
 }
 
-export { Config }
+/**
+ * 注意：这里**不导出** `Config`。
+ *
+ * 原因（2026-11-10 真机定位）：宿主的 profile loader 会对插件导出的 `Config`
+ * 做 Schemastery → JSON Schema 的静态投影（`dsh-app-boot` 里的 `validator.validate`），
+ * 我们的零依赖 schema 不具备那套结构，导致 profile 启动时该行直接
+ * `fiberPhase: failed`（diagnostic: "Cannot read properties of undefined (reading 'validate')"），
+ * 插件整个不加载、工具全部消失。
+ *
+ * 因此配置由 `apply()` 内部校验，宿主侧不再参与投影。
+ * 代价：没有自动生成的设置表单（第一版本来就不做 UI）。
+ */
 // 需要的宿主服务：
 // - tools：工具注册（dsh-tools 的 defineTool 走这一层）
 // - subagents：派单通道与可用性查询（Cordis 里不声明就访问会抛 "cannot get property ... without inject"）
@@ -54,17 +65,28 @@ export const name = 'meetingstone'
 /** 包名，与 package.json 的 name 一致（补丁按包名解析入口）。 */
 export const PACKAGE_NAME = 'dsh-meetingstone'
 
-export const PLUGIN_VERSION = '0.0.1'
+export const PLUGIN_VERSION = '0.0.2'
 
 /**
  * 插件入口。
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx
- * @param {object} [config] 由 Loader 按导出的 `Config` schema 校验后的配置
+ * @param {object} [config] 原始配置（宿主不再按导出的 schema 校验，见上方说明）
  */
 export function apply(ctx, config = {}) {
-  // Loader 通常已校验过；这里再兜一次，避免直接调用时拿到脏值。
-  const cfg = Config(/** @type {any} */ (config) ?? {})
+  // 配置校验在这里做。**坏配置不能拖垮整个插件**：记一条告警、回落到默认值，
+  // 让工具仍然可用（角色表为空时 list_roles 会如实返回空，而不是插件消失）。
+  let cfg
+  try {
+    cfg = Config(/** @type {any} */ (config) ?? {})
+  } catch (err) {
+    cfg = Config({})
+    const line = `[${name}] config invalid, falling back to defaults: ${
+      err instanceof Error ? err.message : String(err)
+    }`
+    if (typeof ctx.logger?.warn === 'function') ctx.logger.warn(line)
+    else console.warn(line)
+  }
 
   // 角色来源：全局配置 + 当前会话项目根的 `.meetingstone.json`（按 mtime 缓存）
   const projectStore = createNodeProjectConfigStore()

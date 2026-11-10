@@ -22,6 +22,11 @@ $node = "$env:USERPROFILE\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\nod
 
 **门禁不过，不许装进任何真实 profile。** 理由见 `docs/audit/13-incident-tool-schema.md`（一个非法工具 schema 能让整个 profile 的所有会话不可用）。
 
+## 改文件的硬规矩
+
+**不要用 PowerShell 的 `Get-Content` / `Set-Content` 改写含中文的源文件**——已经三次把 UTF-8 变成乱码或吃掉换行。
+用编辑工具，或 Node 的 `fs.readFileSync(...,'utf8')` / `writeFileSync(...,'utf8')`。
+
 ## 改动守则
 
 1. **复用优先**：团队/项目/任务/会话/权限/统计一律用 DSH 原生，先证明缺口再写代码（`docs/audit/00-summary.md` 的 A/B/C 分类）。

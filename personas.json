@@ -18,7 +18,7 @@
     },
     {
       "name": "八戒",
-      "cli": "host",
+      "cli": "harness",
       "model": "deepseek-flash",
       "effort": "high",
       "summary": "技术主管",

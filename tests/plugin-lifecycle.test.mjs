@@ -56,7 +56,7 @@ test('apply 注册 effect 与五个工具', () => {
 test('生命周期：loaded 后 disposed，且整体 dispose 幂等', () => {
   const { ctx, disposers, logs } = makeCtx()
   apply(ctx)
-  assert.ok(logs.some((l) => /loaded v0\.0\.1/.test(l)))
+  assert.ok(logs.some((l) => l.includes(`loaded v${PLUGIN_VERSION}`)))
 
   disposeAll(disposers)
   assert.ok(logs.some((l) => /disposed/.test(l)))
