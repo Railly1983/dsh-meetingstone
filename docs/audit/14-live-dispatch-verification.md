@@ -175,3 +175,48 @@ when using Codex with a ChatGPT account. (code: model_not_found)
 ```
 
 这也再次验证 DD7 的判断：**模型只能由 provider 行承载**，插件层写 model 无意义。
+
+## 8. CodeBuddy（acp）通道验证成功（2026-11-10 21:46）
+
+前置两件事：
+
+1. 装 `@deepseek-ai/dsh-subagent-acp@0.2.2-rc.1`——它**不声明 `dsh.bundle`**，只装依赖、不产生配置层。
+2. 在 profile 的 `cordis.patch.yml` 里**用 `insert:` 包裹**新增一行。
+
+```yaml
+- insert:
+    - id: subagent-acp
+      name: '@deepseek-ai/dsh-subagent-acp'
+      config:
+        providerName: acp
+        command: '<宿主 node.exe>'
+        args: ['<codebuddy bin 脚本>', '--acp']
+        permission: allow
+```
+
+结果：
+
+```json
+{"ok":true,"taskRef":{"provider":"acp","childId":"03fbdc25-f789-4098-8e0e-6e73f5c56a18"}}
+{"status":"completed","stopReason":"completed","output":"PONG"}
+```
+
+### 8.1 两个关键坑（都踩过）
+
+| 坑 | 事实 |
+| --- | --- |
+| **stdin 必须保持打开** | `codebuddy --acp` 启动后立刻关 stdin 会崩在 headless 初始化（`Failed to start the backend application`）。早期探测因此误判"不可用"。单独验证过 ACP 握手（`initialize` → 返回 `agentCapabilities`） |
+| **insert 包裹** | 用户补丁里裸的 `- id: xxx` 表示**覆盖已存在行**；目标行不存在时被**静默忽略**（现象：插件清单里根本没有该行，也没有 failed 记录）。新增行必须写在 `- insert:` 列表下 |
+
+### 8.2 角色人设注入（替代 CLIWorker 的 persona）
+
+派单提示词形如：`你是「沙僧」。<prompt>\n\n任务：<task>`。
+`prompt` 缺失时回退到 `description`，两者都没有则只发任务正文。已加回归测试。
+
+### 8.3 三条通道汇总
+
+| 通道 | 状态 | 备注 |
+| --- | --- | --- |
+| `in-process`（spawn/fork） | ✅ | 原生可见、并发串行、槽位释放均已验证 |
+| `codex` | ✅ | 模型必须固定在 provider 行（账号仅接受 `gpt-5.6-sol`） |
+| `acp-cli`（CodeBuddy） | ✅ | stdin 常开 + node 启动 bin |

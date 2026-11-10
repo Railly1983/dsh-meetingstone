@@ -23,7 +23,7 @@
 
 | 能力 | 说明 | 影响 |
 | --- | --- | --- |
-| **CodeBuddy（acp 通道）** | 需要 `@deepseek-ai/dsh-subagent-acp`（非 bundle）+ 手写 `subagent-acp` 行（`command`/`args`）。不过 CodeBuddy 无头入口在本机非 TTY 下会崩（`-p`/`--acp` 都 exit 1），真实可用的 ACP 启动参数尚未确定 | 沙僧/小白这类 CodeBuddy 角色目前派不出去 |
+| ~~CodeBuddy（acp 通道）~~ | ✅ **2026-11-10 已打通**：装 `@deepseek-ai/dsh-subagent-acp` + `insert` 一行；关键是 stdin 必须保持打开、用 node 启动 bin | 已解决 |
 | **Claude Code 通道** | bundle 存在，但本机未安装 Claude CLI；provider 自带 pinned CLI，未实测 | 若需要 Claude 角色，需单独验证 |
 | **会话续聊（followup）** | 我们现在是一次性 activation；宿主有 `prepareContinuable`，但未接 | 不能像 CLIWorker 那样"让沙僧接着改" |
 | **隔离副本 + 合回（merge back）** | CLIWorker 每个 worker 在隔离副本里干活再合回；我们直接在宿主 workspace 执行 | 多 worker 并行改同一仓库时，没有它的"隔离→合并"保护（宿主有 `dsh-experimental-tool-worktree` 可考虑接入） |
@@ -38,5 +38,12 @@
 
 ## 4. 结论
 
-**现在还不能关。** codex 与 in-process 已经可用，但 CodeBuddy 通道（你最常用的"沙僧/小白"主力）还没打通。
-建议保留 CLIWorker 直到 acp 通道验证通过；届时再按 §3 的顺序切换。
+**2026-11-10 更新：三条通道（codex / codebuddy-acp / in-process）均已真机验证通过，角色人设注入已实现。**
+CLIWorker 已在 profile 里 `disabled: true`（可逆，删掉那两行或改 false 即恢复）。
+
+剩余差异只有两项，按需再补：
+
+| 差异 | 影响 | 何时需要补 |
+| --- | --- | --- |
+| **会话续聊（followup）** | 不能对同一个子 Agent 追加指令，只能重新派单 | 当你需要"让沙僧接着改刚才那段"时 |
+| **隔离副本 + 合回** | 多个 worker 并行改同一仓库没有隔离保护 | 当你需要并行派多个写任务时（可考虑接宿主 worktree 工具） |
