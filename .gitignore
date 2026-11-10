@@ -1,0 +1,29 @@
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+.turbo/
+
+# 日志与临时文件
+*.log
+logs/
+tmp/
+.tmp/
+
+# 本地覆盖配置（不进仓库）
+.meetingstone.local.json
+.env
+.env.*
+!.env.example
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 测试与覆盖率
+coverage/
+*.lcov
