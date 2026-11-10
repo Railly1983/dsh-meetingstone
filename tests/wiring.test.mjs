@@ -1,0 +1,132 @@
+// @ts-check
+/**
+ * 装配层的集成测试：用假 ctx 走一遍 apply()，确认
+ *  配置 → 注册表 → 派单器 → 三个工具 真的接上了。
+ *
+ * 这里不碰 DSH 运行时；真实 provider 行为的验收在阶段 2 的真机联调里做。
+ */
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+import { apply, inject, name, PLUGIN_VERSION } from '../src/index.js'
+
+/** 记录注册了哪些工具，并提供最小可用的 ctx 形状。 */
+function makeCtx() {
+  const tools = []
+  const logs = []
+  const disposers = []
+  const ctx = {
+    effect(fn, label) {
+      assert.equal(typeof label, 'string')
+      disposers.push(fn())
+    },
+    tools: {
+      register(tool) {
+        tools.push(tool)
+        return () => {}
+      },
+    },
+    logger: {
+      info(line) {
+        logs.push(line)
+      },
+    },
+    // 故意不提供 subagents：适配器应在派单时失败关闭，而不是加载即崩
+  }
+  return { ctx, tools, logs, disposers }
+}
+
+const config = {
+  roles: [
+    {
+      roleId: 'role-sashi',
+      name: '沙僧',
+      aliases: ['SS'],
+      channel: { kind: 'acp-cli', cli: 'codebuddy' },
+      permissionPreset: 'project-write',
+      enabled: true,
+    },
+    {
+      roleId: 'role-reviewer',
+      name: '审核员',
+      aliases: ['RV'],
+      channel: { kind: 'in-process' },
+      permissionPreset: 'read-only',
+      enabled: true,
+    },
+  ],
+  defaultRoleId: 'role-sashi',
+}
+
+test('inject 声明了 tools 依赖', () => {
+  assert.deepEqual(inject, ['tools'])
+})
+
+test('apply 注册三个工具且不抛错（即便宿主没有 subagents）', () => {
+  const { ctx, tools } = makeCtx()
+  apply(ctx, config)
+  assert.equal(tools.length, 3)
+  const names = tools.map((t) => t.name).sort()
+  assert.deepEqual(names, [
+    'meetingstone_cli_status',
+    'meetingstone_dispatch',
+    'meetingstone_list_roles',
+  ])
+  for (const t of tools) {
+    assert.equal(typeof t.execute, 'function', `${t.name} 缺少 execute`)
+    assert.ok(t.description && t.description.length > 5, `${t.name} 缺少描述`)
+  }
+})
+
+test('list_roles 返回配置里的角色', async () => {
+  const { ctx, tools } = makeCtx()
+  apply(ctx, config)
+  const listTool = tools.find((t) => t.name === 'meetingstone_list_roles')
+  const res = await listTool.execute({})
+  const roles = res?.roles ?? res
+  assert.ok(Array.isArray(roles), '应返回角色数组')
+  assert.equal(roles.length, 2)
+  assert.deepEqual(roles.map((r) => r.roleId).sort(), ['role-reviewer', 'role-sashi'])
+})
+
+test('dispatch 在宿主没有 subagents 时失败关闭，给出可诊断原因', async () => {
+  const { ctx, tools } = makeCtx()
+  apply(ctx, config)
+  const dispatchTool = tools.find((t) => t.name === 'meetingstone_dispatch')
+  const res = await dispatchTool.execute({ role: 'SS', task: '改个函数' })
+  assert.equal(res.ok, false)
+  assert.ok(
+    ['PROVIDER_UNAVAILABLE', 'PARENT_AGENT_UNAVAILABLE'].includes(res.code),
+    `应失败关闭，实际 code=${res.code}`,
+  )
+  assert.ok(res.message && res.message.length > 0)
+})
+
+test('dispatch 对未知角色报 ROLE_NOT_FOUND（不触达适配器）', async () => {
+  const { ctx, tools } = makeCtx()
+  apply(ctx, config)
+  const dispatchTool = tools.find((t) => t.name === 'meetingstone_dispatch')
+  const res = await dispatchTool.execute({ role: '不存在的人', task: 'x' })
+  assert.equal(res.ok, false)
+  assert.equal(res.code, 'ROLE_NOT_FOUND')
+})
+
+test('dispose 幂等，且在 dispose 后再次 dispose 不报错', () => {
+  const { ctx, disposers } = makeCtx()
+  apply(ctx, config)
+  assert.ok(disposers.length >= 1, '至少要有插件自己的生命周期 effect')
+  for (const d of disposers) assert.doesNotThrow(() => d())
+  for (const d of disposers) assert.doesNotThrow(() => d())
+})
+
+test('空配置也能加载（roles=0）', () => {
+  const { ctx, tools, logs } = makeCtx()
+  assert.doesNotThrow(() => apply(ctx, {}))
+  assert.equal(tools.length, 3)
+  assert.ok(logs.some((l) => l.includes('roles=0')))
+})
+
+test('插件标识与版本', () => {
+  assert.equal(name, 'meetingstone')
+  assert.match(PLUGIN_VERSION, /^\d+\.\d+\.\d+$/)
+})

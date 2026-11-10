@@ -31,6 +31,7 @@ export const DISPATCH_ERRORS = Object.freeze({
  * @property {string} task 任务内容
  * @property {string} [cwd] 目标目录；必须由调用方校验在项目内
  * @property {boolean} [readOnly] 覆盖角色的只读判定（只能在更严方向覆盖）
+ * @property {object} [context] 宿主上下文（如 exec.agent），原样透传给适配器
  */
 
 /**
@@ -40,6 +41,7 @@ export const DISPATCH_ERRORS = Object.freeze({
  * @property {string} [cwd]
  * @property {boolean} readOnly
  * @property {number} timeoutMs
+ * @property {object} [context] 由调用方透传的宿主上下文
  */
 
 /**
@@ -147,6 +149,8 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
         cwd: req.cwd,
         readOnly,
         timeoutMs: role.timeoutMs,
+        // 透传宿主上下文（如 exec.agent）：dispatcher 不解释它，只负责送到适配器
+        context: req.context,
       })
     } catch (err) {
       return fail(
