@@ -314,3 +314,31 @@ test('歧义角色：名字被挡，但 roleId 仍然可用（纠错提示不能
   const byId = await dispatcher.dispatch({ role: 'role-a', task: 'x' })
   assert.equal(byId.ok, true, '明确给 roleId 时不应被歧义挡住')
 })
+
+// ─── 适配器错误码透传（调用方可以分支处理） ─────────────────────────────────
+
+test('适配器前置校验错误码透传：READONLY_UNENFORCEABLE 不再被包成 ADAPTER_FAILED', async () => {
+  const registry = createRegistry({ globalRoles: roles })
+  const adapter = {
+    start: async () => {
+      throw new Error('READONLY_UNENFORCEABLE: 角色是只读档位，但没有引用任何通道实例')
+    },
+  }
+  const dispatcher = createDispatcher({ registry, adapter })
+  const res = await dispatcher.dispatch({ role: 'SS', task: 'x' })
+  assert.equal(res.ok, false)
+  assert.equal(res.code, 'READONLY_UNENFORCEABLE')
+  assert.match(res.message, /READONLY_UNENFORCEABLE/)
+})
+
+test('未知适配器错误仍归为 ADAPTER_FAILED', async () => {
+  const registry = createRegistry({ globalRoles: roles })
+  const adapter = {
+    start: async () => {
+      throw new Error('spawn ENOENT')
+    },
+  }
+  const dispatcher = createDispatcher({ registry, adapter })
+  const res = await dispatcher.dispatch({ role: 'SS', task: 'x' })
+  assert.equal(res.code, 'ADAPTER_FAILED')
+})

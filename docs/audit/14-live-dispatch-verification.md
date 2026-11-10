@@ -93,3 +93,40 @@ d52874f6-50e6-41fc-82db-218dd8950ff3 [running] — meetingstone:role-selftest
 
 **P2 的核心目标（按角色把任务派给宿主 provider 并拿到原生引用）已在真机达成。**
 剩余的是"读回结果 / 取消 / 只读实例 / 外部 provider"这类补全，属于 P2 收尾 + P3 范畴。
+
+
+## 6. 补验（2026-11-10 第二次重启后）
+
+工具补齐到 5 个后，又跑了一轮：
+
+### 6.1 结果回读（get_task）
+
+```json
+// dispatch
+{"ok":true,"taskRef":{"provider":"spawn","childId":"8a214462-64ac-4f74-a14d-b0aaa2e11d5d",...}}
+// get_task（约 1 秒后）
+{"childId":"8a214462-64ac-4f74-a14d-b0aaa2e11d5d","status":"completed","stopReason":"completed","output":"PONG"}
+```
+
+**结论**：子 Agent 的真实输出可以被读回，不是"派出去就不知道结果"。
+
+### 6.2 取消（cancel_task）
+
+```
+dispatch(数到 300) → childId b275997f-...
+cancel_task(b275997f-...) → {"ok":true,"cancelled":true}
+get_task(b275997f-...) → {"status":"cancelled","output":""}
+list_agents → b275997f-... [inactive]
+```
+
+取消后立刻再派一个写任务 → 成功，**说明槽位随取消一起释放**。
+
+### 6.3 只读拒绝（READONLY_UNENFORCEABLE）
+
+项目配置里加了一个只读角色，但没有引用任何通道实例：
+
+```json
+{"ok":false,"code":"ADAPTER_FAILED","message":"派发失败：READONLY_UNENFORCEABLE: 角色是只读档位，但没有引用任何通道实例，无法确认该通道真的只读。请在配置的 channels 里声明一个 permissionPreset: read-only 的实例，让角色用 channelId 引用它"}
+```
+
+拒绝符合预期（未启动任何子任务）。**改进已提交**：适配器前置校验的错误码现在会透传（`READONLY_UNENFORCEABLE` 不再被包成 `ADAPTER_FAILED`），下次重启生效。

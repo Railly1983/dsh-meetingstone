@@ -28,7 +28,32 @@ export const DISPATCH_ERRORS = Object.freeze({
   READONLY_LIMIT: 'READONLY_LIMIT',
   INVALID_TASK: 'INVALID_TASK',
   ADAPTER_FAILED: 'ADAPTER_FAILED',
+  // 适配器的前置校验错误码：原样透传，便于调用方分支处理（而不是一律 ADAPTER_FAILED）
+  READONLY_UNENFORCEABLE: 'READONLY_UNENFORCEABLE',
+  MODEL_UNSUPPORTED: 'MODEL_UNSUPPORTED',
+  PATH_OUTSIDE_PROJECT: 'PATH_OUTSIDE_PROJECT',
+  PROJECT_ROOT_UNKNOWN: 'PROJECT_ROOT_UNKNOWN',
+  PARENT_AGENT_UNAVAILABLE: 'PARENT_AGENT_UNAVAILABLE',
 })
+
+/** 适配器抛错串里可透传的错误码前缀。 */
+const PASSTHROUGH_PREFIXES = [
+  'READONLY_UNENFORCEABLE',
+  'MODEL_UNSUPPORTED',
+  'PATH_OUTSIDE_PROJECT',
+  'PROJECT_ROOT_UNKNOWN',
+  'PARENT_AGENT_UNAVAILABLE',
+  'PROVIDER_UNAVAILABLE',
+]
+
+/**
+ * 从适配器错误里取出可透传的错误码；取不到就归为 ADAPTER_FAILED。
+ * @param {string} raw
+ */
+function adapterErrorCode(raw) {
+  const head = raw.split(':')[0]?.trim() ?? ''
+  return PASSTHROUGH_PREFIXES.includes(head) ? head : DISPATCH_ERRORS.ADAPTER_FAILED
+}
 
 /** 未指定项目时的默认槽位键。 */
 export const DEFAULT_PROJECT_KEY = 'default'
@@ -216,10 +241,8 @@ export function createDispatcher({ registry, adapter, limits = {}, now = () => D
       })
     } catch (err) {
       active.delete(token)
-      return fail(
-        DISPATCH_ERRORS.ADAPTER_FAILED,
-        `派发失败：${err instanceof Error ? err.message : String(err)}`,
-      )
+      const raw = err instanceof Error ? err.message : String(err)
+      return fail(adapterErrorCode(raw), `派发失败：${raw}`)
     }
     if (!started || !started.taskRef) {
       active.delete(token)
