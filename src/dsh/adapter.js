@@ -99,6 +99,20 @@ export const ADAPTER_ERRORS = Object.freeze({
 /** 等待宿主 `activation.dispose()` 的默认上限（毫秒）。 */
 export const DEFAULT_DISPOSE_TIMEOUT_MS = 5000
 
+/**
+ * 宿主子 Agent 容量耗尽的错误码。
+ *
+ * 出处（2026-11-11 核对的宿主实现）：`@deepseek-ai/dsh-subagent` 的
+ * `ActivationPool.reserve(capacity)` 在池满时抛
+ * `new SubagentError('subagent limit reached (active child limit: 8); wait ...', 'ACTIVATION_LIMIT_REACHED')`。
+ * `maxActiveSubagents` 默认 **8**，是进程内共享池（宿主自己的子 Agent 与本插件派单都计入），
+ * 且**没有等待/排队机制**。这里只负责识别并原样透传，不在插件侧重复实现容量控制。
+ */
+export const HOST_ACTIVATION_LIMIT_CODE = 'ACTIVATION_LIMIT_REACHED'
+
+/** 没有 code 时的消息兜底识别（宿主消息以 `subagent limit reached` 开头）。 */
+const HOST_ACTIVATION_LIMIT_MESSAGE = /subagent limit reached/i
+
 /** provider 缺失时的统一提示片段（含各通道的安装前置条件，便于排障）。 */
 const PROVIDER_HINTS = Object.freeze({
   spawn: '需 dsh-base 的 dsh-subagent-spawn-in-process 行',
@@ -163,6 +177,32 @@ function lifecycleError(code, message, cause) {
     err.cause = cause
   }
   return err
+}
+
+/**
+ * 是否是宿主容量耗尽错误。宿主把码放在 `err.code`，消息里没有码前缀；
+ * 极少数包装层会丢掉 code，所以再按消息特征兜底识别一次。
+ * @param {unknown} err
+ */
+function isActivationLimitError(err) {
+  if (!err || typeof err !== 'object') return false
+  if (/** @type {any} */ (err).code === HOST_ACTIVATION_LIMIT_CODE) return true
+  return HOST_ACTIVATION_LIMIT_MESSAGE.test(errorMessage(err))
+}
+
+/**
+ * 把宿主容量错误包装成可透传的带码错误：
+ * dispatcher 按消息前缀/`err.code` 原样透出 `ACTIVATION_LIMIT_REACHED`，不归入 ADAPTER_FAILED。
+ * 消息里明确告诉调用方：容量是宿主共享池（默认 8），本项目不排队，只能等现有任务结束。
+ * @param {unknown} err
+ */
+function activationLimitError(err) {
+  return lifecycleError(
+    HOST_ACTIVATION_LIMIT_CODE,
+    '宿主子 Agent 并发已满（默认 8，宿主共享池），请等现有任务结束；本项目不排队。' +
+      `原始错误：${errorMessage(err)}`,
+    err,
+  )
 }
 
 /**
@@ -404,6 +444,57 @@ export function createDshAdapter(ctx, options = {}) {
   }
 
   /**
+   * 迟到结算的说明文案。
+   * @param {{ code?: string } | null} disposeError
+   * @param {string} [rejectedMessage]
+   */
+  function lateSettlementNote(disposeError, rejectedMessage) {
+    const cause =
+      disposeError?.code === ADAPTER_ERRORS.DISPOSE_TIMEOUT ? 'dispose timeout' : 'dispose failure'
+    return rejectedMessage
+      ? `late settlement: result rejected after ${cause}: ${rejectedMessage}`
+      : `late settlement: result settled after ${cause}`
+  }
+
+  /**
+   * 回填「迟到落定」的停止证据。
+   *
+   * 真机场景：取消/卸载时 dispose 超时，记录只能保守写 `stopConfirmed:false`；
+   * 之后宿主进程真的退出、`activation.result` 落定时，如果不回填，磁盘会永远停在
+   * "未确认停止"的错误状态。这里只在**已有终态且 stopConfirmed:false** 时回填：
+   * - `status` 保持 cancelled / interrupted，不把取消改写成 completed
+   * - `stopConfirmed` 改为 true（result 落定 = 进程已结束的可验证证据）
+   * - 追加 `diagnostic`，异常结算也如实记录原因
+   *
+   * @param {string} childId
+   * @param {any} handle 仍在 handles 里的句柄（提供 runBase，保证记录字段完整）
+   * @param {{ rejectedMessage?: string }} [outcome]
+   */
+  function backfillLateSettlement(childId, handle, outcome = {}) {
+    const prior = finished.get(childId)
+    if (!prior || prior.stopConfirmed !== false) return
+    if (prior.status !== 'cancelled' && prior.status !== 'interrupted') return
+    const disposeError =
+      prior.error && typeof prior.error === 'object'
+        ? /** @type {{ code?: string }} */ (prior.error)
+        : null
+    const note = lateSettlementNote(disposeError, outcome.rejectedMessage)
+    const updated = {
+      ...prior,
+      stopConfirmed: true,
+      diagnostic: prior.diagnostic ? `${prior.diagnostic}; ${note}` : note,
+    }
+    rememberFinished(childId, updated)
+    void emitRunFinish({
+      ...handle.runBase,
+      ...updated,
+      result: typeof updated.output === 'string' ? updated.output : '',
+      ...(updated.error ? { error: updated.error } : {}),
+      finishedAt: updated.at,
+    })
+  }
+
+  /**
    * 查询 provider 是否注册。**只信宿主返回值，不猜**。
    * 拿不到查询能力或查不到 provider，一律 ok:false。
    */
@@ -611,6 +702,9 @@ export function createDshAdapter(ctx, options = {}) {
       // 卸载时不再立刻释放占位槽位（见卸载 disposer）：启动失败由这里补释放，
       // 因为没有真实 activation 需要保留。
       if (placeholder.cancelled) callOnFinish(placeholder)
+      // 宿主容量耗尽：原样透传错误码，并补充"宿主共享池、默认 8、本项目不排队"的说明。
+      // dispatcher 按 ACTIVATION_LIMIT_REACHED 透出，不会包成 ADAPTER_FAILED。
+      if (isActivationLimitError(err)) throw activationLimitError(err)
       throw err
     }
     pendingStarts.delete(startKey)
@@ -665,6 +759,8 @@ export function createDshAdapter(ctx, options = {}) {
         diagnostic:
           `插件卸载：迟到 activation 的 dispose 失败（${disposeError.code}：${disposeError.message}），` +
           '进程可能仍存活，槽位保留至结果落定',
+        // 保留 dispose 错误（普通对象，便于迟到结算回填时继续落盘）
+        error: { code: disposeError.code, message: disposeError.message },
         at: startedAt,
       }
       rememberFinished(lateChildId, settled)
@@ -741,8 +837,11 @@ export function createDshAdapter(ctx, options = {}) {
         // 无论谁写终态，result 落定都意味着进程已停止；卸载/取消用它确认 stopConfirmed
         current.resultSettled = true
         // 取消/卸载已经开始收尾时，由那条路径写终态，避免"先 cancelled、又被 completed 覆盖"；
-        // 但 result 落定本身就是"进程已停止"的可验证证据，此时才允许释放保留的槽位。
+        // 但 result 落定本身就是"进程已停止"的可验证证据：
+        // - 若终端记录已经保守写成 stopConfirmed:false，回填 true（不伪造，但纠正迟到证据）
+        // - 此时才允许释放保留的槽位
         if (current.cancelling) {
+          backfillLateSettlement(childId, current)
           cleanup(childId)
           return
         }
@@ -771,6 +870,8 @@ export function createDshAdapter(ctx, options = {}) {
         if (!current) return
         current.resultSettled = true
         if (current.cancelling) {
+          // 迟到结果是异常/失败时也回填停止证据，并如实记录失败原因
+          backfillLateSettlement(childId, current, { rejectedMessage: errorMessage(err) })
           cleanup(childId)
           return
         }
@@ -888,15 +989,26 @@ export function createDshAdapter(ctx, options = {}) {
       try {
         // 2) 再写终态（claim 失败说明结果回调已先结算，不重复覆盖）
         if (claimSettlement(handle)) {
+          // dispose 超时/失败时，如果 result 在等待期间已经落定，那本身就是可验证的停止证据：
+          // 直接写 stopConfirmed:true，并注明迟到结算，避免先写 false 再立刻回填。
+          const settledByResult = handle.resultSettled === true
+          const stopConfirmed = !disposeError || settledByResult
+          const lateNote =
+            disposeError && settledByResult ? lateSettlementNote(disposeError) : null
           const settled = {
             status: 'cancelled',
             stopReason: 'cancelled',
-            // dispose 成功 = 确认已停；超时/失败时如实标 false（进程可能还活着）
-            stopConfirmed: !disposeError,
+            stopConfirmed,
             output: '',
             at: now(),
             ...(disposeError
-              ? { diagnostic: `activation.dispose 失败（${disposeError.code}）：${disposeError.message}` }
+              ? {
+                  diagnostic:
+                    `activation.dispose 失败（${disposeError.code}）：${disposeError.message}` +
+                    (lateNote ? `；${lateNote}` : ''),
+                  // 保留 dispose 错误（普通对象，便于迟到结算回填时继续落盘）
+                  error: { code: disposeError.code, message: disposeError.message },
+                }
               : {}),
           }
           rememberFinished(id, settled)
@@ -993,9 +1105,12 @@ export function createDshAdapter(ctx, options = {}) {
                   )
                 }
               }
-              // dispose 成功或 result 已落定（进程确实结束）都算可验证停止
               confirmed = !disposeError || handle.resultSettled === true
               if (claimSettlement(handle)) {
+                const lateNote =
+                  disposeError && handle.resultSettled === true
+                    ? lateSettlementNote(disposeError)
+                    : null
                 const settled = {
                   status: 'interrupted',
                   stopReason: 'plugin-disposed',
@@ -1003,8 +1118,12 @@ export function createDshAdapter(ctx, options = {}) {
                   stopConfirmed: confirmed,
                   output: '',
                   diagnostic: disposeError
-                    ? `插件卸载：任务被中断（activation.dispose 失败 ${disposeError.code}：${disposeError.message}）`
+                    ? `插件卸载：任务被中断（activation.dispose 失败 ${disposeError.code}：${disposeError.message}）` +
+                      (lateNote ? `；${lateNote}` : '')
                     : '插件卸载：任务被中断',
+                  ...(disposeError
+                    ? { error: { code: disposeError.code, message: disposeError.message } }
+                    : {}),
                   at: now(),
                 }
                 rememberFinished(id, settled)

@@ -7,11 +7,15 @@
  * - 不建任务队列、不存会话、不做重试策略、不渲染 UI
  * - 工作树管理由注入的 `worktrees`（src/worktree.js）负责
  *
- * 并发纪律（2026-11-11 悟空裁决后的并行版）：
- * - **先占槽、再启动**：两级额度（项目 / 全局）在**首次异步操作前**一起预占，
- *   包括建工作树；否则并发请求会同时通过检查
- * - **所有 provider 共用同一计数器**：额度属于 dispatcher 实例，不按通道分开
- * - **按项目隔离计数**：项目 key 先归一化（Windows 大小写 / 尾斜杠），别名不能绕限
+ * 并发纪律（2026-11-11 用户决策后的并行版）：
+ * - **先占槽、再启动**：本插件的全局额度在**首次异步操作前**预占，包括建工作树；
+ *   否则并发请求会同时通过检查
+ * - **只统计本插件派发的在跑任务**：额度属于 dispatcher 实例，不按通道/项目分开；
+ *   宿主自身的子 Agent 不在这里计数
+ * - **宿主容量交给宿主**：不重复实现单会话/进程上限；宿主 `ACTIVATION_LIMIT_REACHED`
+ *   （`subagent limit reached`，默认容量 8）原样透传，本项目**不排队**
+ * - **按项目隔离计数**：项目 key 先归一化（Windows 大小写 / 尾斜杠），别名不能绕过
+ *   隔离互斥（同项目 worktree 与 none 不得混跑）
  * - **由适配器回调释放**：`onFinish` 在任务终态（完成/失败/取消）时调用，幂等
  *
  * 隔离纪律：
@@ -38,8 +42,11 @@ export const DISPATCH_ERRORS = Object.freeze({
   ROLE_AMBIGUOUS: 'ROLE_AMBIGUOUS',
   PROVIDER_UNAVAILABLE: 'PROVIDER_UNAVAILABLE',
   WRITE_CONFLICT: 'WRITE_CONFLICT',
-  WRITE_LIMIT_PROJECT: 'WRITE_LIMIT_PROJECT',
   WRITE_LIMIT_TOTAL: 'WRITE_LIMIT_TOTAL',
+  // 宿主子 Agent 容量耗尽（共享池，默认 8）：原样透传，不包成 ADAPTER_FAILED。
+  // 出处：宿主 @deepseek-ai/dsh-subagent 的 ActivationPool.reserve() 抛
+  // SubagentError(msg, 'ACTIVATION_LIMIT_REACHED')，且**没有等待/排队机制**。
+  ACTIVATION_LIMIT_REACHED: 'ACTIVATION_LIMIT_REACHED',
   INVALID_TASK: 'INVALID_TASK',
   INVALID_ISOLATION: 'INVALID_ISOLATION',
   ADAPTER_FAILED: 'ADAPTER_FAILED',
@@ -69,6 +76,7 @@ const PASSTHROUGH_PREFIXES = [
   'PARENT_AGENT_UNAVAILABLE',
   'PROVIDER_UNAVAILABLE',
   'ADAPTER_DISPOSED',
+  'ACTIVATION_LIMIT_REACHED',
 ]
 
 /** 工作树错误码前缀（dispatcher 自己抛/透传）。 */
@@ -82,9 +90,19 @@ export const ISOLATION_MODES = Object.freeze(['none', 'worktree'])
 
 /**
  * 从适配器错误里取出可透传的错误码；取不到就归为 ADAPTER_FAILED。
+ *
+ * 优先读 `err.code`（宿主 SubagentError 把 `ACTIVATION_LIMIT_REACHED` 放在 code 上，
+ * 消息本身是 `subagent limit reached (...)`，没有 code 前缀），再退回消息前缀。
+ *
  * @param {string} raw
+ * @param {unknown} [err]
  */
-function adapterErrorCode(raw) {
+function adapterErrorCode(raw, err) {
+  const explicit =
+    err && typeof err === 'object' && typeof (/** @type {any} */ (err).code) === 'string'
+      ? /** @type {any} */ (err).code.trim()
+      : ''
+  if (PASSTHROUGH_PREFIXES.includes(explicit)) return explicit
   const head = raw.split(':')[0]?.trim() ?? ''
   return PASSTHROUGH_PREFIXES.includes(head) ? head : DISPATCH_ERRORS.ADAPTER_FAILED
 }
@@ -157,8 +175,8 @@ export function normalizeProjectKey(value) {
  * 解析项目/仓库身份：先 `fs.realpath`，再按平台折叠大小写/斜杠。
  *
  * 为什么必须在**额度检查之前**做：`原路径` 与 `原路径/src/..`、junction/symlink
- * 指向同一目录时，字符串归一化会得到两个 key，项目额度与隔离互斥都被绕过（P1）。
- * realpath 失败（路径尚不存在、无权限）时退回字符串归一化，保持失败关闭语义——
+ * 指向同一目录时，字符串归一化会得到两个 key，隔离互斥（同项目 worktree/none 不得混跑）
+ * 会被绕过（P1）。realpath 失败（路径尚不存在、无权限）时退回字符串归一化，保持失败关闭语义——
  * 不因为解析失败就放行成另一个 key。
  *
  * @param {unknown} value
@@ -237,14 +255,13 @@ function positiveInteger(value, fallback) {
 /**
  * @param {{ registry: { resolve: (ref: string) => any, list: () => any[] },
  *           adapter: DispatchAdapter,
- *           limits?: { serializeWrites?: boolean, maxParallelWritesPerProject?: number,
- *                      maxParallelWritesTotal?: number, defaultIsolation?: 'none' | 'worktree' },
+ *           limits?: { serializeWrites?: boolean, maxParallelWritesTotal?: number,
+ *                      defaultIsolation?: 'none' | 'worktree' },
  *           worktrees?: { create: (input: { projectRoot: string, operationId: string }) => Promise<any> } | null,
  *           now?: () => number }} deps
  */
 export function createDispatcher({ registry, adapter, limits = {}, worktrees = null, now = () => Date.now() }) {
   const serializeWrites = limits.serializeWrites !== false
-  const maxParallelWritesPerProject = positiveInteger(limits.maxParallelWritesPerProject, 2)
   const maxParallelWritesTotal = positiveInteger(limits.maxParallelWritesTotal, 4)
   // 注意：这里缺省为 none（纯 dispatcher 单测/旧装配的兼容默认）；用户可见默认由
   // src/config.js 的 limits.defaultIsolation='worktree' 提供，index.js 会原样传入。
@@ -271,12 +288,19 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
   }
 
   /**
-   * 在**任何 await 之前**做完整额度检查。返回 null 表示可以占槽。
+   * 在**任何 await 之前**做完整准入检查。返回 null 表示可以占槽。
+   *
+   * 只有两类拒绝：
+   * - 同项目的隔离/未隔离互斥（正确性保护，与并发额度无关）
+   * - 本插件全局并行写任务上限（只统计本插件派发的任务；宿主容量不在这里）
+   *
+   * **本项目不排队**：超限立即拒绝，由调用方稍后重试。
+   *
    * @param {string} projectKey
    * @param {'none' | 'worktree'} isolation
    * @returns {{ code: string, message: string } | null}
    */
-  function quotaFailure(projectKey, isolation) {
+  function admissionFailure(projectKey, isolation) {
     const entries = entriesFor(projectKey)
     const hasWorktree = entries.some((entry) => entry.isolation === 'worktree')
     const hasNone = entries.some((entry) => entry.isolation === 'none')
@@ -291,7 +315,9 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       if (serializeWrites && entries.length > 0) {
         return {
           code: DISPATCH_ERRORS.WRITE_CONFLICT,
-          message: '同一项目已有任务在执行；写任务默认串行（可在插件全局配置里调整）',
+          message:
+            '同一项目已有任务在执行；写入主工作区必须串行（正确性保护，不是并发额度；' +
+            '可在插件全局配置里调整 limits.serializeWrites）',
         }
       }
     } else if (hasNone) {
@@ -301,20 +327,12 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       }
     }
 
-    if (entries.length >= maxParallelWritesPerProject) {
-      return {
-        code: DISPATCH_ERRORS.WRITE_LIMIT_PROJECT,
-        message:
-          `同一项目并行写任务已达上限 ${maxParallelWritesPerProject}；` +
-          '请等待现有任务完成或调大 limits.maxParallelWritesPerProject 后重试',
-      }
-    }
     if (active.size >= maxParallelWritesTotal) {
       return {
         code: DISPATCH_ERRORS.WRITE_LIMIT_TOTAL,
         message:
-          `全局并行写任务已达上限 ${maxParallelWritesTotal}；` +
-          '请等待现有任务完成或调大 limits.maxParallelWritesTotal 后重试',
+          `本插件派发的并行写任务已达上限 ${maxParallelWritesTotal}（不含宿主的子 Agent 容量）；` +
+          '请等待现有任务完成或调大 limits.maxParallelWritesTotal 后重试（本项目不排队）',
       }
     }
     return null
@@ -416,9 +434,9 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       }
     }
 
-    // 3. 并发纪律：**先占槽再启动**，两级额度一起预占；所有派单都按写任务计数。
+    // 3. 并发纪律：**先占槽再启动**，本插件的全局额度在任何 await 之前预占；所有派单都按写任务计数。
     //    项目身份用 realpath 归一化：`原路径` 与 `原路径/src/..`、junction/symlink
-    //    必须折到同一个 key，否则额度与隔离互斥都会被别名绕过（P1）。
+    //    必须折到同一个 key，否则隔离互斥会被别名绕过（P1）。
     //    两个候选字段里只要有一个能 realpath 成功，就以真实路径为准；都失败才退回字符串键。
     const projectKey =
       (await realpathProjectKey(req.projectKey)) ??
@@ -427,8 +445,8 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       normalizeProjectKey(req.projectRoot) ??
       DEFAULT_PROJECT_KEY
     const isolation = req.isolation ?? defaultIsolation
-    const quota = quotaFailure(projectKey, isolation)
-    if (quota) return fail(quota.code, quota.message)
+    const blocked = admissionFailure(projectKey, isolation)
+    if (blocked) return fail(blocked.code, blocked.message)
 
     /** @type {object} */
     const token = {}
@@ -538,7 +556,7 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       const slotPreserved = /** @type {any} */ (err)?.slotPreserved === true
       if (!slotPreserved) release(token)
       const raw = err instanceof Error ? err.message : String(err)
-      return fail(adapterErrorCode(raw), `派发失败：${raw}`, {
+      return fail(adapterErrorCode(raw, err), `派发失败：${raw}`, {
         ...(operationId ? { operationId } : {}),
         ...(worktree ? { worktree } : {}),
         ...errorContext(err, worktree),
