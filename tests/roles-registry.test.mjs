@@ -379,3 +379,38 @@ test('空输入：返回空表而不是抛错', () => {
   assert.deepEqual(registry.errors, [])
   assert.equal(registry.resolve('role-sashi'), null)
 })
+
+// ─── 回归：channelId 必须被注册表保留（否则 DD7「模型由通道实例承载」链路断掉） ──
+
+test('channelId 与 source 被正确保留', () => {
+  const registry = createRegistry({
+    globalRoles: [
+      {
+        roleId: 'role-a',
+        name: 'A',
+        aliases: [],
+        channel: { kind: 'acp-cli', channelId: 'ch-1', model: 'm', reasoning: 'high' },
+        permissionPreset: 'project-write',
+        enabled: true,
+      },
+    ],
+    projectOverrides: { 'role-b': undefined },
+    projectRoles: [
+      {
+        roleId: 'role-b',
+        name: 'B',
+        aliases: [],
+        channel: { kind: 'in-process' },
+        permissionPreset: 'read-only',
+        enabled: true,
+      },
+    ],
+  })
+
+  const a = registry.get('role-a')
+  assert.equal(a?.channel.channelId, 'ch-1', 'channelId 不能丢，否则模型一致性校验永远失败')
+  assert.equal(a?.source, 'global')
+
+  const b = registry.get('role-b')
+  assert.equal(b?.source, 'project')
+})

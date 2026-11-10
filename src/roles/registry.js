@@ -25,6 +25,7 @@ import { isValidRoleId, normalizeAlias } from './ids.js'
  *
  * @typedef {object} RoleChannel
  * @property {ChannelKind} kind
+ * @property {string} [channelId]
  * @property {string} [provider]
  * @property {string} [cli]
  * @property {string} [model]
@@ -44,6 +45,7 @@ import { isValidRoleId, normalizeAlias } from './ids.js'
  * @property {boolean} enabled
  * @property {string | null} fallbackRoleId
  * @property {number} timeoutMs
+ * @property {'global' | 'project'} [source] 来源：全局配置还是项目配置
  * @property {boolean} [ambiguous] 仅在同名/别名冲突时出现且为 true
  */
 
@@ -188,7 +190,7 @@ function readChannel(value, errors, roleId, opts = {}) {
     }
   }
 
-  for (const key of /** @type {const} */ (['provider', 'cli', 'model', 'reasoning'])) {
+  for (const key of /** @type {const} */ (['provider', 'cli', 'model', 'reasoning', 'channelId'])) {
     const raw = input[key]
     if (typeof raw === 'string' && raw.trim()) channel[key] = raw.trim()
   }
@@ -267,6 +269,7 @@ function readRole(raw, errors) {
     aliases: readAliases(input.aliases),
     description: typeof input.description === 'string' ? input.description : '',
     channel: readChannel(input.channel, errors, id),
+    source: /** @type {const} */ ('global'),
     permissionPreset: preset,
     enabled: input.enabled !== false,
     fallbackRoleId:
@@ -490,6 +493,7 @@ export function createRegistry({ globalRoles = [], projectRoles = [], projectOve
     if (isValidRoleId(id) && byId.has(/** @type {string} */ (id))) {
       const roleId = /** @type {string} */ (id)
       const merged = mergeRole(/** @type {Role} */ (byId.get(roleId)), input, errors)
+      merged.source = /** @type {const} */ ('project')
       const index = roles.findIndex((role) => role.roleId === roleId)
       roles[index] = merged
       byId.set(roleId, merged)
@@ -498,6 +502,8 @@ export function createRegistry({ globalRoles = [], projectRoles = [], projectOve
 
     const role = readRole(raw, errors)
     if (!role) continue
+    // 项目清单里新增的角色，来源标为 project
+    role.source = /** @type {const} */ ('project')
     if (byId.has(role.roleId)) {
       errors.push({
         code: 'DUPLICATE_ROLE_ID',
@@ -533,6 +539,8 @@ export function createRegistry({ globalRoles = [], projectRoles = [], projectOve
       continue
     }
     const merged = mergeRole(base, patch, errors)
+    // 被项目覆盖过的角色，来源标为 project（便于 list_roles 区分"这是谁定义的"）
+    merged.source = /** @type {const} */ ('project')
     const index = roles.findIndex((role) => role.roleId === roleId)
     roles[index] = merged
     byId.set(roleId, merged)

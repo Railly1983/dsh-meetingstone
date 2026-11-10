@@ -561,3 +561,47 @@ test('引用了不存在的通道实例 → 拒绝', async () => {
     /通道实例 ch-missing 不存在/,
   )
 })
+
+// ─── 集成：配置 → 注册表 → 适配器（DD7 链路端到端） ──────────────────────────
+// 曾有的 bug：registry 的 channel 白名单漏了 channelId，导致「模型由通道实例承载」
+// 永远走到 MODEL_UNSUPPORTED。这里用真实 registry 走一遍，防止回归。
+
+test('配置 → registry → adapter：channelId 保住，模型一致性校验通过并启动', async () => {
+  const { createRegistry } = await import('../src/roles/registry.js')
+  const { createDshAdapter } = await import('../src/dsh/adapter.js')
+
+  const registry = createRegistry({
+    globalRoles: [
+      {
+        roleId: 'role-sashi',
+        name: '沙僧',
+        aliases: ['SS'],
+        channel: { kind: 'acp-cli', channelId: 'ch-acp-flash', model: 'deepseek-v4.1-flash' },
+        permissionPreset: 'project-write',
+        enabled: true,
+      },
+    ],
+  })
+  const role = registry.resolve('SS')
+  assert.ok(role)
+  assert.equal(role.channel.channelId, 'ch-acp-flash', 'registry 必须保留 channelId')
+
+  const subagents = fakeSubagents({ providers: { acp: {} } })
+  const adapter = createDshAdapter(
+    { subagents, effect: () => {}, logger: { warn() {} } },
+    { channels: [{ channelId: 'ch-acp-flash', kind: 'acp-cli', provider: 'acp', model: 'deepseek-v4.1-flash' }] },
+  )
+
+  const res = await adapter.start({
+    role,
+    task: 'x',
+    readOnly: false,
+    timeoutMs: 0,
+    context: {
+      projectRoot: 'D:/MeetingStone',
+      // parent 必须来自当次执行上下文（P2 Gate 删除全局 holder 后）
+      agent: { session: { header: { cwd: 'D:/MeetingStone' } } },
+    },
+  })
+  assert.ok(res.taskRef, '模型与实例一致时应启动成功')
+})
