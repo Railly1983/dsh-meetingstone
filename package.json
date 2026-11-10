@@ -39,5 +39,11 @@
   "bugs": {
     "url": "https://github.com/meetingstone/dsh-meetingstone/issues"
   },
-  "homepage": "https://github.com/meetingstone/dsh-meetingstone#readme"
+  "homepage": "https://github.com/meetingstone/dsh-meetingstone#readme",
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.5"
+  },
+  "devDependencies": {
+    "@deepseek-ai/schemastery": "3.18.5"
+  }
 }
