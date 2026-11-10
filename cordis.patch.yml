@@ -1,0 +1,9 @@
+# Layer contributed by the dsh-meetingstone bundle.
+#
+# Row id `meetingstone` is stable on purpose: users and profiles override this
+# row by id (see docs/audit/07-config-extension.md). When overriding, restate
+# the whole `config` value — patches replace a row's config, they do not deep
+# merge (docs/audit/02-plugin-spec.md §1.5).
+- insert:
+    - id: meetingstone
+      name: dsh-meetingstone

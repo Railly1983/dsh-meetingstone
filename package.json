@@ -1,0 +1,43 @@
+{
+  "name": "dsh-meetingstone",
+  "version": "0.0.1",
+  "description": "A lightweight cross-CLI agent role and dispatch plugin for DeepSeek Harness.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "dsh": ">=0.2.2-rc.1 <0.3.0-0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "agent",
+    "cli",
+    "dispatch",
+    "role"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/meetingstone/dsh-meetingstone.git"
+  },
+  "bugs": {
+    "url": "https://github.com/meetingstone/dsh-meetingstone/issues"
+  },
+  "homepage": "https://github.com/meetingstone/dsh-meetingstone#readme"
+}
