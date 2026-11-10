@@ -130,3 +130,48 @@ list_agents → b275997f-... [inactive]
 ```
 
 拒绝符合预期（未启动任何子任务）。**改进已提交**：适配器前置校验的错误码现在会透传（`READONLY_UNENFORCEABLE` 不再被包成 `ADAPTER_FAILED`），下次重启生效。
+
+
+## 7. 外部 CLI 通道验证成功（2026-11-10 20:57）
+
+配置路径：`desktop` profile 安装 `@deepseek-ai/dsh-subagent-codex@0.2.2-rc.1`，
+并在 `cordis.patch.yml` 里给 provider 行显式指定 `model: gpt-5.6-sol`
+（原因见 §7.1）。
+
+```json
+// dispatch(role=SELFTESTCODEX)
+{"ok":true,"taskRef":{"provider":"codex","childId":"1adb5b02-3fef-4bab-a415-1b9ec27e2bc7",...}}
+// get_task
+{"status":"completed","stopReason":"completed","output":"PONG"}
+```
+
+**结论：角色 → 外部 CLI（Codex）→ 真实输出，端到端打通。**
+
+### 7.1 关键坑：pinned Codex 的模型限制
+
+provider bundle 自带 `@openai/codex@0.153.4`，它继承 `~/.codex/config.toml` 的模型设置。
+本机 config 写的是 `gpt-6.1-sol`，在 **ChatGPT 账号**下被服务端拒绝：
+
+```
+400 invalid_request_error: The 'gpt-6.1-sol' model is not supported
+when using Codex with a ChatGPT account. (code: model_not_found)
+```
+
+用 provider 自带的 CLI 直接实测（`node <profile>/node_modules/@openai/codex/bin/codex.js exec -m <model> ...`）：
+
+| 模型 | 结果 |
+| --- | --- |
+| **gpt-5.6-sol** | ✅ 返回 PONG |
+| gpt-6.1-sol / gpt-6-sol / gpt-5-codex / gpt-6-luna | ❌ 400 model_not_found |
+
+因此 provider 行必须显式配置模型：
+
+```yaml
+- id: subagent-codex
+  config:
+    providerName: codex
+    model: gpt-5.6-sol
+    permissionMode: never
+```
+
+这也再次验证 DD7 的判断：**模型只能由 provider 行承载**，插件层写 model 无意义。
