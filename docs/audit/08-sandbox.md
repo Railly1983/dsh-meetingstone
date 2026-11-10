@@ -365,7 +365,15 @@ await handle.waitForExit();
 ["C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe","C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js","--workspace","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","--temp","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\runtime-temp","--mode","read-only","--","C:/Users/30673/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\grandchild-write.cjs","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\dsh-grandchild-out.txt"]
 ```
 
-关键输出原文
+stdout 原文
+
+```text
+{"event":"parent","pid":32860}
+{"event":"attempt","pid":61228,"target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\dsh-grandchild-out.txt"}
+{"event":"grandchild-exit","exit":13}
+```
+
+stderr 原文
 
 ```text
 {"event":"write","ok":false,"code":"EPERM","message":"EPERM: operation not permitted, open 'C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\dsh-grandchild-out.txt'","target":"C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\outside\\dsh-grandchild-out.txt"}
@@ -382,7 +390,13 @@ await handle.waitForExit();
 ["C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe","C:\\Users\\30673\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-sandbox-windows-acl\\lib\\runner.js","--workspace","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\workspace","--temp","C:\\Users\\30673\\AppData\\Local\\Temp\\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5\\runtime-temp","--mode","read-only","--","C:/Program Files/WindowsApps/OpenAI.Codex_26.1103.7773.0_x64__2p2nqsd0c76g0/app/resources/codex.exe","--version"]
 ```
 
-关键输出原文
+stdout 原文
+
+```text
+codex-cli 0.167.0-alpha.3.2
+```
+
+stderr 原文
 
 ```text
 WARNING: failed to clean up stale arg0 temp dirs: 拒绝访问。 (os error 5)
@@ -396,7 +410,7 @@ D7 在 DSH read-only runner 下启动了真实 codex.exe。版本命令返回 0�
 
 ### 4.3 D8—D10 读取范围及 NTFS 硬链接例外
 
-读取样本是本次创建的无敏感信息 fixture，只记录能否读取。硬链接实验先在工作区创建 27 字节的 fixture，再创建工作区外的 alias，二者指向同一 NTFS 文件对象。创建命令如下。
+读取样本是本次创建的无敏感信息 fixture，只记录能否读取。硬链接实验先在工作区创建 26 字节的 fixture，再创建工作区外的 alias，二者指向同一 NTFS 文件对象。创建命令如下。
 
 ```powershell
 New-Item -ItemType HardLink -Path (Join-Path $root 'outside\hardlink-alias.txt') -Value (Join-Path $root 'workspace\hardlink-source.txt')
@@ -821,4 +835,29 @@ for (const name of names)
 
 未验证的核心项包括真实桌面 session 模式切换和审批链、Codex 已登录 exec、CodeBuddy 模型写入、CLI 插件与 MCP、完整 worker 取消、PTY/fallback/breakaway、其他 OS、MXC/elevated sandbox、网络与全部读取拒绝。未进行 danger-full-access 写盘对照。
 
-清理待执行，完成后必须用实际删除结果替换本段。
+2026-11-10T14:39:00.9259934+08:00 在删除前独立验证了解析后的绝对路径，确认位于本次命名的 TEMP 根目录。目录内 reparse point 数为 0，两条 NTFS 硬链接均指向本次临时 fixture。此前记录的所有进程树 PID 均已消失，另按本次唯一临时目录名查询进程命令行，除检查进程自身外没有匹配项。该查询只输出 PID、PPID、Name。
+
+关键检查输出原文如下，检查命令整体退出 0。
+
+```text
+VERIFIED_DELETE_ROOT=C:\Users\30673\AppData\Local\Temp\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5
+REPARSE_POINT_COUNT=0
+KNOWN_TREE_SURVIVORS=0
+TEMP_FILE_COUNT=207
+```
+
+实际清理命令原文如下，退出码为 0。
+
+```powershell
+Remove-Item -LiteralPath 'C:\Users\30673\AppData\Local\Temp\mt-sandbox-788ad2b5c3bf4975802bb14334e01ce5' -Recurse
+```
+
+2026-11-10T14:39:13.0272792+08:00 的 `Test-Path` 复查输出原文如下。
+
+```text
+TEMP_ROOT_EXISTS=False
+```
+
+删除了这 207 个临时文件及其目录，包括工作区和目录外写入样本、硬链接的两个目录项、五组进程树 PID/控制文件、采证脚本、只含存在性信息的 env 记录、公开官方源码副本、临时 DSH_HOME、两份 CODEX_HOME、CodeBuddy 隔离 home、CLI 初始化和沙箱日志。真实 profile 不在删除范围内。
+
+文中 14 组关键写入/拒绝输出在清理前逐项与原始记录做字符串匹配，全部为 true。仓库交付范围只有 `docs/audit/08-sandbox.md`。P0-08 的审计取证和清理已完成，真实 session、模型执行与产品权限承诺的未验证项保留在第 8—9 节。
