@@ -23,11 +23,24 @@ export const RUNS_RELATIVE_DIR = '.meetingstone/runs'
 export const MAX_RESULT_BYTES = 256 * 1024
 /** 单条错误信息上限。 */
 export const MAX_ERROR_BYTES = 16 * 1024
+/**
+ * 单条记录里 `changedFiles` 的条数上限。
+ * 为什么要设：大型仓库一次改动上万文件时，记录能涨到 1.5MB+，读取侧拒绝后
+ * 清理器又会把它当"未保护"删掉，工作树元数据就丢了（P1）。
+ * 超过时保留前 N 条，并记录 `changedFilesTruncated:true` / `changedFilesTotal`。
+ */
+export const MAX_CHANGED_FILES = 5000
+/** changedFiles 的字节预算（按 JSON 转义后大小计，保证整条记录体积可控）。 */
+const MAX_CHANGED_FILES_BYTES = 2 * 1024 * 1024
 /** 默认保留条数 / 时长。 */
 export const DEFAULT_MAX_RUNS = 100
 export const DEFAULT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
-/** 读取时允许的最大文件体积（防止被塞进巨型文件）。 */
-const MAX_FILE_BYTES = 1024 * 1024
+/**
+ * 读取时允许的最大文件体积（防止被塞进巨型文件）。
+ * 与写入约束对齐：结果 256KB + changedFiles 预算 2MB + 其他字段余量 ≈ 2.75MB。
+ * 超过该值的记录读取会失败；清理器对这类记录 **fail-safe 保护**，不因读不了而删。
+ */
+export const MAX_FILE_BYTES = MAX_RESULT_BYTES + MAX_CHANGED_FILES_BYTES + 512 * 1024
 const CHILD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 
 /**
@@ -202,6 +215,65 @@ export function createRunStore(options) {
   }
 
   /**
+   * 规范化 changedFiles：条数 + 字节双上限，并给出 total/truncated。
+   * 字节按 JSON 转义后的大小计算（换行/制表符/反斜杠会翻倍），保证整条记录体积可控。
+   *
+   * @param {unknown} value
+   * @param {unknown} existingTotal
+   * @param {unknown} existingTruncated
+   */
+  function normalizeChangedFiles(value, existingTotal, existingTruncated) {
+    if (!Array.isArray(value)) {
+      return {
+        changedFiles: null,
+        changedFilesTruncated: existingTruncated === true,
+        changedFilesTotal: Number.isInteger(existingTotal) ? /** @type {number} */ (existingTotal) : null,
+      }
+    }
+    const all = value.filter((/** @type {unknown} */ file) => typeof file === 'string')
+    let truncated = false
+    let files = all
+    if (files.length > MAX_CHANGED_FILES) {
+      files = files.slice(0, MAX_CHANGED_FILES)
+      truncated = true
+    }
+    let bytes = 0
+    let kept = 0
+    for (const file of files) {
+      // +1 是本条在 JSON 数组里的逗号/换行开销上界
+      const size = Buffer.byteLength(JSON.stringify(file), 'utf8') + 1
+      if (bytes + size > MAX_CHANGED_FILES_BYTES) {
+        truncated = true
+        break
+      }
+      bytes += size
+      kept += 1
+    }
+    if (kept < files.length) files = files.slice(0, kept)
+    return {
+      changedFiles: files,
+      changedFilesTruncated: truncated || existingTruncated === true,
+      changedFilesTotal: all.length,
+    }
+  }
+
+  /**
+   * 规范化 overlapWarnings（落盘白名单）。
+   * @param {unknown} value
+   */
+  function normalizeOverlapWarnings(value) {
+    if (!Array.isArray(value)) return null
+    return value
+      .filter((/** @type {any} */ item) => item && typeof item === 'object' && typeof item.childId === 'string')
+      .map((/** @type {any} */ item) => ({
+        childId: String(item.childId),
+        files: Array.isArray(item.files)
+          ? item.files.filter((/** @type {unknown} */ file) => typeof file === 'string')
+          : [],
+      }))
+  }
+
+  /**
    * 把调用方给的记录规范化成落盘形状（白名单字段，避免意外写入敏感内容）。
    * @param {any} record
    */
@@ -217,6 +289,11 @@ export function createRunStore(options) {
           message: truncateUtf8(err_message(rawError), MAX_ERROR_BYTES).text,
         }
       : null
+    const changed = normalizeChangedFiles(
+      record?.changedFiles,
+      record?.changedFilesTotal,
+      record?.changedFilesTruncated,
+    )
     return {
       schemaVersion: 1,
       childId: String(record.childId),
@@ -244,10 +321,13 @@ export function createRunStore(options) {
       isolation:
         record.isolation === 'none' || record.isolation === 'worktree' ? record.isolation : null,
       worktree: normalizeWorktree(record.worktree),
-      changedFiles: Array.isArray(record.changedFiles)
-        ? record.changedFiles.filter((/** @type {unknown} */ file) => typeof file === 'string')
-        : null,
+      changedFiles: changed.changedFiles,
       changedFilesUnknown: record.changedFilesUnknown === true,
+      changedFilesTruncated: changed.changedFilesTruncated,
+      changedFilesTotal: changed.changedFilesTotal,
+      // overlap 必须落盘（P2）：读取时仍可重算，但原始记录要能自证冲突。
+      // 无交集/无法判断时写空数组（`changedFilesUnknown` 另有标记），保证字段始终存在。
+      overlapWarnings: normalizeOverlapWarnings(record.overlapWarnings) ?? [],
       stopConfirmed: typeof record.stopConfirmed === 'boolean' ? record.stopConfirmed : null,
     }
   }
@@ -274,7 +354,32 @@ export function createRunStore(options) {
   async function writeRun(record) {
     const childId = String(record?.childId ?? '')
     const target = fileFor(childId)
-    const payload = `${JSON.stringify(normalize({ ...record, childId }), null, 2)}\n`
+    // P2：终态记录必须把 overlapWarnings 一起落盘（读取仍可重算，但原始 JSON 要自证冲突）。
+    // 只对带工作树且有 changedFiles 的终态计算；running 记录没有改动列表，算不出交集。
+    let toWrite = { ...record, childId }
+    if (
+      record?.worktree &&
+      record.status !== RUN_STATUS.RUNNING &&
+      Array.isArray(record.changedFiles)
+    ) {
+      const all = await readRecords()
+      toWrite = { ...toWrite, overlapWarnings: overlapWarningsFor(record, all) }
+    }
+    let payload = `${JSON.stringify(normalize(toWrite), null, 2)}\n`
+    // 最后一道体积闸：写入约束（result 截断 + changedFiles 条数/字节预算）之外，
+    // 任何异常膨胀都先丢 changedFiles 保住 worktree 元数据，绝不写出自己读不回的记录。
+    if (Buffer.byteLength(payload, 'utf8') > MAX_FILE_BYTES) {
+      const trimmed = normalize(toWrite)
+      trimmed.changedFiles = []
+      trimmed.changedFilesTruncated = true
+      payload = `${JSON.stringify(trimmed, null, 2)}\n`
+      if (Buffer.byteLength(payload, 'utf8') > MAX_FILE_BYTES) {
+        throw new RunStoreError(
+          'RUN_TOO_LARGE',
+          `派单记录超过读取上限 ${MAX_FILE_BYTES} 字节，拒绝写入（避免产生读不回的记录）`,
+        )
+      }
+    }
     const tmp = `${target}.tmp-${process.pid}-${Math.random().toString(16).slice(2, 8)}`
     try {
       await fs.mkdir(dir, { recursive: true })
@@ -404,6 +509,13 @@ export function createRunStore(options) {
       worktree: parsed.worktree ?? null,
       changedFiles: Array.isArray(parsed.changedFiles) ? parsed.changedFiles : null,
       changedFilesUnknown: parsed.changedFilesUnknown === true,
+      changedFilesTruncated: parsed.changedFilesTruncated === true,
+      changedFilesTotal:
+        typeof parsed.changedFilesTotal === 'number'
+          ? parsed.changedFilesTotal
+          : Array.isArray(parsed.changedFiles)
+            ? parsed.changedFiles.length
+            : null,
       overlapWarnings: overlapWarningsFor(parsed, all),
       // 摘要：只取前 200 字符，避免把整份结果塞进列表
       preview: typeof parsed.result === 'string' ? parsed.result.slice(0, 200) : '',
@@ -449,7 +561,9 @@ export function createRunStore(options) {
     const classified = []
     for (const entry of entries) {
       const full = join(dir, entry.name)
-      let protectedRecord = false
+      // fail-safe：默认保护。只有**成功解析且确认没有工作树**的记录才允许清理。
+      // 超大文件/坏 JSON 读不了，就无从判断它是不是未合并成果的元数据——宁可留着。
+      let protectedRecord = true
       try {
         const stat = await fs.stat(full)
         if (stat.size <= MAX_FILE_BYTES) {
@@ -463,9 +577,10 @@ export function createRunStore(options) {
                 parsed.worktree.path,
             )
           } catch {
-            /* 坏记录不保护，交给条数/时长规则 */
+            /* 坏记录：无法判断 → 保持保护 */
           }
         }
+        // stat.size > MAX_FILE_BYTES：读取侧会拒绝，清理侧同样无法判断 → 保持保护
       } catch {
         continue
       }

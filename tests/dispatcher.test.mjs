@@ -151,6 +151,8 @@ test('cancel 调用适配器并释放槽位', async () => {
   const { dispatcher } = makeDispatcher({
     cancel: async (ref) => {
       cancelled.push(ref)
+      // 只有显式确认停止，dispatcher 才允许释放槽位（P1）
+      return { stopConfirmed: true }
     },
   })
   const res = await dispatcher.dispatch({ role: 'SS', task: 'x' })

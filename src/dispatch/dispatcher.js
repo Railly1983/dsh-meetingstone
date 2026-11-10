@@ -29,6 +29,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { promises as fs } from 'node:fs'
 
 /** 派单错误码。 */
 export const DISPATCH_ERRORS = Object.freeze({
@@ -86,14 +87,14 @@ function adapterErrorCode(raw) {
 }
 
 /**
- * 归一化并发计数键。
+ * 归一化并发计数键（纯字符串层）。
  *
  * 为什么需要：`dispatcher` 用**精确字符串**比较 projectKey，`D:/P` 与 `d:/p/`
  * 会被当成两个项目，从而绕过"同项目"的额度（沙僧审计实测）。
  * Windows 大小写不敏感、尾斜杠等价，统一折叠；POSIX 只去尾斜杠，避免误并不同目录。
  *
- * 注意：这只解决**路径字符串别名**；同一仓库的两个不同路径（如工作树本身）
- * 不会自动合并——派单的 projectKey 应始终传项目根。
+ * 注意：字符串层解决不了 `原路径` 与 `原路径/src/..` 这类**同目录别名**，
+ * 也解决不了 junction/symlink。派单路径必须再用 `resolveProjectKey()` 做 realpath。
  *
  * @param {unknown} value
  * @returns {string | null}
@@ -106,6 +107,37 @@ export function normalizeProjectKey(value) {
   // 避免把合法的反斜杠文件名/目录名误并。
   if (process.platform === 'win32') key = key.replace(/\\/g, '/').toLowerCase()
   return key
+}
+
+/**
+ * 解析项目/仓库身份：先 `fs.realpath`，再按平台折叠大小写/斜杠。
+ *
+ * 为什么必须在**额度检查之前**做：`原路径` 与 `原路径/src/..`、junction/symlink
+ * 指向同一目录时，字符串归一化会得到两个 key，项目额度与隔离互斥都被绕过（P1）。
+ * realpath 失败（路径尚不存在、无权限）时退回字符串归一化，保持失败关闭语义——
+ * 不因为解析失败就放行成另一个 key。
+ *
+ * @param {unknown} value
+ * @returns {Promise<string | null>}
+ */
+export async function resolveProjectKey(value) {
+  return (await realpathProjectKey(value)) ?? normalizeProjectKey(value)
+}
+
+/**
+ * 只做 realpath 身份解析；解析失败返回 null（不退回字符串），
+ * 供调用方在多个候选字段之间挑选"真正存在的路径"。
+ * @param {unknown} value
+ * @returns {Promise<string | null>}
+ */
+async function realpathProjectKey(value) {
+  if (typeof value !== 'string' || !value.trim()) return null
+  try {
+    const real = await fs.realpath(value.trim())
+    return normalizeProjectKey(real)
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -146,7 +178,7 @@ function positiveInteger(value, fallback) {
 /**
  * @typedef {object} DispatchAdapter
  * @property {(input: AdapterStartInput) => Promise<{ taskRef: object }>} start
- * @property {(taskRef: object) => Promise<void>} [cancel]
+ * @property {(taskRef: object | string) => Promise<{ stopConfirmed: boolean, code?: string, message?: string, reason?: string }>} [cancel]
  * @property {(role: object) => { ok: boolean, reason?: string }} [canStart]
  */
 
@@ -244,13 +276,26 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
   }
 
   /**
-   * 释放一个槽位。按 token 或 taskRef 都可以，重复调用幂等。
-   * @param {object | null | undefined} key
+   * 释放一个槽位。按 token / taskRef / childId 都可以，重复调用幂等。
+   * @param {object | string | null | undefined} key
    */
   function release(key) {
     if (!key) return false
     // 允许传 taskRef
-    const token = refToToken.get(key) ?? key
+    let token = refToToken.get(key) ?? key
+    // 允许传 childId（工具层按 childId 取消时只能给字符串）
+    if (!active.has(token) && typeof key === 'string') {
+      for (const [candidate, entry] of active) {
+        const refChildId =
+          entry.ref && typeof entry.ref === 'object'
+            ? entry.ref.childId ?? entry.ref.id ?? entry.ref.sessionId
+            : null
+        if (refChildId !== undefined && refChildId !== null && String(refChildId) === key) {
+          token = candidate
+          break
+        }
+      }
+    }
     const entry = active.get(token)
     if (!entry) return false
     active.delete(token)
@@ -327,8 +372,15 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
     }
 
     // 3. 并发纪律：**先占槽再启动**，两级额度一起预占；所有派单都按写任务计数。
+    //    项目身份用 realpath 归一化：`原路径` 与 `原路径/src/..`、junction/symlink
+    //    必须折到同一个 key，否则额度与隔离互斥都会被别名绕过（P1）。
+    //    两个候选字段里只要有一个能 realpath 成功，就以真实路径为准；都失败才退回字符串键。
     const projectKey =
-      normalizeProjectKey(req.projectKey) ?? normalizeProjectKey(req.projectRoot) ?? DEFAULT_PROJECT_KEY
+      (await realpathProjectKey(req.projectKey)) ??
+      (await realpathProjectKey(req.projectRoot)) ??
+      normalizeProjectKey(req.projectKey) ??
+      normalizeProjectKey(req.projectRoot) ??
+      DEFAULT_PROJECT_KEY
     const isolation = req.isolation ?? defaultIsolation
     const quota = quotaFailure(projectKey, isolation)
     if (quota) return fail(quota.code, quota.message)
@@ -475,16 +527,31 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
   }
 
   /**
-   * 取消：先让宿主取消，成功或失败后都释放槽位（适配器也可能回调 onFinish，release 幂等）。
-   * 用 finally 保证适配器抛错时槽位不泄漏——项目不能被一次失败的取消永久锁死。
+   * 取消：让宿主取消；**只有拿到可验证的停止结果**（`{ stopConfirmed: true }`）
+   * 才释放槽位。dispose 超时/抛错时保留槽位与隔离互斥，避免旧进程未退干净就派新写任务。
+   * 适配器不支持取消、或没有返回确认，一律按「未确认」处理（fail-safe）。
    * **不删除工作树**：未合并改动留在树里，人工处理。
+   *
+   * @param {object | string} taskRef
+   * @returns {Promise<{ stopConfirmed: boolean, code?: string, message?: string, reason?: string }>}
    */
   async function cancel(taskRef) {
-    if (!taskRef) return
+    if (!taskRef) return { stopConfirmed: false, reason: '缺少任务引用' }
+    let outcome
     try {
-      if (adapter.cancel) await adapter.cancel(taskRef)
-    } finally {
-      release(taskRef)
+      if (adapter.cancel) outcome = await adapter.cancel(taskRef)
+    } catch (err) {
+      // 适配器自己没确认停止：保留槽位，错误如实返回给工具层
+      return { stopConfirmed: false, reason: errorMessage(err) }
+    }
+    const stopConfirmed = Boolean(outcome && outcome.stopConfirmed === true)
+    if (stopConfirmed) release(taskRef)
+    return {
+      stopConfirmed,
+      ...(outcome && typeof outcome.code === 'string' ? { code: outcome.code } : {}),
+      ...(outcome && typeof outcome.message === 'string' ? { message: outcome.message } : {}),
+      ...(outcome && typeof outcome.reason === 'string' ? { reason: outcome.reason } : {}),
+      ...(!stopConfirmed && !adapter.cancel ? { reason: '适配器不支持取消，无法确认停止状态' } : {}),
     }
   }
 

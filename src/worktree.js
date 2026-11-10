@@ -50,18 +50,20 @@ export const WORKTREE_ERRORS = Object.freeze({
 /** operationId 必须能安全地做路径段与分支段（randomUUID 满足）。 */
 const OPERATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 
-/** 带错误码与残留路径的工作树错误。 */
+/** 带错误码与残留位置的工作树错误。 */
 export class WorktreeError extends Error {
   /**
    * @param {string} code
    * @param {string} message
-   * @param {{ path?: string, cause?: unknown, [key: string]: unknown }} [details]
+   * @param {{ path?: string, branch?: string, phase?: string, cause?: unknown, [key: string]: unknown }} [details]
    */
   constructor(code, message, details = {}) {
     super(message)
     this.name = 'WorktreeError'
     this.code = code
     if (typeof details.path === 'string' && details.path) this.path = details.path
+    if (typeof details.branch === 'string' && details.branch) this.branch = details.branch
+    if (typeof details.phase === 'string' && details.phase) this.phase = details.phase
     if (details.cause !== undefined) this.cause = details.cause
     this.details = details
   }
@@ -80,7 +82,7 @@ function isCodedError(err) {
 /**
  * @param {string} code
  * @param {string} message
- * @param {{ path?: string, cause?: unknown, [key: string]: unknown }} [details]
+ * @param {{ path?: string, branch?: string, phase?: string, cause?: unknown, [key: string]: unknown }} [details]
  */
 function fail(code, message, details = {}) {
   return new WorktreeError(code, message, details)
@@ -168,6 +170,19 @@ export function defaultGitRunner(request) {
 }
 
 /**
+ * 从 git 选项里摘出残留位置信息，供所有 WORKTREE_* 错误统一携带。
+ * @param {{ path?: string, branch?: string, phase?: string } | undefined} options
+ */
+function contextDetails(options) {
+  /** @type {{ path?: string, branch?: string, phase?: string }} */
+  const out = {}
+  if (options && typeof options.path === 'string' && options.path) out.path = options.path
+  if (options && typeof options.branch === 'string' && options.branch) out.branch = options.branch
+  if (options && typeof options.phase === 'string' && options.phase) out.phase = options.phase
+  return out
+}
+
+/**
  * 执行一条 git 命令；超时直接抛 `WORKTREE_TIMEOUT`，其余结果交给调用方判断 code。
  *
  * @param {string[]} args
@@ -177,11 +192,15 @@ export function defaultGitRunner(request) {
  * @param {number} options.maxOutputBytes
  * @param {((request: GitRunRequest) => Promise<GitRunResult>) | undefined} [options.gitRunner]
  * @param {string} [options.label] 出错时用于说明是哪一步
+ * @param {string} [options.path] 工作树目标路径（错误残留位置）
+ * @param {string} [options.branch] 工作树分支（错误上下文）
+ * @param {string} [options.phase] 失败阶段（错误上下文）
  * @returns {Promise<GitRunResult>}
  */
 async function runGit(args, options) {
   const runner = options.gitRunner ?? defaultGitRunner
   const label = options.label ?? `git ${args.join(' ')}`
+  const context = contextDetails(options)
   let result
   try {
     result = await runner({
@@ -196,14 +215,16 @@ async function runGit(args, options) {
       throw err
     }
     throw fail(WORKTREE_ERRORS.GIT_FAILED, `${label} 执行失败：${errorMessage(err)}`, {
+      ...context,
       cause: err,
     })
   }
   if (!result || typeof result !== 'object') {
-    throw fail(WORKTREE_ERRORS.GIT_FAILED, `${label} 没有返回结果`)
+    throw fail(WORKTREE_ERRORS.GIT_FAILED, `${label} 没有返回结果`, context)
   }
   if (result.timedOut) {
     throw fail(WORKTREE_ERRORS.TIMEOUT, `${label} 超过 ${options.timeoutMs}ms 未完成`, {
+      ...context,
       timeoutMs: options.timeoutMs,
     })
   }
@@ -311,13 +332,20 @@ async function withRepoLock(key, task) {
 async function branchExists(repositoryRoot, branch, options) {
   const result = await runGit(
     ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`],
-    { ...options, cwd: repositoryRoot, label: `检查分支 ${branch}` },
+    {
+      ...options,
+      cwd: repositoryRoot,
+      label: `检查分支 ${branch}`,
+      branch,
+      phase: options.phase ?? 'check-branch',
+    },
   )
   if (result.code === 0) return true
   if (result.code === 1) return false
   throw fail(
     WORKTREE_ERRORS.GIT_FAILED,
     `检查分支 ${branch} 失败：${gitFailureDetail(result.stderr) || `退出码 ${result.code}`}`,
+    { ...contextDetails(options), branch, phase: options.phase ?? 'check-branch' },
   )
 }
 
@@ -332,11 +360,13 @@ async function listRegisteredWorktrees(repositoryRoot, options) {
     ...options,
     cwd: repositoryRoot,
     label: '列出工作树',
+    phase: 'list-worktrees',
   })
   if (result.code !== 0) {
     throw fail(
       WORKTREE_ERRORS.GIT_FAILED,
       `列出工作树失败：${gitFailureDetail(result.stderr) || `退出码 ${result.code}`}`,
+      { ...contextDetails(options), phase: 'list-worktrees' },
     )
   }
   /** @type {string[]} */
@@ -377,12 +407,15 @@ export async function createDispatchWorktree(input) {
       : DEFAULT_GIT_MAX_OUTPUT_BYTES
 
   if (!projectRoot) {
-    throw fail(WORKTREE_ERRORS.NOT_GIT_REPOSITORY, '缺少项目根，无法创建工作树')
+    throw fail(WORKTREE_ERRORS.NOT_GIT_REPOSITORY, '缺少项目根，无法创建工作树', {
+      phase: 'validate-input',
+    })
   }
   if (!OPERATION_ID_PATTERN.test(operationId)) {
     throw fail(
       WORKTREE_ERRORS.PATH_OUTSIDE,
       `operationId 不合法（会逃出工作树根目录）：${JSON.stringify(operationId)}`,
+      { phase: 'validate-input' },
     )
   }
 
@@ -395,22 +428,27 @@ export async function createDispatchWorktree(input) {
     throw fail(
       WORKTREE_ERRORS.NOT_GIT_REPOSITORY,
       `项目根不存在或不可访问：${resolvedProjectRoot}`,
-      { path: resolvedProjectRoot },
+      { path: resolvedProjectRoot, phase: 'resolve-project-root' },
     )
   }
 
   const worktreesRoot = resolve(realProjectRoot, WORKTREE_RELATIVE_DIR)
   const targetPath = resolve(worktreesRoot, operationId)
+  const branch = `${WORKTREE_BRANCH_PREFIX}${operationId}`
   if (!isPathInside(targetPath, realProjectRoot)) {
     throw fail(WORKTREE_ERRORS.PATH_OUTSIDE, `工作树路径逃出项目根：${targetPath}`, {
       path: targetPath,
+      branch,
+      phase: 'validate-path',
     })
   }
-  const branch = `${WORKTREE_BRANCH_PREFIX}${operationId}`
   const options = {
     timeoutMs,
     maxOutputBytes,
     gitRunner: typeof input.gitRunner === 'function' ? input.gitRunner : undefined,
+    // 所有 WORKTREE_* 错误都带残留位置，便于人工清理（P2）
+    path: targetPath,
+    branch,
   }
 
   // 1) 必须是 git 仓库（拿不到 top-level 就失败关闭）
@@ -418,24 +456,26 @@ export async function createDispatchWorktree(input) {
     ...options,
     cwd: resolvedProjectRoot,
     label: '检查 git 仓库',
+    phase: 'check-repository',
   })
   if (inside.code !== 0 || inside.stdout.trim() !== 'true') {
     throw fail(
       WORKTREE_ERRORS.NOT_GIT_REPOSITORY,
       `${resolvedProjectRoot} 不是 git 工作区，无法创建隔离工作树`,
-      { path: targetPath },
+      { path: targetPath, branch, phase: 'check-repository' },
     )
   }
   const top = await runGit(['rev-parse', '--show-toplevel'], {
     ...options,
     cwd: resolvedProjectRoot,
     label: '读取仓库根',
+    phase: 'read-toplevel',
   })
   if (top.code !== 0 || !top.stdout.trim()) {
     throw fail(
       WORKTREE_ERRORS.NOT_GIT_REPOSITORY,
       `无法读取 ${resolvedProjectRoot} 的仓库根：${gitFailureDetail(top.stderr)}`,
-      { path: targetPath },
+      { path: targetPath, branch, phase: 'read-toplevel' },
     )
   }
   const repositoryRoot = resolve(top.stdout.trim())
@@ -445,6 +485,7 @@ export async function createDispatchWorktree(input) {
     ...options,
     cwd: resolvedProjectRoot,
     label: '读取 git common-dir',
+    phase: 'read-common-dir',
   })
   if (common.code !== 0) {
     // 老版本 git 没有 --path-format；退回相对路径再解析
@@ -452,13 +493,14 @@ export async function createDispatchWorktree(input) {
       ...options,
       cwd: resolvedProjectRoot,
       label: '读取 git common-dir',
+      phase: 'read-common-dir',
     })
   }
   if (common.code !== 0 || !common.stdout.trim()) {
     throw fail(
       WORKTREE_ERRORS.GIT_FAILED,
       `无法读取 git common-dir：${gitFailureDetail(common.stderr)}`,
-      { path: targetPath },
+      { path: targetPath, branch, phase: 'read-common-dir' },
     )
   }
   const commonRaw = common.stdout.trim()
@@ -471,13 +513,14 @@ export async function createDispatchWorktree(input) {
     ...options,
     cwd: resolvedProjectRoot,
     label: `解析基线 ${baseRef}`,
+    phase: 'resolve-base',
   })
   const baseSha = baseResult.stdout.trim()
   if (baseResult.code !== 0 || !baseSha) {
     throw fail(
       WORKTREE_ERRORS.BASE_INVALID,
       `基线 ${JSON.stringify(baseRef)} 无法解析为 commit`,
-      { path: targetPath },
+      { path: targetPath, branch, phase: 'resolve-base' },
     )
   }
 
@@ -485,26 +528,45 @@ export async function createDispatchWorktree(input) {
   if (await pathExists(targetPath)) {
     throw fail(WORKTREE_ERRORS.PATH_EXISTS, `工作树路径已存在：${targetPath}`, {
       path: targetPath,
+      branch,
+      phase: 'precheck-path',
     })
   }
   const registered = await listRegisteredWorktrees(repositoryRoot, options)
   if (registered.some((p) => normalizeForCompare(p) === normalizeForCompare(targetPath))) {
     throw fail(WORKTREE_ERRORS.PATH_EXISTS, `工作树路径已被 git 登记：${targetPath}`, {
       path: targetPath,
+      branch,
+      phase: 'precheck-registered',
     })
   }
 
   // 5) realpath 校验：防 `.meetingstone` 是 junction/symlink 指到项目外
-  const realTarget = await realpathAllowMissing(targetPath)
+  let realTarget
+  try {
+    realTarget = await realpathAllowMissing(targetPath)
+  } catch (err) {
+    throw fail(
+      WORKTREE_ERRORS.GIT_FAILED,
+      `无法解析工作树实际路径：${errorMessage(err)}`,
+      { path: targetPath, branch, phase: 'resolve-realpath', cause: err },
+    )
+  }
   if (!isPathInside(realTarget, realProjectRoot)) {
     throw fail(WORKTREE_ERRORS.PATH_OUTSIDE, `工作树实际路径逃出项目根：${realTarget}`, {
       path: targetPath,
+      branch,
+      phase: 'validate-realpath',
     })
   }
 
   // 6) 分支不得存在
-  if (await branchExists(repositoryRoot, branch, options)) {
-    throw fail(WORKTREE_ERRORS.BRANCH_EXISTS, `分支已存在：${branch}`, { path: targetPath })
+  if (await branchExists(repositoryRoot, branch, { ...options, phase: 'check-branch' })) {
+    throw fail(WORKTREE_ERRORS.BRANCH_EXISTS, `分支已存在：${branch}`, {
+      path: targetPath,
+      branch,
+      phase: 'check-branch',
+    })
   }
 
   // 7) 串行建树；锁内重查，避免同进程两个请求都通过预检
@@ -512,31 +574,44 @@ export async function createDispatchWorktree(input) {
     if (await pathExists(targetPath)) {
       throw fail(WORKTREE_ERRORS.PATH_EXISTS, `工作树路径已存在：${targetPath}`, {
         path: targetPath,
+        branch,
+        phase: 'lock-recheck-path',
       })
     }
-    if (await branchExists(repositoryRoot, branch, options)) {
-      throw fail(WORKTREE_ERRORS.BRANCH_EXISTS, `分支已存在：${branch}`, { path: targetPath })
+    if (await branchExists(repositoryRoot, branch, { ...options, phase: 'lock-check-branch' })) {
+      throw fail(WORKTREE_ERRORS.BRANCH_EXISTS, `分支已存在：${branch}`, {
+        path: targetPath,
+        branch,
+        phase: 'lock-check-branch',
+      })
     }
 
     const add = await runGit(['worktree', 'add', '-b', branch, targetPath, baseSha], {
       ...options,
       cwd: resolvedProjectRoot,
       label: '创建工作树',
+      phase: 'create-worktree',
     })
     if (add.code !== 0) {
       // 竞态兜底：另一进程可能刚好创建了路径/分支
       if (await branchExists(repositoryRoot, branch, options).catch(() => false)) {
-        throw fail(WORKTREE_ERRORS.BRANCH_EXISTS, `分支已存在：${branch}`, { path: targetPath })
+        throw fail(WORKTREE_ERRORS.BRANCH_EXISTS, `分支已存在：${branch}`, {
+          path: targetPath,
+          branch,
+          phase: 'create-worktree',
+        })
       }
       if (await pathExists(targetPath)) {
         throw fail(WORKTREE_ERRORS.PATH_EXISTS, `工作树路径已存在：${targetPath}`, {
           path: targetPath,
+          branch,
+          phase: 'create-worktree',
         })
       }
       throw fail(
         WORKTREE_ERRORS.GIT_FAILED,
         `git worktree add 失败：${gitFailureDetail(add.stderr) || `退出码 ${add.code}`}`,
-        { path: targetPath },
+        { path: targetPath, branch, phase: 'create-worktree' },
       )
     }
 
@@ -548,12 +623,14 @@ export async function createDispatchWorktree(input) {
       throw fail(
         WORKTREE_ERRORS.GIT_FAILED,
         `工作树已创建但无法读取实际路径：${errorMessage(err)}`,
-        { path: targetPath, cause: err },
+        { path: targetPath, branch, phase: 'verify-created-path', cause: err },
       )
     }
     if (!isPathInside(actualPath, realProjectRoot)) {
       throw fail(WORKTREE_ERRORS.PATH_OUTSIDE, `工作树实际路径逃出项目根：${actualPath}`, {
         path: targetPath,
+        branch,
+        phase: 'verify-created-path',
       })
     }
 

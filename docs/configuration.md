@@ -124,24 +124,29 @@
 | git 命令超时（建树 30s / 计算改动 10s） | `WORKTREE_TIMEOUT` |
 | 工作树实际路径逃出项目根 | `WORKTREE_PATH_OUTSIDE` |
 | `isolation` 不是 `none`/`worktree` | `INVALID_ISOLATION` |
-| 取消/卸载时宿主 `dispose()` 超时 | `ADAPTER_DISPOSE_TIMEOUT`：按超时兜底，记录后仍然释放并发槽位并写终态 |
-| 取消/卸载时宿主 `dispose()` 抛错 | `ADAPTER_DISPOSE_FAILED`：记录错误后仍然释放并发槽位并写终态 |
+| 取消/卸载时宿主 `dispose()` 超时 | `ADAPTER_DISPOSE_TIMEOUT`：写终态（`stopConfirmed:false`）并**保留**并发槽位/隔离互斥，等 activation.result 落定后自动释放 |
+| 取消/卸载时宿主 `dispose()` 抛错 | `ADAPTER_DISPOSE_FAILED`：写终态（`stopConfirmed:false`）并**保留**并发槽位/隔离互斥，等 activation.result 落定后自动释放 |
+| 插件已卸载时仍有启动请求 | `ADAPTER_DISPOSED`：拒绝启动；启动中的 activation 返回后立即 dispose，不登记为存活任务 |
 
 ## 6. 生命周期、runtimeId 与 interrupted
 
 - 每次插件启动生成一个 `runtimeId`，写进每一条落盘记录（`.meetingstone/runs/<childId>.json`）。
-- **取消顺序**：先 `abort` → `await activation.dispose()`（默认最多等 5 秒）→ 释放并发槽位。
-  dispose 成功、超时或抛错都会释放，区别只在于终态记录里的 `error` / `diagnostic`。
-  这样旧进程没退干净之前，同项目不可能再派新的写任务。
+- **取消顺序**：先 `abort` → `await activation.dispose()`（默认最多等 5 秒）→ **确认停止后**才释放并发槽位。
+  dispose 超时或抛错时槽位与隔离互斥保留，终态写 `stopConfirmed:false`；等 `activation.result` 落定
+  （可验证的停止证据）后自动释放。重复取消复用同一个收尾 promise。
 - **落盘顺序**：同一 `childId` 的写入按 FIFO 串行，`running` 一定先于终态落地，终态不会被覆盖。
 - **重启后的假 running**：读取时若 `status === 'running'` 且 `runtimeId` 不是当前进程的，投影为
   `status: 'interrupted'` + `interrupted: true`；只改返回值，不回写磁盘。
 - **插件卸载**：对内存中仍存活的任务写 `interrupted` 终态（`stopReason: 'plugin-disposed'`），
-  不会在磁盘留下假 `running`。
+  不会在磁盘留下假 `running`。`dispose` 未确认的任务保留槽位并记 `stopConfirmed:false`；
+  "启动中"（`startActivation` 尚未返回）的 activation 也会被取消，返回后立即 dispose，绝不在卸载后登记。
 - **工作树记录**：终态记录包含 `worktree: { path, branch, baseSha, repositoryRoot, operationId }`、
-  `changedFiles`、`changedFilesUnknown`、`stopConfirmed`。带 `worktree` 的记录**不参与**
-  100 条/30 天自动清理（保护未合并成果的元数据）；工作树/分支本身一律不自动删除。
+  `changedFiles`、`changedFilesUnknown`、`changedFilesTruncated`、`changedFilesTotal`、`stopConfirmed`。
+  `changedFiles` 最多写 5000 条（另有 2MB 字节预算），超出时 `changedFilesTruncated:true` 并保留总数。
+  带 `worktree` 的记录**不参与** 100 条/30 天自动清理（保护未合并成果的元数据）；
+  超大或无法解析的记录同样按 fail-safe **不删除**。工作树/分支本身一律不自动删除。
 - **重叠预警**：`get_task` / `list_runs` 返回 `overlapWarnings: [{ childId, files }]`；
+  终态写入时也会把当时的交集写进原始 JSON（读取时仍可重算）。
   `changedFilesUnknown: true` 的记录不参与比较，但会在结果里标注未知。
 
 ## 7. 示例

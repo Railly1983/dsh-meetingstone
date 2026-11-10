@@ -1,7 +1,7 @@
 // @ts-check
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readdir, readFile, writeFile, stat, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -9,6 +9,8 @@ import {
   truncateUtf8,
   RunStoreError,
   MAX_RESULT_BYTES,
+  MAX_CHANGED_FILES,
+  MAX_FILE_BYTES,
   RUNS_RELATIVE_DIR,
 } from '../src/run-store.js'
 import { registerTools } from '../src/dsh/register.js'
@@ -165,4 +167,136 @@ test('listRuns：新的在前、只给摘要、支持 limit', async () => {
   const limited = await store.listRuns({ limit: 1 })
   assert.equal(limited.length, 1)
   assert.equal(limited[0].childId, 'r3')
+})
+
+// ─── P1：大型 changedFiles 记录必须可读，且清理器 fail-safe 保护 ────────────────
+
+test('changedFiles 超限：截断到 5000 条并记 total/truncated，记录仍可读', async () => {
+  const root = await tempRoot()
+  try {
+    const store = createRunStore({ root })
+    // 16000 条 × 约 250 字节路径：原始记录会超过旧 1MB 读取上限（悟空实测 1.54MB 的场景）
+    const files = Array.from(
+      { length: 16_000 },
+      (_, i) => `dir/${'x'.repeat(220)}-${i}.txt`,
+    )
+    await store.writeRun({
+      childId: ID,
+      status: 'completed',
+      worktree: { path: '/tmp/wt', baseSha: 'b', branch: 'meetingstone/wt', operationId: 'wt' },
+      changedFiles: files,
+    })
+
+    const record = await store.loadRun(ID)
+    assert.ok(record.changedFiles.length <= MAX_CHANGED_FILES, '必须按条数上限截断')
+    assert.equal(record.changedFilesTruncated, true)
+    assert.equal(record.changedFilesTotal, files.length, '必须记录原始总数')
+    assert.equal(record.changedFiles[0], files[0], '保留前面的改动文件（重叠检测优先）')
+
+    const [listed] = await store.listRuns()
+    assert.equal(listed.changedFilesTruncated, true, 'list_runs 也必须暴露截断标记')
+    assert.equal(listed.changedFilesTotal, files.length, 'list_runs 也必须暴露原始总数')
+
+    const { size } = await stat(join(root, RUNS_RELATIVE_DIR, `${ID}.json`))
+    assert.ok(size <= MAX_FILE_BYTES, `记录体积必须受控，实际 ${size} 字节`)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('changedFiles 字节预算：超长路径不会把记录撑爆', async () => {
+  const root = await tempRoot()
+  try {
+    const store = createRunStore({ root })
+    // 每条 4KB，5000 条原始约 20MB；字节预算必须继续裁剪
+    const files = Array.from({ length: 5000 }, (_, i) => `${'y'.repeat(4000)}-${i}`)
+    await store.writeRun({ childId: ID, status: 'completed', changedFiles: files })
+    const record = await store.loadRun(ID)
+    assert.ok(record.changedFiles.length > 0)
+    assert.ok(
+      record.changedFiles.length < files.length,
+      '字节预算必须继续裁剪，而不是只看条数',
+    )
+    assert.equal(record.changedFilesTruncated, true)
+    assert.equal(record.changedFilesTotal, files.length)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('清理 fail-safe：超大或不可解析记录不得因读不了而被删', async () => {
+  const root = await tempRoot()
+  try {
+    const store = createRunStore({ root, maxRuns: 1, maxAgeMs: 1_000_000 })
+    const dir = join(root, RUNS_RELATIVE_DIR)
+    await mkdir(dir, { recursive: true })
+
+    // 超大但仍是合法 JSON 的普通记录（没有 worktree）——旧实现会因 size 跳过解析，
+    // 然后按"未保护"删掉；新实现必须 fail-safe 保护。
+    await writeFile(
+      join(dir, 'huge-run.json'),
+      JSON.stringify({ childId: 'huge-run', status: 'completed', result: 'x'.repeat(MAX_FILE_BYTES + 1024) }),
+      'utf8',
+    )
+    // 坏 JSON 记录：同样无法判断是否带 worktree
+    await writeFile(join(dir, 'broken-run.json'), '{not json', 'utf8')
+    // 一条可解析的普通记录，用来触发条数清理
+    await store.writeRun({ childId: 'plain-run', status: 'completed' })
+    // 再写一条，确保 maxRuns=1 触发淘汰
+    await store.writeRun({ childId: 'plain-run-2', status: 'completed' })
+
+    const names = await readdir(dir)
+    assert.ok(names.includes('huge-run.json'), '超大记录必须被保护，不能因读不了而删')
+    assert.ok(names.includes('broken-run.json'), '坏记录必须被保护，不能因解析失败而删')
+    assert.equal(names.filter((name) => name.startsWith('plain-run')).length, 1, '普通记录仍按上限清理')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// ─── P2：overlapWarnings 必须落盘（原始 JSON 自证） ───────────────────────────
+
+test('overlap 落盘：A→B 与 B→A 两种写入顺序，原始 JSON 与读取结果都正确', async () => {
+  const shared = ['line\nbreak.txt', 'tab\tname.txt', 'shared.txt']
+  for (const order of [['a', 'b'], ['b', 'a']]) {
+    const root = await tempRoot()
+    try {
+      const store = createRunStore({ root })
+      /** @type {Record<string, any>} */
+      const make = (id) => ({
+        childId: id,
+        status: 'completed',
+        worktree: {
+          path: `/tmp/${id}`,
+          baseSha: 'base',
+          branch: `meetingstone/${id}`,
+          operationId: id,
+        },
+        changedFiles: shared,
+      })
+      for (const id of order) await store.writeRun(make(id))
+      const [first, second] = order
+
+      // 后写的记录必须把重叠写进原始 JSON；先写的记录字段存在（当时对方还不存在，允许为空）
+      const rawFirst = JSON.parse(await readFile(join(root, RUNS_RELATIVE_DIR, `${first}.json`), 'utf8'))
+      const rawSecond = JSON.parse(await readFile(join(root, RUNS_RELATIVE_DIR, `${second}.json`), 'utf8'))
+      assert.ok(Array.isArray(rawFirst.overlapWarnings), `${first} 磁盘记录必须含 overlapWarnings 字段`)
+      assert.deepEqual(rawFirst.overlapWarnings, [], '先写入时对方尚不存在，交集为空')
+      const warning = rawSecond.overlapWarnings.find((w) => w.childId === first)
+      assert.ok(warning, `${second} 的原始 JSON 必须记录与 ${first} 的重叠：${JSON.stringify(rawSecond.overlapWarnings)}`)
+      assert.deepEqual(warning.files.slice().sort(), shared.slice().sort(), '换行/制表符文件名必须原样往来')
+
+      // 读取时重算：双方都能看到对方（与写入顺序无关）
+      const loadedFirst = await store.loadRun(first)
+      const loadedSecond = await store.loadRun(second)
+      assert.ok(loadedFirst.overlapWarnings.some((w) => w.childId === second))
+      assert.ok(loadedSecond.overlapWarnings.some((w) => w.childId === first))
+      assert.deepEqual(
+        loadedFirst.overlapWarnings.find((w) => w.childId === second).files.slice().sort(),
+        shared.slice().sort(),
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }
 })

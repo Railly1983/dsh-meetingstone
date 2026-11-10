@@ -87,7 +87,7 @@ const role = (over = {}) => ({
 })
 
 /** 直接组装 dispatcher + 适配器，用于并发槽位断言。 */
-function makeDispatchPair(subagents, adapterOptions = {}) {
+function makeDispatchPair(subagents, adapterOptions = {}, dispatcherOptions = {}) {
   const { ctx, disposers, warns } = fakeCtx({ subagents })
   const adapter = createDshAdapter(ctx, {
     getParent: () => ({ id: 'agent-root' }),
@@ -98,7 +98,7 @@ function makeDispatchPair(subagents, adapterOptions = {}) {
     resolve: (ref) => (String(ref).toLowerCase() === 'ss' ? roleObj : null),
     list: () => [roleObj],
   }
-  const dispatcher = createDispatcher({ registry, adapter })
+  const dispatcher = createDispatcher({ registry, adapter, ...dispatcherOptions })
   return { adapter, dispatcher, ctx, disposers, warns, roleObj }
 }
 
@@ -156,8 +156,16 @@ test('A1：dispose 未完成前同项目再派写任务必须 WRITE_CONFLICT；�
   assert.ok(order.indexOf('dispose-end') < order.indexOf('slot-released'), '槽位释放必须在 dispose 之后')
 })
 
-test('A2：dispose 抛错也要释放槽位，并把 ADAPTER_DISPOSE_FAILED 记进终态', async () => {
-  const subagents = fakeSubagents({ disposeError: new Error('teardown boom') })
+test('A2：dispose 抛错时保留槽位（stopConfirmed:false），结果落定后才释放', async () => {
+  /** @type {(value?: any) => void} */
+  let settle
+  const subagents = fakeSubagents({
+    disposeError: new Error('teardown boom'),
+    result: () =>
+      new Promise((resolve) => {
+        settle = resolve
+      }),
+  })
   const started = []
   const finished = []
   const { ctx, warns } = fakeCtx({ subagents })
@@ -177,20 +185,35 @@ test('A2：dispose 抛错也要释放槽位，并把 ADAPTER_DISPOSE_FAILED 记�
     },
     context: dispatchContext,
   })
-  await a.cancel(res.taskRef)
+  const outcome = await a.cancel(res.taskRef)
 
   assert.equal(started.length, 1)
+  assert.equal(outcome.stopConfirmed, false, 'dispose 失败不得报告已确认停止')
   assert.equal(finished.length, 1, '取消必须写终态')
   assert.equal(finished[0].status, 'cancelled')
   assert.equal(finished[0].error.code, ADAPTER_ERRORS.DISPOSE_FAILED)
   assert.equal(finished[0].stopConfirmed, false, 'dispose 失败不能视为已确认停止')
   assert.match(finished[0].diagnostic, /teardown boom/)
-  assert.equal(released, 1, 'dispose 抛错也必须释放槽位')
+  assert.equal(released, 0, 'dispose 未确认时槽位必须保留（P1）')
   assert.ok(warns.some((l) => l.includes(ADAPTER_ERRORS.DISPOSE_FAILED)), '错误必须记录')
+
+  // 结果落定 = 可验证的停止证据：这时才允许释放槽位，且不得覆盖 cancelled 终态
+  settle({ stopReason: 'completed', output: [{ type: 'text', text: 'late' }] })
+  await delay(30)
+  assert.equal(released, 1, 'result 落定后才释放槽位')
+  assert.equal(finished.length, 1, '取消后的终态不能被 completed 覆盖')
 })
 
-test('A3：dispose 卡死时按 ADAPTER_DISPOSE_TIMEOUT 兜底，不会永久占槽', async () => {
-  const subagents = fakeSubagents({ disposeHangs: true })
+test('A3：dispose 超时按 ADAPTER_DISPOSE_TIMEOUT 兜底返回，槽位保留到结果落定', async () => {
+  /** @type {(value?: any) => void} */
+  let settle
+  const subagents = fakeSubagents({
+    disposeHangs: true,
+    result: () =>
+      new Promise((resolve) => {
+        settle = resolve
+      }),
+  })
   const finished = []
   const { adapter, ctx } = fakeCtx({ subagents })
   const a = createDshAdapter(ctx, {
@@ -211,12 +234,70 @@ test('A3：dispose 卡死时按 ADAPTER_DISPOSE_TIMEOUT 兜底，不会永久占
   })
 
   const t0 = Date.now()
-  await a.cancel(res.taskRef)
+  const outcome = await a.cancel(res.taskRef)
   const elapsed = Date.now() - t0
   assert.ok(elapsed < 1000, `超时兜底应立即返回，实际 ${elapsed}ms`)
+  assert.equal(outcome.stopConfirmed, false)
   assert.equal(finished[0].error.code, ADAPTER_ERRORS.DISPOSE_TIMEOUT)
   assert.equal(finished[0].stopConfirmed, false, 'dispose 超时不能视为已确认停止')
-  assert.equal(released, 1, '超时后也必须释放槽位')
+  assert.equal(released, 0, '超时未确认停止时必须保留槽位（P1）')
+
+  settle({ stopReason: 'completed', output: [] })
+  await delay(30)
+  assert.equal(released, 1, '结果落定后才释放保留的槽位')
+})
+
+test('A5：dispose 未确认时 dispatcher 槽位与项目互斥保留，结果落定后才允许新派单', async () => {
+  /** @type {(value?: any) => void} */
+  let settle
+  const subagents = fakeSubagents({
+    disposeHangs: true,
+    result: () =>
+      new Promise((resolve) => {
+        settle = resolve
+      }),
+  })
+  const { dispatcher } = makeDispatchPair(subagents, { disposeTimeoutMs: 20 }, {
+    limits: {
+      defaultIsolation: 'none',
+      serializeWrites: true,
+      maxParallelWritesPerProject: 1,
+      maxParallelWritesTotal: 10,
+    },
+  })
+
+  const first = await dispatcher.dispatch({
+    role: 'SS',
+    task: '写 A',
+    projectKey: 'p-retain',
+    context: dispatchContext,
+  })
+  assert.equal(first.ok, true)
+  assert.equal(dispatcher.stats().active, 1)
+
+  const outcome = await dispatcher.cancel(first.taskRef)
+  assert.equal(outcome.stopConfirmed, false)
+  assert.equal(dispatcher.stats().active, 1, 'dispose 未确认不得释放槽位/隔离互斥')
+
+  const blocked = await dispatcher.dispatch({
+    role: 'SS',
+    task: '写 B',
+    projectKey: 'p-retain',
+    context: dispatchContext,
+  })
+  assert.equal(blocked.ok, false, '槽位保留期间不得接受新的同项目写任务')
+  assert.equal(blocked.code, 'WRITE_CONFLICT')
+
+  settle({ stopReason: 'completed', output: [] })
+  await delay(30)
+  assert.equal(dispatcher.stats().active, 0, '结果落定后才释放')
+  const after = await dispatcher.dispatch({
+    role: 'SS',
+    task: '写 C',
+    projectKey: 'p-retain',
+    context: dispatchContext,
+  })
+  assert.equal(after.ok, true, '释放后应能继续派单')
 })
 
 test('A4：并发重复取消只 dispose 一次，两次都等到同一个取消结果', async () => {
@@ -433,4 +514,96 @@ test('C3：get_task / list_runs 对上一个进程的 running 显示 interrupted
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('C4：卸载 dispose 失败时写 interrupted + stopConfirmed:false，且不释放槽位', async () => {
+  const finished = []
+  const subagents = fakeSubagents({ disposeError: new Error('unload boom') })
+  const { ctx, disposers } = fakeCtx({ subagents })
+  const a = createDshAdapter(ctx, {
+    getParent: () => ({ id: 'agent-root' }),
+    onRunFinish: (r) => finished.push(r),
+  })
+  let released = 0
+  await a.start({
+    role: role(),
+    task: 'x',
+    timeoutMs: 0,
+    onFinish: () => {
+      released += 1
+    },
+    context: dispatchContext,
+  })
+
+  for (const dispose of disposers) if (typeof dispose === 'function') await dispose()
+
+  assert.equal(finished.length, 1, '卸载必须写终态')
+  assert.equal(finished[0].status, 'interrupted')
+  assert.equal(finished[0].stopConfirmed, false, 'dispose 失败不得视为已确认停止')
+  assert.match(finished[0].diagnostic, /unload boom/)
+  assert.equal(released, 0, '卸载未确认时不得释放槽位（P1）')
+  assert.equal(subagents.disposed.length, 1, '重复卸载不得重复 dispose')
+})
+
+test('C5：启动中卸载——占位被取消；activation 返回后立即 dispose 且拒绝登记', async () => {
+  /** @type {() => void} */
+  let releaseStart
+  const gate = new Promise((resolve) => {
+    releaseStart = resolve
+  })
+  const disposed = []
+  const subagents = {
+    getProvider() {
+      return { name: 'acp' }
+    },
+    async startActivation() {
+      await gate
+      return {
+        childId: 'late-child',
+        name: 'late-child',
+        result: new Promise(() => {}),
+        async dispose() {
+          disposed.push('late-child')
+        },
+      }
+    },
+  }
+  const started = []
+  const finished = []
+  const { ctx, disposers } = fakeCtx({ subagents })
+  const a = createDshAdapter(ctx, {
+    getParent: () => ({ id: 'agent-root' }),
+    onRunStart: (r) => started.push(r),
+    onRunFinish: (r) => finished.push(r),
+  })
+
+  let released = 0
+  const starting = a.start({
+    role: role(),
+    task: '慢启动',
+    timeoutMs: 0,
+    onFinish: () => {
+      released += 1
+    },
+    context: dispatchContext,
+  })
+  await delay(10) // 让 start 进入 startActivation 等待
+
+  for (const dispose of disposers) if (typeof dispose === 'function') await dispose()
+  assert.equal(released, 1, '卸载必须取消启动中的占位并释放其槽位')
+
+  releaseStart()
+  await assert.rejects(() => starting, /ADAPTER_DISPOSED/)
+  assert.equal(disposed.length, 1, '启动返回后必须立即 dispose，不得留下存活 activation')
+  assert.equal(started.length, 0, '卸载后不得再登记 running 记录')
+  assert.equal(finished.length, 0, '没有 childId 的启动不应写终态')
+
+  const late = await a.getTask('late-child')
+  assert.equal(late.status, 'unknown', '卸载后不得出现新的存活句柄')
+
+  // 卸载后一律拒绝新启动
+  await assert.rejects(
+    () => a.start({ role: role(), task: 'x', timeoutMs: 0, context: dispatchContext }),
+    /ADAPTER_DISPOSED/,
+  )
 })

@@ -486,6 +486,13 @@ export function registerTools(ctx, deps) {
               worktree: persisted.worktree ?? live.worktree ?? null,
               changedFiles: Array.isArray(persisted.changedFiles) ? persisted.changedFiles : null,
               changedFilesUnknown: persisted.changedFilesUnknown === true,
+              changedFilesTruncated: persisted.changedFilesTruncated === true,
+              changedFilesTotal:
+                typeof persisted.changedFilesTotal === 'number'
+                  ? persisted.changedFilesTotal
+                  : Array.isArray(persisted.changedFiles)
+                    ? persisted.changedFiles.length
+                    : null,
               overlapWarnings: Array.isArray(persisted.overlapWarnings)
                 ? persisted.overlapWarnings
                 : [],
@@ -504,7 +511,8 @@ export function registerTools(ctx, deps) {
     {
       name: TOOL_NAMES.CANCEL_TASK,
       description:
-        '按 childId 取消一次派发（中止 + 释放宿主 activation），并释放并发槽位。重复调用无害。',
+        '按 childId 取消一次派发（中止 + 释放宿主 activation）。只有确认停止（stopConfirmed:true）才释放并发槽位；' +
+        'dispose 超时/失败时槽位保留，等任务结果落定后自动释放。重复调用无害。',
       parameters: {
         childId: { type: 'string', required: true, description: 'meetingstone_dispatch 返回的 taskRef.childId' },
       },
@@ -514,8 +522,17 @@ export function registerTools(ctx, deps) {
         if (typeof childId !== 'string' || !childId.trim()) {
           return { ok: false, code: 'INVALID_CHILD_ID', message: '缺少 childId' }
         }
-        await dispatcher.cancel(childId.trim())
-        return { ok: true, childId: childId.trim(), cancelled: true }
+        const id = childId.trim()
+        const outcome = await dispatcher.cancel(id)
+        const stopConfirmed = outcome?.stopConfirmed === true
+        return {
+          ok: true,
+          childId: id,
+          // cancelled 只表示「已确认停止」；未确认时槽位仍被保留，必须如实说明
+          cancelled: stopConfirmed,
+          stopConfirmed,
+          ...(!stopConfirmed && outcome?.reason ? { reason: outcome.reason } : {}),
+        }
       },
     },
     {

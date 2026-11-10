@@ -15,6 +15,8 @@ import { join, resolve } from 'node:path'
 import {
   createDispatchWorktree,
   computeChangedFiles,
+  parseStatusPorcelainZ,
+  parseNameStatusZ,
   sanitizedGitEnv,
   WORKTREE_ERRORS,
   WORKTREE_RELATIVE_DIR,
@@ -188,10 +190,15 @@ test('computeChangedFiles：已提交/暂存/未暂存/未跟踪/重命名（新
     await writeFile(join(cwd, 'untracked.txt'), 'untracked\n', 'utf8')
     // 重命名（暂存）
     git(cwd, 'mv', 'old.txt', 'renamed.txt')
-    // 已提交改动
+    // 已提交改动（path-limited commit：不能把 staged.txt 一起提交掉，
+    // 否则"暂存态"样本消失，测试就失去意义）
     await writeFile(join(cwd, 'committed.txt'), 'committed\n', 'utf8')
     git(cwd, 'add', 'committed.txt')
-    git(cwd, 'commit', '-q', '-m', 'committed change')
+    git(cwd, 'commit', '-q', '-m', 'committed change', '--', 'committed.txt')
+
+    // 独立的暂存样本：仍在索引里，但不在 HEAD 里
+    assert.match(git(cwd, 'status', '--porcelain'), /A  staged\.txt/, 'staged.txt 必须是真正的暂存样本')
+    assert.equal(git(cwd, 'ls-tree', '--name-only', 'HEAD', 'staged.txt').trim(), '', 'staged.txt 不得被提交吃掉')
 
     const result = await computeChangedFiles(cwd, baseSha)
     assert.equal(result.unknown, false, `不应未知：${JSON.stringify(result)}`)
@@ -258,6 +265,143 @@ test('工作树不复制未跟踪/忽略文件（文档承诺的行为）', asyn
     assert.equal(existsSync(join(wt.path, 'ignored.txt')), false, '未跟踪/忽略文件不应出现在工作树')
     // 主工作区文件没被改动
     assert.equal(await readFile(join(root, 'ignored.txt'), 'utf8'), 'local\n')
+  } finally {
+    await removeRepo(root)
+  }
+})
+
+// ─── NUL 解析：特殊文件名必须原样保留 ─────────────────────────────────────────
+
+test('parseStatusPorcelainZ：换行/制表符文件名按 NUL 原样解析', () => {
+  const status = '?? line\nbreak.txt\0 M tab\tname.txt\0R  new\nname.txt\0old\tname.txt\0'
+  assert.deepEqual(parseStatusPorcelainZ(status), [
+    'line\nbreak.txt',
+    'tab\tname.txt',
+    'old\tname.txt',
+    'new\nname.txt',
+  ])
+})
+
+test('parseNameStatusZ：换行/制表符文件名按 NUL 原样解析（含重命名）', () => {
+  const diff = 'R100\0old\tname.txt\0new\nname.txt\0M\0tab\tname.txt\0'
+  assert.deepEqual(parseNameStatusZ(diff), [
+    'old\tname.txt',
+    'new\nname.txt',
+    'tab\tname.txt',
+  ])
+})
+
+test('computeChangedFiles：换行/制表符文件名经真实 git -z 原样返回', async (t) => {
+  // Windows Win32 API 不允许在文件名里放换行/制表符（Node 写入直接 ENOENT），
+  // 该端到端用例只在 POSIX 跑；Windows 由上面的 NUL 解析单测覆盖。
+  if (process.platform === 'win32') {
+    t.skip('Windows 文件名不允许换行/制表符，端到端用例跳过（解析层已单测）')
+    return
+  }
+  const { root, baseSha } = await makeRepo()
+  try {
+    const wt = await createDispatchWorktree({ projectRoot: root, operationId: 'op-weird-names' })
+    const names = ['line\nbreak.txt', 'tab\tname.txt']
+    for (const name of names) {
+      await writeFile(join(wt.path, name), 'x\n', 'utf8')
+    }
+    const result = await computeChangedFiles(wt.path, baseSha)
+    assert.equal(result.unknown, false, JSON.stringify(result))
+    const files = new Set(/** @type {string[]} */ (result.files))
+    for (const name of names) {
+      assert.ok(files.has(name), `必须原样保留 ${JSON.stringify(name)}，实际 ${JSON.stringify([...files])}`)
+    }
+  } finally {
+    await removeRepo(root)
+  }
+})
+
+// ─── WORKTREE_* 错误必须带残留位置（path/branch/phase） ──────────────────────
+
+test('WORKTREE_* 错误带 path/branch/phase：list / 预检分支 / 锁内分支检查失败可定位', async () => {
+  const { root } = await makeRepo()
+  try {
+    /**
+     * @param {'list' | 'branch' | 'lock-branch'} failOn
+     */
+    const makeRunner = (failOn) => {
+      let showRefCalls = 0
+      return async (request) => {
+        const args = request.args.join(' ')
+        if (args.includes('--is-inside-work-tree')) {
+          return { code: 0, stdout: 'true\n', stderr: '' }
+        }
+        if (args.includes('--show-toplevel')) {
+          return { code: 0, stdout: `${root}\n`, stderr: '' }
+        }
+        if (args.includes('--git-common-dir')) {
+          return { code: 0, stdout: `${join(root, '.git')}\n`, stderr: '' }
+        }
+        if (args.includes('show-ref')) {
+          showRefCalls += 1
+          if (failOn === 'branch') return { code: 128, stdout: '', stderr: 'branch boom' }
+          if (failOn === 'lock-branch') {
+            return showRefCalls === 1
+              ? { code: 1, stdout: '', stderr: '' }
+              : { code: 128, stdout: '', stderr: 'lock boom' }
+          }
+          return { code: 1, stdout: '', stderr: '' }
+        }
+        if (args.includes('--verify')) {
+          return { code: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' }
+        }
+        if (args.includes('worktree list')) {
+          if (failOn === 'list') return { code: 128, stdout: '', stderr: 'list boom' }
+          return { code: 0, stdout: '', stderr: '' }
+        }
+        return { code: 0, stdout: '', stderr: '' }
+      }
+    }
+
+    const cases = [
+      { failOn: 'list', phase: 'list-worktrees' },
+      { failOn: 'branch', phase: 'check-branch' },
+      { failOn: 'lock-branch', phase: 'lock-check-branch' },
+    ]
+    // 目标目录在失败场景里可能尚未创建：只做规范化字符串比较，不 realpath
+    const sameTarget = (a, b) => {
+      const norm = (p) => {
+        const abs = resolve(p)
+        return process.platform === 'win32' ? abs.toLowerCase() : abs
+      }
+      return norm(a) === norm(b)
+    }
+    for (const { failOn, phase } of cases) {
+      const operationId = `op-${failOn}`
+      const expectedPath = resolve(root, WORKTREE_RELATIVE_DIR, operationId)
+      await assert.rejects(
+        () =>
+          createDispatchWorktree({
+            projectRoot: root,
+            operationId,
+            gitRunner: makeRunner(failOn),
+          }),
+        (err) => {
+          assert.equal(err.code, WORKTREE_ERRORS.GIT_FAILED, `${failOn}: 错误码`)
+          assert.ok(
+            err.path && sameTarget(err.path, expectedPath),
+            `${failOn}: 必须带残留路径 ${expectedPath}，实际 ${err.path}`,
+          )
+          assert.equal(err.branch, `meetingstone/${operationId}`, `${failOn}: 必须带分支`)
+          assert.equal(err.phase, phase, `${failOn}: 必须带阶段`)
+          assert.deepEqual(
+            {
+              path: err.details?.path,
+              branch: err.details?.branch,
+              phase: err.details?.phase,
+            },
+            { path: err.path, branch: err.branch, phase: err.phase },
+            `${failOn}: details 必须与顶层字段一致`,
+          )
+          return true
+        },
+      )
+    }
   } finally {
     await removeRepo(root)
   }

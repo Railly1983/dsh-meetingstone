@@ -9,7 +9,7 @@
 import test, { afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -196,6 +196,87 @@ test('同仓库路径别名不绕限：尾斜杠/Windows 大小写折叠到同�
     projectRoot: 'D:/P',
   })
   assert.equal(byRoot.ok, true)
+})
+
+test('同目录别名（原路径 vs src/..）不绕项目额度与隔离互斥（realpath）', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'mt-alias-'))
+  const alias = join(root, 'src', '..')
+  try {
+    await mkdir(join(root, 'src'), { recursive: true })
+    const { dispatcher } = makeDispatcher({
+      limits: {
+        defaultIsolation: 'worktree',
+        maxParallelWritesPerProject: 1,
+        maxParallelWritesTotal: 10,
+      },
+    })
+
+    const first = await dispatcher.dispatch(
+      req({ projectKey: root, projectRoot: root, isolation: 'worktree', task: 'a' }),
+    )
+    assert.equal(first.ok, true)
+    const byAlias = await dispatcher.dispatch(
+      req({ projectKey: alias, projectRoot: alias, isolation: 'worktree', task: 'b' }),
+    )
+    assert.equal(
+      byAlias.code,
+      DISPATCH_ERRORS.WRITE_LIMIT_PROJECT,
+      '`原路径` 与 `原路径/src/..` 必须共享同一项目额度',
+    )
+
+    dispatcher.release(first.taskRef)
+    const isolated = await dispatcher.dispatch(
+      req({ projectKey: root, projectRoot: root, isolation: 'worktree', task: 'c' }),
+    )
+    assert.equal(isolated.ok, true)
+    // 同一仓库身份下，隔离与未隔离也不能借别名混跑
+    const plainByAlias = await dispatcher.dispatch(
+      req({ projectKey: alias, projectRoot: alias, isolation: 'none', task: 'd' }),
+    )
+    assert.equal(
+      plainByAlias.code,
+      DISPATCH_ERRORS.WRITE_CONFLICT,
+      '别名指向同一仓库时，未隔离任务必须与隔离任务互斥',
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('目录 symlink/junction 与真实路径共享同一额度键', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'mt-real-'))
+  const link = `${root}-link`
+  try {
+    await symlink(root, link, process.platform === 'win32' ? 'junction' : 'dir')
+  } catch (err) {
+    t.skip(`当前环境无法创建目录链接，跳过：${err instanceof Error ? err.message : String(err)}`)
+    await rm(root, { recursive: true, force: true })
+    return
+  }
+  try {
+    const { dispatcher } = makeDispatcher({
+      limits: {
+        defaultIsolation: 'worktree',
+        maxParallelWritesPerProject: 1,
+        maxParallelWritesTotal: 10,
+      },
+    })
+    const first = await dispatcher.dispatch(
+      req({ projectKey: root, projectRoot: root, isolation: 'worktree' }),
+    )
+    assert.equal(first.ok, true)
+    const viaLink = await dispatcher.dispatch(
+      req({ projectKey: link, projectRoot: link, isolation: 'worktree' }),
+    )
+    assert.equal(
+      viaLink.code,
+      DISPATCH_ERRORS.WRITE_LIMIT_PROJECT,
+      'junction/symlink 不得绕过项目额度',
+    )
+  } finally {
+    await rm(link, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 // ─── 失败关闭 / 混跑纪律 ─────────────────────────────────────────────────────
@@ -473,6 +554,116 @@ test('默认隔离：派单在独立工作树里启动，终态记录 worktree/c
   }
 })
 
+test('真实并行：两任务时间重叠、两棵不同工作树、各自真实写文件', async () => {
+  const { root } = await makeRepo({ '.gitignore': '.meetingstone/\n' })
+  try {
+    const subagents = controllableSubagents({
+      onStart: async (item) => {
+        const childId = item.childId
+        await writeFile(join(item.spec.request.cwd, `${childId}.txt`), `${childId}\n`, 'utf8')
+      },
+    })
+    const { tool } = applyPlugin(root, subagents)
+    const dispatch = tool('meetingstone_dispatch')
+
+    const a = await dispatch.execute({ role: 'SS', task: 'a' }, execFor(root))
+    assert.equal(a.ok, true, JSON.stringify(a))
+    await delay(169) // 悟空实测的重叠窗口：A 还在跑时启动 B
+    const b = await dispatch.execute({ role: 'SS', task: 'b' }, execFor(root))
+    assert.equal(b.ok, true, JSON.stringify(b))
+
+    // 两棵不同的真实工作树，各自真实写入了自己的文件
+    assert.notEqual(a.worktree.path, b.worktree.path, '两个任务必须使用不同工作树')
+    assert.equal(existsSync(a.worktree.path), true)
+    assert.equal(existsSync(b.worktree.path), true)
+    const aFile = join(a.worktree.path, `${a.taskRef.childId}.txt`)
+    const bFile = join(b.worktree.path, `${b.taskRef.childId}.txt`)
+    assert.equal(existsSync(aFile), true, 'A 的文件必须写在自己的工作树里')
+    assert.equal(existsSync(bFile), true, 'B 的文件必须写在自己的工作树里')
+    assert.equal(existsSync(join(b.worktree.path, `${a.taskRef.childId}.txt`)), false, '两棵树不得串文件')
+    assert.equal(existsSync(join(a.worktree.path, `${b.taskRef.childId}.txt`)), false)
+    assert.equal(existsSync(join(root, `${a.taskRef.childId}.txt`)), false, '改动不得落主工作区')
+    assert.equal(existsSync(join(root, `${b.taskRef.childId}.txt`)), false)
+
+    // 时间重叠：B 启动时 A 仍在执行；A 结束后 B 才结束
+    const aFinishedAtBeforeB = Date.now()
+    assert.ok(a.startedAt <= b.startedAt, 'A 先启动')
+    assert.ok(b.startedAt < aFinishedAtBeforeB, `B 启动时 A 必须仍在执行（B=${b.startedAt} A-resolve=${aFinishedAtBeforeB}）`)
+
+    subagents.pending.find((p) => p.childId === a.taskRef.childId)?.resolve({
+      stopReason: 'completed',
+      output: [],
+    })
+    await waitCompleted(root, a.taskRef.childId)
+    const aFinishedAt = Date.now()
+    subagents.pending.find((p) => p.childId === b.taskRef.childId)?.resolve({
+      stopReason: 'completed',
+      output: [],
+    })
+    await waitCompleted(root, b.taskRef.childId)
+    const bFinishedAt = Date.now()
+
+    const overlapMs = Math.min(aFinishedAt, bFinishedAt) - Math.max(a.startedAt, b.startedAt)
+    assert.ok(overlapMs > 0, `两个任务必须有真实时间重叠，实际 ${overlapMs}ms`)
+  } finally {
+    await removeRepo(root)
+  }
+})
+
+test('主区保护：脏文件/未跟踪/索引/HEAD 在两个隔离任务前后逐项不变', async () => {
+  const { root } = await makeRepo({
+    '.gitignore': '.meetingstone/\n',
+    'base.txt': 'base\n',
+    'dirty.txt': 'original\n',
+  })
+  try {
+    // 独立的脏文件、未跟踪文件、暂存样本（暂存后绝不 commit，确保是真正的 staged-only）
+    await writeFile(join(root, 'dirty.txt'), 'dirty-in-main\n', 'utf8')
+    await writeFile(join(root, 'untracked-main.txt'), 'untracked\n', 'utf8')
+    await writeFile(join(root, 'staged-main.txt'), 'staged-only\n', 'utf8')
+    git(root, 'add', 'staged-main.txt')
+
+    const snapshot = async () => ({
+      status: git(root, 'status', '--porcelain=v1', '-z', '--untracked-files=all'),
+      index: git(root, 'ls-files', '--stage'),
+      head: git(root, 'rev-parse', 'HEAD'),
+      dirty: await readFile(join(root, 'dirty.txt'), 'utf8'),
+      untracked: await readFile(join(root, 'untracked-main.txt'), 'utf8'),
+      staged: await readFile(join(root, 'staged-main.txt'), 'utf8'),
+    })
+
+    const before = await snapshot()
+    assert.match(before.status, /A  staged-main\.txt/, '样本必须处于真正的暂存态')
+    assert.equal(git(root, 'ls-tree', '--name-only', 'HEAD', 'staged-main.txt').trim(), '', '暂存样本不得已被 commit')
+
+    const subagents = controllableSubagents({
+      onStart: async (item) => {
+        await writeFile(join(item.spec.request.cwd, `${item.childId}.txt`), 'child\n', 'utf8')
+      },
+    })
+    const { tool } = applyPlugin(root, subagents)
+    const dispatch = tool('meetingstone_dispatch')
+    const a = await dispatch.execute({ role: 'SS', task: 'a' }, execFor(root))
+    const b = await dispatch.execute({ role: 'SS', task: 'b' }, execFor(root))
+    assert.equal(a.ok && b.ok, true, JSON.stringify({ a, b }))
+    for (const item of subagents.pending) item.resolve({ stopReason: 'completed', output: [] })
+    await waitCompleted(root, a.taskRef.childId)
+    await waitCompleted(root, b.taskRef.childId)
+
+    const after = await snapshot()
+    assert.equal(after.head, before.head, 'HEAD 不得变化')
+    assert.equal(after.index, before.index, '索引（含暂存样本）必须逐字节不变')
+    assert.equal(after.status, before.status, '主区状态（脏文件/未跟踪）必须逐字节不变')
+    assert.equal(after.dirty, before.dirty, '已有脏文件内容不得被改动')
+    assert.equal(after.untracked, before.untracked, '未跟踪文件内容不得被改动')
+    assert.equal(after.staged, before.staged, '暂存样本内容不得被改动')
+    assert.equal(git(root, 'ls-tree', '--name-only', 'HEAD', 'staged-main.txt').trim(), '', '暂存样本不得变成提交')
+  } finally {
+    await removeRepo(root)
+  }
+})
+
+
 test('项目额度 2（插件层）：第三个被拒且不建树；完成后槽位释放', async () => {
   const { root } = await makeRepo()
   try {
@@ -642,16 +833,29 @@ test('重叠：两棵树改同一文件 → 双方 overlapWarnings 命中；未�
     const b = await dispatch.execute({ role: 'SS', task: 'b' }, execFor(root))
     assert.equal(a.ok && b.ok, true, JSON.stringify({ a, b }))
 
+    // 顺序完成：先 A 后 B，确保 B 的终态写入时 A 的记录已经落盘，
+    // 这样"原始 JSON 必须含 overlapWarnings"可以严格断言（而不是靠读写时序碰运气）。
     subagents.pending.find((p) => p.childId === a.taskRef.childId)?.resolve({
       stopReason: 'completed',
       output: [],
     })
+    await waitCompleted(root, a.taskRef.childId)
     subagents.pending.find((p) => p.childId === b.taskRef.childId)?.resolve({
       stopReason: 'completed',
       output: [],
     })
-    await waitCompleted(root, a.taskRef.childId)
     await waitCompleted(root, b.taskRef.childId)
+
+    // 原始磁盘记录对照（P2）：后写的 B 必须把与 A 的重叠写进 JSON
+    const rawB = JSON.parse(
+      await readFile(join(root, RUNS_RELATIVE_DIR, `${b.taskRef.childId}.json`), 'utf8'),
+    )
+    assert.ok(Array.isArray(rawB.overlapWarnings), '磁盘记录必须包含 overlapWarnings 字段')
+    const rawWarning = rawB.overlapWarnings.find((w) => w.childId === a.taskRef.childId)
+    assert.ok(rawWarning, `原始 JSON 必须记录与 A 的重叠：${JSON.stringify(rawB.overlapWarnings)}`)
+    for (const file of ['old.txt', 'untracked-same.txt']) {
+      assert.ok(rawWarning.files.includes(file), `原始 JSON 的预警应含 ${file}`)
+    }
 
     const listRuns = tool('meetingstone_list_runs')
     const listed = await listRuns.execute({}, execFor(root))

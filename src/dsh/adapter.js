@@ -277,7 +277,8 @@ function safeService(ctx, name) {
  * @param {() => number} [options.now]
  * @returns {{ canStart: (role: object) => { ok: boolean, reason?: string },
  *            start: (input: object) => Promise<{ taskRef: MeetingstoneTaskRef }>,
- *            cancel: (taskRef: object) => Promise<void> }}
+ *            cancel: (taskRef: object) => Promise<{ stopConfirmed: boolean, code?: string, message?: string, reason?: string }>,
+ *            getTask: (ref: string | object) => Promise<object> }}
  */
 export function createDshAdapter(ctx, options = {}) {
   const getParent = options.getParent ?? null
@@ -323,8 +324,18 @@ export function createDshAdapter(ctx, options = {}) {
     }
   }
 
-  /** @type {Map<string, { activation: any, controller: AbortController, timer: any, onFinish?: Function }>} */
+  /** @type {Map<string, { activation: any, controller: AbortController, timer: any, onFinish?: Function, cancelling?: boolean, settled?: boolean, cleaned?: boolean, cancelPromise?: Promise<any>, runBase?: any }>} */
   const handles = new Map()
+  /**
+   * 启动中的占位句柄：`startActivation` 还没返回时没有 childId，无法进 handles。
+   * 卸载必须能看见并取消它们，否则「启动中」的 activation 会在卸载后偷偷登记成存活任务。
+   * key = `op:<operationId>` 或 `start:<序号>`。
+   * @type {Map<string, { controller: AbortController, cancelled: boolean, onFinish?: Function }>}
+   */
+  const pendingStarts = new Map()
+  /** 插件是否已进入卸载收尾。进入后拒绝一切新启动。 */
+  let disposed = false
+  let startSeq = 0
 
   /**
    * 已完成任务的结果快照（childId → 结果），只留最近 20 条。
@@ -414,6 +425,9 @@ export function createDshAdapter(ctx, options = {}) {
   }
 
   async function start(input) {
+    if (disposed) {
+      throw new Error('ADAPTER_DISPOSED: 插件正在卸载，拒绝启动新任务')
+    }
     const { role, task, cwd, timeoutMs } = input ?? {}
     // 执行路由**必须**以引用的通道实例为准，不能只信角色自己的声明。
     // 否则：角色写 channelId=A 实例 + provider=B，配置与实际执行的通道会不一致。
@@ -500,6 +514,12 @@ export function createDshAdapter(ctx, options = {}) {
     //    delivery:'caller' —— 「caller delivery only returns the result」（subagent.md）；
     //    TODO(P2-runtime): 该取值尚未在真实会话里验证，若宿主要求 parent delivery 需改这里。
     const controller = new AbortController()
+    const operationId =
+      typeof input?.operationId === 'string' && input.operationId
+        ? input.operationId
+        : typeof input?.worktree?.operationId === 'string'
+          ? input.worktree.operationId
+          : null
     // 3. 组装 spec。**运行时形状与官方文档不一致**（2026-11-10 真机核对）：
     //    实现里 `SubagentRuntime.startActivation(spec)` 读的是 `spec.request.*`
     //    （`manager.startLocal/startExternal` 里 `const request = spec.request`），
@@ -521,18 +541,36 @@ export function createDshAdapter(ctx, options = {}) {
     }
 
     // 4. 调宿主创建任务。抛错（含权限被拒 / 参数不接受）直接向上抛，不吞。
-    const activation = await subagents.startActivation(spec)
+    //
+    // 在 await **之前**登记占位句柄：这段时间没有 childId，卸载按 handles 扫不到。
+    // 卸载会标记这个占位（cancelled）并 abort；启动返回后我们检查标记，
+    // 若已卸载就立即 dispose、拒绝登记，绝不让它变成卸载后的存活 activation。
+    // 进入这里前的 cwd 校验含 await，卸载可能在期间发生：再查一次，避免占位漏给卸载。
+    if (disposed) {
+      throw new Error('ADAPTER_DISPOSED: 插件已卸载，拒绝启动')
+    }
+    const startKey = operationId ? `op:${operationId}` : `start:${(startSeq += 1)}`
+    /** @type {{ controller: AbortController, cancelled: boolean, onFinish?: Function }} */
+    const placeholder = { controller, cancelled: false, onFinish: input?.onFinish }
+    pendingStarts.set(startKey, placeholder)
+    let activation
+    try {
+      activation = await subagents.startActivation(spec)
+    } catch (err) {
+      pendingStarts.delete(startKey)
+      throw err
+    }
+    pendingStarts.delete(startKey)
+    if (placeholder.cancelled || disposed) {
+      // 卸载已经发生：这个 activation 不允许登记，立即释放宿主资源后向上抛。
+      await disposeActivation(activation, disposeTimeoutMs)
+      throw new Error('ADAPTER_DISPOSED: 插件已卸载，拒绝登记启动结果')
+    }
     if (!activation || !activation.childId) {
       throw new Error('ADAPTER_FAILED: startActivation 未返回有效 activation（缺 childId）')
     }
 
     const childId = String(activation.childId)
-    const operationId =
-      typeof input?.operationId === 'string' && input.operationId
-        ? input.operationId
-        : typeof input?.worktree?.operationId === 'string'
-          ? input.worktree.operationId
-          : null
     /** @type {MeetingstoneTaskRef} */
     const taskRef = {
       kind: 'subagent-activation',
@@ -582,8 +620,13 @@ export function createDshAdapter(ctx, options = {}) {
       void activation.result.then(
         (result) => {
           const handleForResult = handles.get(childId)
-          // 取消/卸载已经开始收尾时，由那条路径写终态，避免"先 cancelled、又被 completed 覆盖"
-          if (!handleForResult || handleForResult.cancelling) return
+          if (!handleForResult) return
+          // 取消/卸载已经开始收尾时，由那条路径写终态，避免"先 cancelled、又被 completed 覆盖"；
+          // 但 result 落定本身就是"进程已停止"的可验证证据，此时才允许释放保留的槽位。
+          if (handleForResult.cancelling) {
+            cleanup(childId)
+            return
+          }
           if (!claimSettlement(handleForResult)) return
           const settled = {
             status: 'completed',
@@ -606,7 +649,11 @@ export function createDshAdapter(ctx, options = {}) {
         },
         (err) => {
           const handleForResult = handles.get(childId)
-          if (!handleForResult || handleForResult.cancelling) return
+          if (!handleForResult) return
+          if (handleForResult.cancelling) {
+            cleanup(childId)
+            return
+          }
           if (!claimSettlement(handleForResult)) return
           const settled = {
             status: 'failed',
@@ -647,7 +694,8 @@ export function createDshAdapter(ctx, options = {}) {
   /** @param {string} childId */
   function cleanup(childId) {
     const handle = handles.get(childId)
-    if (!handle) return
+    if (!handle || handle.cleaned) return
+    handle.cleaned = true
     handles.delete(childId)
     if (handle.timer) clearTimeout(handle.timer)
     // 通知 dispatcher 释放并发槽位（幂等；适配器只负责"叫一声"，不关心上层怎么记账）
@@ -685,17 +733,25 @@ export function createDshAdapter(ctx, options = {}) {
   /**
    * 取消：先 abort，再让宿主 dispose 这个 activation。
    *
-   * 顺序是**先 dispose、后 cleanup**：dispose 成功（或超时兜底）之前绝不释放并发槽位，
-   * 否则旧进程还没退干净就能再派写任务，串行纪律被绕过（P0）。
-   * dispose 抛错也必须释放槽位并记录错误，不能让项目永久锁死。
+   * 顺序是**先 dispose、后 cleanup**：只有拿到 `stopConfirmed:true`（dispose 成功，
+   * 或 activation.result 已落定）才释放并发槽位；dispose 超时/抛错时**保留槽位与隔离互斥**，
+   * 否则旧进程还没退干净就能再派写任务，串行纪律被绕过（P1）。
+   * 保留的槽位会在 result 落定时释放（结果落定是可验证的停止证据）。
    * 重复调用无害：并发的第二次调用复用同一个 cancelPromise。
+   *
+   * @returns {Promise<{ stopConfirmed: boolean, code?: string, message?: string, reason?: string }>}
    */
   async function cancel(taskRef) {
     const childId = typeof taskRef === 'string' ? taskRef : taskRef?.childId
-    if (!childId) return
+    if (!childId) return { stopConfirmed: false, reason: '缺少 childId' }
     const id = String(childId)
     const handle = handles.get(id)
-    if (!handle) return
+    if (!handle) {
+      // 句柄已被正常收尾：内存终态能确认停止才如实返回 true；否则不猜
+      const done = finished.get(id)
+      if (done && done.stopConfirmed === true) return { stopConfirmed: true }
+      return { stopConfirmed: false, reason: '没有该任务的存活句柄，无法确认停止状态' }
+    }
     if (handle.cancelPromise) return handle.cancelPromise
 
     handle.cancelPromise = (async () => {
@@ -737,8 +793,12 @@ export function createDshAdapter(ctx, options = {}) {
           })
         }
       } finally {
-        // 3) 最后才释放并发槽位
-        cleanup(id)
+        // 3) 只有确认停止才释放并发槽位；未确认时保留句柄（result 落定后再释放）
+        if (!disposeError) cleanup(id)
+      }
+      return {
+        stopConfirmed: !disposeError,
+        ...(disposeError ? disposeError : {}),
       }
     })()
     return handle.cancelPromise
@@ -747,31 +807,65 @@ export function createDshAdapter(ctx, options = {}) {
   // 插件卸载：单一 disposer 内串行 await 全部收尾（02-plugin-spec.md §2.4 的硬要求，
   // 不拆成多个并列 ctx.effect，避免异步 disposer 并发导致子进程清理顺序不确定）。
   // 必须给每个存活任务写终态（interrupted），否则重启后磁盘里会留下假 running。
+  //
+  // P1 修复：卸载也必须按「可验证停止」释放槽位——
+  // - 启动中（startActivation 未返回）的占位：取消占位并释放其槽位（还没有真实 activation）；
+  // - 已启动的 activation：dispose 成功才释放；超时/抛错时保留句柄与槽位，并记 stopConfirmed:false，
+  //   等 result 落定后再释放。绝不无条件 handoff 给 dispatcher。
   if (typeof ctx?.effect === 'function') {
     ctx.effect(() => {
       return async () => {
-        const pending = [...handles.values()]
-        // 先摘掉句柄：卸载期间结算的 result 回调会因找不到 handle 而让位给这里写终态
-        handles.clear()
-        for (const handle of pending) {
-          // 取消流程已经在收尾：复用同一个 promise，避免对同一个 activation 调两次 dispose
+        disposed = true
+        // 1) 取消尚未返回的启动：它们没有 childId，只能按占位收尾。
+        for (const [key, placeholder] of [...pendingStarts]) {
+          pendingStarts.delete(key)
+          placeholder.cancelled = true
+          try {
+            placeholder.controller.abort(new Error('meetingstone: plugin disposed'))
+          } catch {
+            /* abort 不应失败 */
+          }
+          if (typeof placeholder.onFinish === 'function') {
+            try {
+              placeholder.onFinish()
+            } catch {
+              /* 释放回调失败不影响清理 */
+            }
+          }
+        }
+
+        // 2) 先同步冻结所有已登记句柄：标记 cancelling 并 abort，避免卸载期间
+        //    result 回调把任务写成 completed（此时应写 interrupted）。
+        const snapshot = [...handles.entries()]
+        for (const [, handle] of snapshot) {
+          if (handle.cancelPromise) continue
+          handle.cancelling = true
+          if (handle.timer) {
+            clearTimeout(handle.timer)
+            handle.timer = null
+          }
+          try {
+            handle.controller.abort(new Error('meetingstone: plugin disposed'))
+          } catch {
+            /* abort 不应失败 */
+          }
+        }
+
+        // 3) 逐个收尾已登记的 activation。注意**不要**先 handles.clear()：
+        //    未确认停止的句柄必须保留，等 result 落定后再释放。
+        for (const [id, handle] of snapshot) {
+          // 取消流程已经在收尾：复用同一个 promise，避免对同一个 activation 调两次 dispose。
+          // 是否释放由 cancel 自己按 dispose 结果决定（未确认时它不会 cleanup）。
           if (handle.cancelPromise) {
             try {
               await handle.cancelPromise
             } catch {
               /* cancel 自己会记录错误 */
             }
-            if (typeof handle.onFinish === 'function') {
-              try {
-                handle.onFinish()
-              } catch {
-                /* 释放回调失败不影响清理 */
-              }
-            }
             continue
           }
-          if (handle.timer) clearTimeout(handle.timer)
-          handle.controller.abort(new Error('meetingstone: plugin disposed'))
+          // 冻结之后 result 可能已经落定并 cleanup；已清理的句柄不再 dispose
+          if (handle.cleaned || !handles.has(id)) continue
           let disposeError = null
           try {
             disposeError = await disposeActivation(handle.activation, disposeTimeoutMs)
@@ -805,13 +899,8 @@ export function createDshAdapter(ctx, options = {}) {
               })
             }
           } finally {
-            if (typeof handle.onFinish === 'function') {
-              try {
-                handle.onFinish()
-              } catch {
-                /* 同上：释放回调失败不影响清理 */
-              }
-            }
+            // 只有确认停止才释放槽位；未确认时保留句柄（result 落定后由回调 cleanup）
+            if (!disposeError) cleanup(id)
           }
         }
       }
