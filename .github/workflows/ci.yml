@@ -35,6 +35,9 @@ jobs:
       - name: 单元测试
         run: node --test "tests/**/*.test.mjs"
 
+      - name: 发布门禁 · 工具 schema 契约
+        run: node scripts/verify-host-schema.mjs
+
       - name: manifest 自检
         run: node scripts/verify-manifest.mjs
 

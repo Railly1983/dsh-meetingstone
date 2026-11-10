@@ -1,0 +1,127 @@
+# 示例：把集合石装进 desktop profile 并配置五个角色
+#
+# 用法：把下面的行追加到
+#   C:\Users\<你>\.dsh\profiles\desktop\cordis.patch.yml
+# 然后重启 DeepSeek Harness。
+#
+# 注意：
+# 1) `channels` 是「通道实例」——模型/强度写在这里（宿主的启动 spec 不接收这两个字段）。
+# 2) 角色的 channel.channelId 必须指向下面某个实例，且声明的 model/reasoning 要和实例一致，
+#    否则派单会被拒绝（MODEL_UNSUPPORTED）。这是故意的：不允许"配置成功、执行没采用"。
+# 3) provider 必须先装好并对上名字，否则派单会报 PROVIDER_UNAVAILABLE（而不是崩）。
+#    安装方式见 docs/installation.md「可选：安装执行通道」。
+
+- insert:
+    - id: meetingstone
+      name: dsh-meetingstone
+      config:
+        # ── 通道实例：一行 = 一个已配置好的 provider ──────────────────────────
+        channels:
+          # Codex 通道（需先装 @deepseek-ai/dsh-subagent-codex@0.2.2-rc.1，它是 bundle，装完即有 codex provider）
+          - channelId: ch-codex-sol
+            description: Codex · gpt-6.1-sol · high
+            kind: codex
+            provider: codex
+            model: gpt-6.1-sol
+            reasoning: high
+
+          - channelId: ch-codex-astra
+            description: Codex · gpt-6-astra · high（最贵，慎用）
+            kind: codex
+            provider: codex
+            model: gpt-6-astra
+            reasoning: high
+
+          # ACP 通道（CodeBuddy 属此类）。需要：
+          #   a) 装 @deepseek-ai/dsh-subagent-acp@0.2.2-rc.1（它**不是** bundle）
+          #   b) 在 profile 里手写 subagent-acp 行（command + args），见 docs/installation.md
+          - channelId: ch-acp-flash
+            description: CodeBuddy · deepseek-v4.1-flash · high
+            kind: acp-cli
+            provider: acp
+            model: deepseek-v4.1-flash
+            reasoning: high
+
+          - channelId: ch-acp-hy4
+            description: CodeBuddy · hy4free · high
+            kind: acp-cli
+            provider: acp
+            model: hy4free
+            reasoning: high
+
+          # 进程内子 Agent（DSH 原生，不依赖任何外部 CLI，先拿它验证链路最稳）
+          - channelId: ch-inprocess
+            description: DSH 原生子 Agent
+            kind: in-process
+            provider: spawn
+
+        # ── 角色表 ────────────────────────────────────────────────────────────
+        roles:
+          - roleId: role-tangtang
+            name: 唐僧
+            aliases: [TT, 领导]
+            description: 团队领导，负责架构、关键决策与最终把关；只在最重要的事上用
+            channel:
+              kind: codex
+              channelId: ch-codex-astra
+              model: gpt-6-astra
+              reasoning: high
+            permissionPreset: read-only
+            enabled: true
+            timeoutMs: 3600000
+
+          - roleId: role-wukong
+            name: 悟空
+            aliases: [WK, 专家]
+            description: 核心资深专家，负责疑难问题、审核验收与长时间任务
+            channel:
+              kind: codex
+              channelId: ch-codex-sol
+              model: gpt-6.1-sol
+              reasoning: high
+            permissionPreset: read-only
+            enabled: true
+            timeoutMs: 3600000
+
+          - roleId: role-sashi
+            name: 沙僧
+            aliases: [SS, 主力执行]
+            description: 技术骨干，负责主力开发与批量执行
+            channel:
+              kind: acp-cli
+              channelId: ch-acp-flash
+              model: deepseek-v4.1-flash
+              reasoning: high
+            permissionPreset: project-write
+            enabled: true
+            timeoutMs: 1800000
+
+          - roleId: role-xiaobai
+            name: 小白
+            aliases: [XB, 打杂]
+            description: 牛马，负责主力干活、文档与杂活
+            channel:
+              kind: acp-cli
+              channelId: ch-acp-hy4
+              model: hy4free
+              reasoning: high
+            permissionPreset: project-write
+            enabled: true
+            timeoutMs: 1800000
+
+          - roleId: role-bajie
+            name: 八戒
+            aliases: [BJ, 调度]
+            description: 技术主管，负责调度、监工与整合（进程内子 Agent 通道）
+            channel:
+              kind: in-process
+              channelId: ch-inprocess
+            permissionPreset: read-only
+            enabled: true
+            timeoutMs: 1800000
+
+        defaultRoleId: role-sashi
+        dispatchNotes: 常规实现优先沙僧/小白；关键修改交悟空复核；重大取舍才找唐僧。
+        limits:
+          maxParallelReadonly: 3
+          serializeWrites: true
