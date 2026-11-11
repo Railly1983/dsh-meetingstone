@@ -1,184 +1,159 @@
-﻿# 鍗忎綔鏁堢巼瑙勮寖
+# 协作效率规范
 
-> 杩欐槸涓€浠?*鍗忎綔绾﹀畾**锛堢函鏂囨。 / 鎻愮ず璇嶏級锛屼笉鏄唬鐮併€佷笉鏄厤缃€佷笉鏄棬绂併€?
-> 绯荤粺涓嶄細鍥犱负娲惧崟鍐欏緱绠€鐣ュ氨鎷掔粷鎵ц锛涜鑼冨彧涓哄皯杩斿伐銆佸皯鐑т笂涓嬫枃銆佸皯鏉ュ洖銆?
-> 瀹炵幇缁嗚妭瑙?[鏋舵瀯](architecture.md)锛岄敊璇爜瑙?[閰嶇疆鍙傝€僝(configuration.md)銆?
+> 这是一份**协作约定**（纯文档 / 提示词），不是代码、不是配置、不是门禁。
+> 系统不会因为派单写得简略就拒绝执行；规范只为少返工、少烧上下文、少来回。
+> 实现细节见 [架构](architecture.md)，错误码见 [配置参考](configuration.md)。
 
-## 涓轰粈涔堟湁杩欎唤鏂囨。
+## 为什么有这份文档
 
-娲惧崟锛屽氨鏄妸涓€娈佃瘽浜ょ粰鍙︿竴涓櫤鑳戒綋鍘诲共娲汇€傝瘽鍐欏緱澶惈绯婏紝瀵规柟瑕佷箞鍙嶅杩介棶銆佽涔堝仛鍋忥紱
-鍥炲鍐欏緱澶暟鍡︼紝涓婁笅鏂囧緢蹇闀挎枃鍗犳弧锛涙敹鍙ｆ椂涓€閬嶉亶鏌ョ姸鎬併€佸け璐ユ椂鐩茬洰閲嶈瘯锛岄兘鏄函娴垂銆?
-涓嬮潰 4 鏉★紝灏辨槸鎶婅繖浜涙氮璐规尅鍦ㄥ墠闈㈢殑绾﹀畾銆?
+派单，就是把一段话交给另一个智能体去干活。话写得太含糊，对方要么反复追问、要么做偏；
+回复写得太啰嗦，上下文很快被长文占满；收口时一遍遍查状态、失败时盲目重试，都是纯浪费。
+下面 4 条，就是把这些浪费挡在前面的约定。
 
-## 1. 娲惧崟绠€鎶ワ細璇存竻鍥涗欢浜?
+## 1. 派单简报：说清四件事
 
-涓€娆℃淳鍗曟妸涓嬮潰鍥涗欢鍐欐竻妤氾細
+一次派单把下面四件写清楚：
 
-| 椤?| 鍐欎粈涔?| 渚嬪瓙 |
+| 项 | 写什么 | 例子 |
 | --- | --- | --- |
-| 鐩爣 | 瑕佽揪鎴愪粈涔堢粨鏋?| 缁欒秴鏃跺垎鏀ˉ涓€涓崟娴?|
-| 鑼冨洿 | 鍙敼鍝簺銆佷笉瑕佺浠€涔?| 鍙敼 `tests/dispatcher.test.mjs`锛涗笉鍔?`src/`銆佷笉鏀归厤缃?|
-| 楠屾敹鏍囧噯 | 鎬庢牱绠楀仛瀹?| `node scripts/run-tests.mjs` 鍏ㄧ豢 |
-| 璇佹嵁鏍煎紡 | 浜や粈涔堛€佷氦鍒板摢 | 缁撹 + patch + 娴嬭瘯杈撳嚭璺緞锛涘叏鏂囧啓 `.meetingstone/runs` |
+| 目标 | 要达成什么结果 | 给超时分支补一个单测 |
+| 范围 | 只改哪些、不要碰什么 | 只改 `tests/dispatcher.test.mjs`；不动 `src/`、不改配置 |
+| 验收标准 | 怎样算做完 | `node scripts/run-tests.mjs` 全绿 |
+| 证据格式 | 交什么、交到哪 | 结论 + patch + 测试输出路径；全文写 `.meetingstone/runs` |
 
-**涓嶇‖鎷掔粷**锛氳繖鍥涗欢鏄鑼冿紝涓嶆槸鏍￠獙銆傛淳鍗曠己浜嗘煇涓€椤癸紝绯荤粺鐓ф牱鎵ц锛屼笉浼氭嫤浣犮€佷笉浼氭姤閿欍€?
-鍙槸缂哄緱瓒婂锛屽鏂硅秺鍙兘璺戝亸鎴栨潵鍥炶拷闂€斺€旂渷涓嬬殑瀛楋紝鏈€鍚庨兘浼氫互杩斿伐杩樺洖鏉ャ€?
+**不硬拒绝**：这四件是规范，不是校验。派单缺了某一项，系统照样执行，不会拦你、不会报错。
+只是缺得越多，对方越可能跑偏或来回追问——省下的字，最后都会以返工还回来。
 
-> 鐜板湪鍙互鎶婅繖鍥涗欢鍐欐垚**缁撴瀯鍖栧瓧娈?*锛坄title` / `objective` / `scope` / `acceptance` / `evidence` /
-> `contextRefs` / `contextPack`锛夛紝鐢辨彃浠舵覆鏌撹繘瀛?Agent 鎻愮ず璇嶃€備粛涓嶆槸琛ㄥ崟锛氬彧鏈夌己 `title`
-> 锛堢敤浜嗕换涓€缁撴瀯鍖栧瓧娈垫椂锛夈€佸０鏄庝簡 `scope` 鍗存病鏈?`acceptance`銆佹垨鍏抽敭瀛楁绫诲瀷閿欒鏃舵墠浼?
-> 杩斿洖 `TASKSPEC_INVALID`銆傚瓧娈典笌鏍￠獙瑙勫垯瑙?
-> [閰嶇疆鍙傝€?搂7.1鈥?.2](configuration.md#71-taskspec缁撴瀯鍖栦换鍔＄畝鎶0-b)銆?
+> 现在可以把这四件写成**结构化字段**（`title` / `objective` / `scope` / `acceptance` / `evidence` /
+> `contextRefs` / `contextPack`），由插件渲染进子 Agent 提示词。仍不是表单：只有缺 `title`
+> （用了任一结构化字段时）、声明了 `scope` 却没有 `acceptance`、或关键字段类型错误时才会
+> 返回 `TASKSPEC_INVALID`。字段与校验规则见
+> [配置参考 §7.1–7.2](configuration.md#71-taskspec结构化任务简报p0-b)。
 
-## 2. 杈撳嚭锛氬彧缁?鑳界敤鐨勪笢瑗?
+## 2. 输出：只给"能用的东西"
 
-瀛愭櫤鑳戒綋鍥炲鏃讹紝鍙粰涓夋牱锛?
+子智能体回复时，只给三样：
 
-- **缁撹**锛氬仛瀹屼簡 / 娌″仛瀹?/ 鍗″湪鍝紱
-- **浜х墿**锛歱atch銆丣SON銆佸懡浠よ緭鍑鸿繖绫荤粨鏋勫寲缁撴灉锛?
-- **璇佹嵁璺緞**锛氬畬鏁存棩蹇椼€侀暱鏂囧啓鍒?`.meetingstone/runs`锛屽洖澶嶉噷鍙粰璺緞銆?
+- **结论**：做完了 / 没做完 / 卡在哪；
+- **产物**：patch、JSON、命令输出这类结构化结果；
+- **证据路径**：完整日志、长文写到 `.meetingstone/runs`，回复里只给路径。
 
-绂佹鎶婇暱鏂囥€佹暣浠芥枃浠躲€佸ぇ娈靛師鏂囧杩板洖浼氳瘽銆備笂涓嬫枃鏄叡浜殑绋€缂鸿祫婧愶紝澶嶈堪涓€閬嶇瓑浜庤姳涓ら亶閽?
-涔板悓涓€娈靛瓧銆傝鏌ュ叏鏂囷紝鎸夎矾寰勫幓 `.meetingstone/runs` 鍙栵紝鍒湪浼氳瘽閲屽啀璐翠竴閬嶃€?
+禁止把长文、整份文件、大段原文复述回会话。上下文是共享的稀缺资源，复述一遍等于花两遍钱
+买同一段字。要查全文，按路径去 `.meetingstone/runs` 取，别在会话里再贴一遍。
 
-> 娲惧崟鎻愮ず璇嶉噷宸茬粡鍥哄畾鍐欏叆**杈撳嚭濂戠害**锛氬瓙 Agent 鏈€鍚庤繑鍥?`status` / `summary` / `evidence` /
-> `artifacts` / `changedFiles` / `tests` / `openIssues` / `nextAction`銆傛彃浠惰В鏋愬悗榛樿鍙妸
-> `summary` / `handoff` 浜ょ粰涓绘帶锛涘畬鏁存鏂囩敤 `meetingstone_get_run_artifact` 鎸夎寖鍥磋鍙栥€?
-> 妯℃澘涓庡瓧娈佃 [handoff.md](handoff.md)銆?
+> 派单提示词里已经固定写入**输出契约**：子 Agent 最后返回 `status` / `summary` / `evidence` /
+> `artifacts` / `changedFiles` / `tests` / `openIssues` / `nextAction`。插件解析后默认只把
+> `summary` / `handoff` 交给主控；完整正文用 `meetingstone_get_run_artifact` 按范围读取。
+> 模板与字段见 [handoff.md](handoff.md)。
 
-## 3. 鏀跺彛锛氫竴娆℃煡锛屾壒閲忔姤
+## 3. 收口：一次查，批量报
 
-涓嶈鍛ㄦ湡杞鈥斺€旀瘡闅斾竴浼氬効 `get_task` 涓€涓嬨€佸嚑鍗佹璋冪敤鍙负绛変竴涓姸鎬侊紝绾儳璋冪敤涓嶄骇鐢熶俊鎭€?
-浠诲姟璇ユ敹鍙ｆ椂锛屼竴娆℃€?`list_runs` / `get_task` 鎶婅繖涓€鎵圭殑缁堟€佸彇榻愶紝鐒跺悗**鎵归噺姹囨姤**涓€娆°€?
-"绛?浜ょ粰瀹夸富鍜屼换鍔℃湰韬紝涓诲鑰呬笉闈犲弽澶嶆煡璇㈡潵鎺ㄨ繘銆?
-
-## 4. 澶辫触锛氬厛鍒嗙被锛屽啀鍐冲畾
-
-优先用 `meetingstone_wait` **一次等齐**：`childIds` 传本批全部任务，`timeoutMs` 给一个上限
-（默认 300000、最大 600000），一次调用等到全部完成或超时。超时的任务回 `status:'running'` +
-`timedOut:true`，未知 `childId` 回 `UNKNOWN_CHILD` 并立即返回；已完成的立即返回，未完成的只等
-宿主结算通知，不忙等。**不要在高频循环里反复 wait 或拿它当轮询**，字段见
-[配置参考](configuration.md) §7，错误码见 §5。
+不要周期轮询——每隔一会儿 `get_task` 一下、几十次调用只为等一个状态，纯烧调用不产生信息。
+任务该收口时，一次性 `list_runs` / `get_task` 把这一批的终态取齐，然后**批量汇报**一次。
+"等"交给宿主和任务本身，主导者不靠反复查询来推进。
 
 ## 4. 失败：先分类，再决定
 
-澶辫触涓嶆槸"鍐嶈瘯涓€娆?灏卞畬浜嗐€傛彃浠朵細鎶婂け璐ュ綊鍏ヤ笅琛ㄧ殑**鐧藉悕鍗?*锛岃惤鐩?`failureClass` 骞剁粰鍑轰竴鍙?
-`hint`锛涗富鎺ф嵁姝ゅ喅瀹氱瓑銆佹崲瑙掕壊杩樻槸鍏堟煡鏃ュ織銆傚缓璁敱涓诲鑰呮媿鏉匡紝**涓嶈嚜鍔ㄦ墽琛?*锛?
+失败不是"再试一次"就完了。插件会把失败归入下表的**白名单**，落盘 `failureClass` 并给出一句
+`hint`；主控据此决定等、换角色还是先查日志。建议由主导者拍板，**不自动执行**：
 
-| `failureClass` | 鍏稿瀷琛ㄧ幇 | 寤鸿锛坄hint` 鎽樿锛?|
+| `failureClass` | 典型表现 | 建议（`hint` 摘要） |
 | --- | --- | --- |
-| `quota` | Codex `category: limit`銆丄CP 429銆乣refusal` 涓?*绌鸿緭鍑?* | 绛夊緟棰濆害閲嶇疆锛屾垨鏀规淳鍏朵粬 provider 鐨勮鑹诧紱涓嶈鍘熸牱閲嶆淳 |
-| `auth` | 401銆佹棤鏁?API key銆佺櫥褰曞け鏁?| 鍏堟鏌ヨ provider 鐨勭櫥褰?/ API key锛屽啀閲嶆柊娲惧崟 |
-| `permission` | 403銆乣EACCES` / `EPERM`銆佹潈闄愯鎷?| 纭宸ヤ綔鐩綍涓庡懡浠ゆ潈闄愶紙娌欑 / 瀹℃壒锛夊悗閲嶆淳 |
-| `timeout` | 瓒呰繃 `timeoutMs`銆乣ETIMEDOUT`銆乨eadline exceeded | 缂╁皬鑼冨洿鎴栨媶瀛愪换鍔″悗閲嶆淳 |
-| `refusal` | 瀹夊叏鎷掔瓟锛屼笖**鏈夎緭鍑?*锛堥潪棰濆害锛?| 鏀瑰啓浠诲姟鎺緸鎴栨崲妯″瀷 / 瑙掕壊锛涘繀瑕佹椂浜哄伐纭 |
-| `crash` | 杩涚▼寮傚父銆侀潪闆堕€€鍑恒€佽淇″彿鏉€姝?| 鏌?provider 鏃ュ織涓庨€€鍑虹爜鍚庢崲瑙掕壊閲嶆淳锛屼繚鐣欑幇鍦?|
-| `network` | `ECONNRESET`銆丏NS銆?02/503/504 | 妫€鏌ュ埌 provider 鐨勮繛閫氭€у悗鍐嶉噸璇曪紝鍒綋鎴愰搴﹂棶棰?|
-| `unknown` | 宸插け璐ヤ絾鏃犳硶褰掑叆浠ヤ笂绫诲埆 | 鍏堣 `diagnostic` 涓?provider 鏃ュ織锛屽啀鍐冲畾鏄惁閲嶆淳 |
+| `quota` | Codex `category: limit`、ACP 429、`refusal` 且**空输出** | 等待额度重置，或改派其他 provider 的角色；不要原样重派 |
+| `auth` | 401、无效 API key、登录失效 | 先检查该 provider 的登录 / API key，再重新派单 |
+| `permission` | 403、`EACCES` / `EPERM`、权限被拒 | 确认工作目录与命令权限（沙箱 / 审批）后重派 |
+| `timeout` | 超过 `timeoutMs`、`ETIMEDOUT`、deadline exceeded | 缩小范围或拆子任务后重派 |
+| `refusal` | 安全拒答，且**有输出**（非额度） | 改写任务措辞或换模型 / 角色；必要时人工确认 |
+| `crash` | 进程异常、非零退出、被信号杀死 | 查 provider 日志与退出码后换角色重派，保留现场 |
+| `network` | `ECONNRESET`、DNS、502/503/504 | 检查到 provider 的连通性后再重试，别当成额度问题 |
+| `unknown` | 已失败但无法归入以上类别 | 先读 `diagnostic` 与 provider 日志，再决定是否重派 |
 
-鍒ゅ畾椤哄簭鍥哄畾锛堝厛 `quota`锛屽啀 `auth` 鈫?`permission` 鈫?`timeout` 鈫?`network` 鈫?`refusal` 鈫?
-`crash`锛屽厹搴?`unknown`锛夈€?*鎴愬姛浠诲姟涓嶄細甯﹀垎绫?*锛歚status=completed` 涓?
-`stopReason=completed` 鐨勮褰?`failureClass`/`hint` 涓?`null`锛沗cancelled` / `interrupted`
-鏄富鍔ㄥ彇娑堟垨鍗歌浇锛屼篃涓嶇畻澶辫触銆傜湡瀹炴晠闅滅殑鍖哄垎瑕佺偣锛?
+判定顺序固定（先 `quota`，再 `auth` → `permission` → `timeout` → `network` → `refusal` →
+`crash`，兜底 `unknown`）。**成功任务不会带分类**：`status=completed` 且
+`stopReason=completed` 的记录 `failureClass`/`hint` 为 `null`；`cancelled` / `interrupted`
+是主动取消或卸载，也不算失败。真实故障的区分要点：
 
-- Codex 棰濆害鑰楀敖锛歚stopReason: error` + 璇婃柇鍚?`category: limit` 鈫?`quota`锛?
-- CodeBuddy hy4 鐨?429锛欰CP 鍙洖 `stopReason: refusal` + 绌鸿緭鍑?鈫?鎸夐渶姹傚綊 `quota`锛?
-- 瀹夊叏鎷掔瓟涓庨搴︿笉鍚岋細`refusal` **鏈夎緭鍑?*涓斾笉鍚檺娴佺壒寰佹墠鏄?`refusal`銆?
+- Codex 额度耗尽：`stopReason: error` + 诊断含 `category: limit` → `quota`；
+- CodeBuddy hy4 的 429：ACP 只回 `stopReason: refusal` + 空输出 → 按需求归 `quota`；
+- 安全拒答与额度不同：`refusal` **有输出**且不含限流特征才是 `refusal`。
 
-钀界洏浣嶇疆锛歳un 璁板綍锛坄.meetingstone/runs/<childId>.json`锛夌殑 `failureClass` / `hint`锛?
-`meetingstone_get_task` 涓?`meetingstone_list_runs` 榛樿灞曠ず杩欎袱涓瓧娈点€傛棫璁板綍娌℃湁瀛楁锛?
-璇诲彇鏃舵寜 `stopReason` / `diagnostic` / `error` 鐜扮畻锛屼笉闇€瑕佽縼绉汇€?
+落盘位置：run 记录（`.meetingstone/runs/<childId>.json`）的 `failureClass` / `hint`；
+`meetingstone_get_task` 与 `meetingstone_list_runs` 默认展示这两个字段。旧记录没有字段，
+读取时按 `stopReason` / `diagnostic` / `error` 现算，不需要迁移。
 
-> **鏄庣‘涓嶅仛**锛氳嚜鍔ㄩ噸璇曘€佸喎鍗磋鏃跺櫒銆佽嚜鍔ㄥ垏妯″瀷 / 鍒囪鑹层€傞搴﹁绛夐噸缃€佽璇佽鎹?key銆?
-> 鏉冮檺鍙兘瑕佹敼娌欑鎴栧鎵光€斺€旇繖浜涢兘闇€瑕佷汉鎴栦富鎺ф媿鏉匡紱鎻掍欢鑷姩閲嶈瘯鍙細鎶婂悓涓€涓敊璇啀鐑т竴閬?
-> 棰濆害锛屽苟璁╃湡瀹炲師鍥犳饭娌″湪閲嶈瘯鏃ュ織閲屻€傚涓诲閲忔弧鏃跺悓鏍锋病鏈夌瓑寰?/ 闃熷垪鏈哄埗锛屾彃浠跺師鏍烽€忎紶
-> `ACTIVATION_LIMIT_REACHED`锛堣 [閰嶇疆鍙傝€僝(configuration.md) 搂5锛夛紝鏄惁绛夈€佹槸鍚︽崲浜虹敱涓绘帶鍐冲畾銆?
+> **明确不做**：自动重试、冷却计时器、自动切模型 / 切角色。额度要等重置、认证要换 key、
+> 权限可能要改沙箱或审批——这些都需要人或主控拍板；插件自动重试只会把同一个错误再烧一遍
+> 额度，并让真实原因淹没在重试日志里。宿主容量满时同样没有等待 / 队列机制，插件原样透传
+> `ACTIVATION_LIMIT_REACHED`（见 [配置参考](configuration.md) §5），是否等、是否换人由主控决定。
 
-## 鍙嶄緥锛氫粈涔堢畻娴垂
+## 反例：什么算浪费
 
-- 娲惧崟鍙啓"鏀逛竴涓?X""鐪嬬湅杩欎釜"鈥斺€旀病鐩爣銆佹病杈圭晫銆佹病楠屾敹锛屽鏂瑰彧鑳界寽锛屾潵鍥炶拷闂笁杞€?
-- 瀛愭櫤鑳戒綋鎶婃敼鍔ㄧ殑鏁翠釜鏂囦欢鍘熸牱璐村洖鏉ワ紝鎴栨妸鏃ュ織鍏ㄦ枃澶嶈堪涓€閬嶁€斺€斿崰婊′笂涓嬫枃锛屼富瀵艰€呰繕寰楄嚜宸辨壘閲嶇偣銆?
-- 涓诲鑰呮瘡鍗婂垎閽?`get_task` 涓€娆★紝涓轰竴涓换鍔″彂鍑犲崄娆＄姸鎬佹煡璇€?
-- 涓€涓换鍔′竴涓换鍔″崟鐙眹鎶ワ紝鏄庢槑鍙互鏀跺彛鏃朵竴娆℃壒閲忚娓呫€?
-- 澶辫触涓嶅垎绫伙細429 鍜?瀹夸富婊′簡"閮藉綋鎴?鍐嶈瘯涓€娆?锛屽弽澶嶆挒鍚屼竴鍫靛锛涙垨瀹归噺宸叉弧杩樹笉鏂淳鏂板崟銆?
-- 鎶婃暣娈甸渶姹?/ 鑳屾櫙澶嶅埗杩涙瘡涓€娆℃淳鍗曪紝鑰屼笉鏄粰璺緞璁╁鏂硅嚜宸卞幓鍙栥€?
+- 派单只写"改一下 X""看看这个"——没目标、没边界、没验收，对方只能猜，来回追问三轮。
+- 子智能体把改动的整个文件原样贴回来，或把日志全文复述一遍——占满上下文，主导者还得自己找重点。
+- 主导者每半分钟 `get_task` 一次，为一个任务发几十次状态查询。
+- 一个任务一个任务单独汇报，明明可以收口时一次批量说清。
+- 失败不分类：429 和"宿主满了"都当成"再试一次"，反复撞同一堵墙；或容量已满还不断派新单。
+- 把整段需求 / 背景复制进每一次派单，而不是给路径让对方自己去取。
 
-## 涓€涓悎鏍兼淳鍗曪紙妯℃澘锛?
+## 一个合格派单（模板）
 
 ```
-鐩爣锛氱粰 `src/dispatch/dispatcher.js` 鐨?dispose 瓒呮椂鍒嗘敮琛ヤ竴涓崟娴嬶紝鏂█妲戒綅鏈閲婃斁銆?
-鑼冨洿锛氬彧鏀?`tests/dispatcher.test.mjs`锛涗笉鏀?`src/`銆佷笉鏀归厤缃€佷笉 commit銆?
-楠屾敹鏍囧噯锛歚node scripts/run-tests.mjs` 鍏ㄧ豢锛涙柊鐢ㄤ緥鍦?dispose 瓒呮椂鏃舵柇瑷€妲戒綅淇濈暀銆?
-璇佹嵁鏍煎紡锛氬洖澶嶅彧缁欍€岀粨璁?+ patch + 娴嬭瘯杈撳嚭鎽樿銆嶏紱瀹屾暣娴嬭瘯鏃ュ織鍐?`.meetingstone/runs`锛?
-          鍥炲閲岄檮璇ヨ矾寰勩€?
+目标：给 `src/dispatch/dispatcher.js` 的 dispose 超时分支补一个单测，断言槽位未被释放。
+范围：只改 `tests/dispatcher.test.mjs`；不改 `src/`、不改配置、不 commit。
+验收标准：`node scripts/run-tests.mjs` 全绿；新用例在 dispose 超时时断言槽位保留。
+证据格式：回复只给「结论 + patch + 测试输出摘要」；完整测试日志写 `.meetingstone/runs`，
+          回复里附该路径。
 ```
 
-瀵圭収鍥涗欢濂楋細鐩爣 鉁?/ 鑼冨洿 鉁?/ 楠屾敹鏍囧噯 鉁?/ 璇佹嵁鏍煎紡 鉁呫€?
-娉ㄦ剰瀹冩病鍐?蹇呴』鍥涗欢榻愬叏鍚﹀垯鎷掔粷"鈥斺€斿洜涓烘湰鏉ュ氨涓嶆嫆缁濓紝杩欏彧鏄妸璇濊鏄庣櫧銆?
+对照四件套：目标 ✅ / 范围 ✅ / 验收标准 ✅ / 证据格式 ✅。
+注意它没写"必须四件齐全否则拒绝"——因为本来就不拒绝，这只是把话说明白。
 
-## 5. 鏁堢巼璐︽湰锛氭妸銆岀渷浜嗗灏戙€嶅彉鎴愬彲澶嶇幇缁熻
+## 5. 效率账本：把「省了多少」变成可复现统计
 
-`scripts/token-ledger.mjs` 鍙鎵弿 `.meetingstone/runs/*.json`锛岀粺璁′换鍔℃暟銆佹垚鍔?澶辫触/鍙栨秷銆?
-澶辫触鍒嗙被銆乣resultBytes` 鍒嗕綅锛坧50/p90/max锛夈€佸钩鍧囪€楁椂锛屼互鍙婃寜瑙掕壊/閫氶亾鑱氬悎銆傞浂渚濊禆锛屼笉鍙備笌
-`npm run verify`銆?
+`scripts/token-ledger.mjs` 只读扫描 `.meetingstone/runs/*.json`，统计任务数、成功/失败/取消、
+失败分类、`resultBytes` 分位（p50/p90/max）、平均耗时，以及按角色/通道聚合。零依赖，不参与
+`npm run verify`。
 
 ```bash
-npm run ledger                              # 浜虹被鍙琛ㄦ牸
-node scripts/token-ledger.mjs --json        # 鏈哄櫒鍙
-node scripts/token-ledger.mjs --since 7d    # 鐩稿鏃堕棿锛堜篃鏀寔 24h/30m銆乊YYY-MM-DD銆両SO銆佹绉掓椂闂存埑锛?
-node scripts/token-ledger.mjs --limit 20    # 鏈€杩?20 鏉?
-node scripts/token-ledger.mjs --dir <path>  # 鎸囧畾 runs 鐩綍锛堥粯璁よ嚜鍔ㄥ畾浣嶏紱worktree 鍥為€€涓讳粨搴擄級
+npm run ledger                              # 人类可读表格
+node scripts/token-ledger.mjs --json        # 机器可读
+node scripts/token-ledger.mjs --since 7d    # 相对时间（也支持 24h/30m、YYYY-MM-DD、ISO、毫秒时间戳）
+node scripts/token-ledger.mjs --limit 20    # 最近 20 条
+node scripts/token-ledger.mjs --dir <path>  # 指定 runs 目录（默认自动定位；worktree 回退主仓库）
 ```
 
-**鍙ｅ緞锛堝厛璇伙級**锛?
+**口径（先读）**：
 
-- **瀛楄妭 鈮?Token**銆傝剼鏈笉杈撳嚭 `approxTokens`锛屼篃涓嶆妸瀛楄妭鏁板綋 Token 姹囨姤銆?
-- runs 璁板綍**娌℃湁 Provider Usage 瀛楁**锛孭rovider Usage 涓€寰嬫爣銆屾湭鐭ャ€嶏紱鎵句笉鍒板彲璇荤殑瀹夸富
-  浼氳瘽/宸ュ叿璋冪敤 JSONL 鏃跺氨鍙仛 runs 缁村害锛堟湰娆″熀绾挎湭鎵惧埌锛夈€?
-- 澶辫触鍒嗙被鏄粠 `stopReason` / `diagnostic` / `error` / `resultStatus` 鎺ㄥ鐨?*鍚彂寮?*鍒嗙被锛?
-  鏃犱俊鍙锋椂璁?`unspecified`锛屼笉鐚滃師鍥犮€?
-- `resultBytes` 鍙粺璁℃垚鍔熻褰曪紙`status=completed` 涓?`stopReason` 涓?`completed`/绌轰笖
-  `resultStatus` 闈?`failed`/`blocked`锛夛紝鍚?0 瀛楄妭锛涘け璐?鍙栨秷/杩愯涓笉璁″叆銆?
-- `completed` 浣?`stopReason=refusal/error` 鐨勮褰曡鍏ュけ璐ワ紝閬垮厤銆岃窇瀹屼絾娌″共娲汇€嶈绠楁垚鍔熴€?
+- **字节 ≠ Token**。脚本不输出 `approxTokens`，也不把字节数当 Token 汇报。
+- runs 记录**没有 Provider Usage 字段**，Provider Usage 一律标「未知」；找不到可读的宿主
+  会话/工具调用 JSONL 时就只做 runs 维度（本次基线未找到）。
+- 失败分类是从 `stopReason` / `diagnostic` / `error` / `resultStatus` 推导的**启发式**分类；
+  无信号时记 `unspecified`，不猜原因。
+- `resultBytes` 只统计成功记录（`status=completed` 且 `stopReason` 为 `completed`/空且
+  `resultStatus` 非 `failed`/`blocked`），含 0 字节；失败/取消/运行中不计入。
+- `completed` 但 `stopReason=refusal/error` 的记录计入失败，避免「跑完但没干活」被算成功。
 
-棣栦唤鍩虹嚎锛堟牱鏈€佹暟瀛椼€佸眬闄愶級瑙?
-[`docs/plan/2026-11-11-ledger-baseline.md`](plan/2026-11-11-ledger-baseline.md)銆?
-
-## 涓嶅湪鏈鑼冭寖鍥达紙鏄庣‘涓嶅仛锛?
-
-## 6. Token 数字的可信边界
-
-Subagents 面板显示的 `tok` 是 `uncachedInput + output + cacheRead + cacheWrite` 四桶之和，
-按**整条持久日志累计**；fork 会话包含父会话历史（`154M tok / 4 秒` 即此：token 继承父前缀，
-耗时只算子会话自身）。**不可用于成本、额度或子 Agent 归属核算**。
-
-- 为什么：cache 命中与未命中按 1:1 相加、跨调用重复累计、四桶未乘单价；fork 会把父会话的
-  同一批 token 在父子面板各显示一次。
-- 可用于：展示“累计处理量 / 吞吐”，但必须标注“累计、含 cache 重读”。
-- 替代口径：账本字节（§5 的 `resultBytes`，字节不是 token）、`ownEvents` 截断后的 usage、
-  四桶分价、Provider 账单。
-
-完整推导、三例对账与未验证项见 [`docs/audit/token-stats.md`](audit/token-stats.md)。
+首份基线（样本、数字、局限）见
+[`docs/plan/2026-11-11-ledger-baseline.md`](plan/2026-11-11-ledger-baseline.md)。
 
 ## 不在本规范范围（明确不做）
 
-浠ヤ笅鍑犻」璇勫杩囦絾**鐮嶆帀**锛堟寚涓嶅啓杩涙湰銆屽崗浣滅害瀹?/ 鎻愮ず璇嶃€嶆枃妗ｏ級锛屼笉瑕佽ˉ杩涙潵锛屼篃涓嶇畻"娌″啓瀹?锛?
+以下几项评审过但**砍掉**（指不写进本「协作约定 / 提示词」文档），不要补进来，也不算"没写完"：
 
-- AI 璇箟鑷姩璺敱锛堟寜鑷劧璇█鐞嗚В鈥滅寽鈥濊鎵捐皝锛?
-- 鍐峰嵈鏃堕棿 / 鑷姩鎹㈡ā鍨嬶紙澶辫触澶勭疆鏄汉宸ュ缓璁紝绯荤粺涓嶈嚜鍔ㄥ垏锛?
+- AI 语义自动路由（按自然语言理解“猜”该找谁）
+- 冷却时间 / 自动换模型（失败处置是人工建议，系统不自动切）
 
-> 娉細**瑙勫垯寮忚鑹茶矾鐢憋紙P1-B锛?* 宸蹭綔涓?*浠ｇ爜绾ф淳鍗曞姛鑳?*钀藉湴锛氬彧鍦ㄦ湭鏄惧紡鎸囧畾 `role`
-> 涓斾紶 `autoRoute:true` 鏃剁敓鏁堬紝鎸夋樉寮忓叧閿瘝琛?+ `enabled`/`availability` 杩囨护锛屽洖鎵у甫
-> `routing.reason`锛屼笉璋冪敤 AI銆佷笉鏀?provider/model/鏉冮檺銆傝鍒欒〃涓庝紭鍏堢骇瑙?
-> [閰嶇疆鍙傝€?搂1.2](configuration.md#12-鑷姩瑙掕壊璺敱p1-b瑙勫垯寮?銆?
+> 注：**规则式角色路由（P1-B）** 已作为**代码级派单功能**落地：只在未显式指定 `role`
+> 且传 `autoRoute:true` 时生效，按显式关键词表 + `enabled`/`availability` 过滤，回执带
+> `routing.reason`，不调用 AI、不改 provider/model/权限。规则表与优先级见
+> [配置参考 §1.2](configuration.md#12-自动角色路由p1-b规则式)。
 >
-> 娉細**杩涜涓畬鍏ㄧ浉鍚屼换鍔″幓閲?*宸蹭綔涓?*浠ｇ爜绾ф淳鍗曞姛鑳?*钀藉湴锛圥0-D锛夛紝涓嶆槸鏈崗浣滅害瀹氱殑鍐呭锛?
-> 瀹冩寜鎸囩汗鍒ゅ畾銆佸彧瀵硅繘琛屼腑浠诲姟鐢熸晥銆佸懡涓繑鍥炴棦鏈?`taskRef`锛岀増鏈垨淇℃伅涓嶈冻鏃剁収甯告柊寤恒€?
-> 鎸囩汗缁勬垚涓庤鍒よ竟鐣岃 [閰嶇疆鍙傝€僝(configuration.md) 搂7.5銆?
+> 注：**进行中完全相同任务去重**已作为**代码级派单功能**落地（P0-D），不是本协作约定的内容：
+> 它按指纹判定、只对进行中任务生效、命中返回既有 `taskRef`，版本或信息不足时照常新建。
+> 指纹组成与误判边界见 [配置参考](configuration.md) §7.5。
 
-杩欎簺瑕佷箞涓庡涓昏兘鍔涢噸澶嶏紝瑕佷箞浼氭妸"绾﹀畾"鍙樻垚"鑷爺璋冨害"锛岃繚鑳?钖?鐨勫師鍒?
-锛堣 [鏋舵瀯](architecture.md) 搂3銆伮?锛夈€?
-
+这些要么与宿主能力重复，要么会把"约定"变成"自研调度"，违背"薄"的原则
+（见 [架构](architecture.md) §3、§5）。
 
 ## 附：任务/结果协议
 
