@@ -114,6 +114,7 @@ export function apply(ctx, config = {}) {
    */
   const sessionGuiApi = createSessionGuiApi({
     cfg,
+    globalRaw: config,
     projectStore,
     sessionStore,
     resolveProjectRoot: createSessionRootResolver({
@@ -134,10 +135,15 @@ export function apply(ctx, config = {}) {
 
   // GUI 只读数据（Host half）：与工具共用同一份 registry / channels / cfg，不另建数据源。
   // 最近错误由注册表错误初始化，随后由项目配置加载、派单失败、落盘失败更新。
+  //
+  // `sources` 必须用**原始** config 计算：Config() 会把 `enabled` 默认填成 true，
+  // 直接看规范化结果会把所有角色误标成「用户显式启用」（P0-S1）。
+  const guiSources = resolveEffectiveConfig({ global: cfg, globalRaw: config }).sources
   const gui = createGuiState({
     ctx,
     registry: globalRegistry,
     channels: cfg.channels ?? [],
+    sources: guiSources,
     config: {
       defaultRoleId: cfg.defaultRoleId,
       dispatchNotes: cfg.dispatchNotes,
@@ -168,6 +174,7 @@ export function apply(ctx, config = {}) {
         : { config: undefined, errors: [] }
     const resolved = resolveEffectiveConfig({
       global: cfg,
+      globalRaw: config,
       project: loaded.config,
       session: sessionLoaded.config,
     })

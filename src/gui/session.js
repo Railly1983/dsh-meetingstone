@@ -25,6 +25,8 @@ import { isValidSessionId } from '../session/store.js'
  *
  * @param {object} deps
  * @param {any} deps.cfg 插件全局配置（与 resolveRegistry 同源）
+ * @param {any} [deps.globalRaw] 规范化前的全局原始配置；用于区分显式 enabled 与
+ *   schema 默认值（不传时来源可能把默认值误标成 global）
  * @param {{ get: (root: string, file?: string) => any }} deps.projectStore
  * @param {ReturnType<import('../session/store.js').createSessionOverrideStore>} deps.sessionStore
  * @param {(sessionId: string) => string | null} [deps.resolveProjectRoot]
@@ -32,7 +34,7 @@ import { isValidSessionId } from '../session/store.js'
  *   优先 live `ctx.sessions`/`ctx.agents` 的 header.cwd，派单映射只作兜底）。
  *   返回 null 表示找不到该会话的项目根。
  */
-export function createSessionGuiApi({ cfg, projectStore, sessionStore, resolveProjectRoot }) {
+export function createSessionGuiApi({ cfg, globalRaw, projectStore, sessionStore, resolveProjectRoot }) {
   const projectConfigFile = cfg && typeof cfg.projectConfigFile === 'string' ? cfg.projectConfigFile : undefined
 
   /** 构造一个带 code 的错误，便于 Remote 层转成结构化错误。 */
@@ -64,6 +66,7 @@ export function createSessionGuiApi({ cfg, projectStore, sessionStore, resolvePr
     const sessionLoaded = sessionStore.get(projectRoot, sessionId)
     const resolved = resolveEffectiveConfig({
       global: cfg,
+      globalRaw,
       project,
       session: sessionLoaded.config,
     })
@@ -109,7 +112,7 @@ export function createSessionGuiApi({ cfg, projectStore, sessionStore, resolvePr
 
     const { projectRoot, project } = resolveView(sessionId)
     // 继承层（global+project）的角色，用于 diffRoleOverride 计算差异。
-    const inheritedResolved = resolveEffectiveConfig({ global: cfg, project, session: undefined })
+    const inheritedResolved = resolveEffectiveConfig({ global: cfg, globalRaw, project, session: undefined })
     const inheritedRole = inheritedResolved.effective.roles.find((role) => role.roleId === roleId)
     if (!inheritedRole) {
       throw guiError(SESSION_GUI_ERRORS.INVALID_ROLE_ID, `继承层不存在该角色，无法覆盖：${roleId}`)
