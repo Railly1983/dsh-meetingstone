@@ -96,6 +96,9 @@ window.__ModuleLoader__.load({
       value: 'dsh-meetingstone/types#JsonValue',
       sessionConfigView: 'dsh-meetingstone/types#SessionConfigView',
       overrideResult: 'dsh-meetingstone/types#SessionOverrideResult',
+      cliName: 'dsh-meetingstone/types#CliName',
+      booleanValue: 'dsh-meetingstone/types#BooleanValue',
+      jsonResult: 'dsh-meetingstone/types#JsonResult',
     }
 
     /** 构造 client 侧 strict codec；zod 不可用时返回 null（调用方跳过该方法）。 */
@@ -109,6 +112,9 @@ window.__ModuleLoader__.load({
     const fieldCodec = () =>
       strictCodec(SESSION_TYPES.field, () => z.string().min(1).max(128))
     const jsonValueCodec = () => strictCodec(SESSION_TYPES.value, () => z.unknown())
+    const cliNameCodec = () =>
+      strictCodec(SESSION_TYPES.cliName, () => z.enum(['codex', 'codebuddy', 'claude']))
+    const booleanCodec = () => strictCodec(SESSION_TYPES.booleanValue, () => z.boolean())
 
     /**
      * 三个带参会话方法的 client descriptor。参数 codec 全部 strict（真实 zod），
@@ -165,6 +171,42 @@ window.__ModuleLoader__.load({
                 acceptsUndefined: true,
                 codec: fieldCodec(),
               },
+            ],
+            invocation: { kind: 'direct' },
+            result: { mode: 'src-json' },
+          },
+          {
+            id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/setCliEnabled`,
+            service: REMOTE_SERVICE,
+            namespace: REMOTE_SERVICE,
+            method: 'setCliEnabled',
+            parameters: [
+              { name: 'cli', wire: 'cli', source: 'json', codec: cliNameCodec() },
+              { name: 'enabled', wire: 'enabled', source: 'json', codec: booleanCodec() },
+            ],
+            invocation: { kind: 'direct' },
+            result: { mode: 'src-json' },
+          },
+          {
+            id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/refreshCli`,
+            service: REMOTE_SERVICE,
+            namespace: REMOTE_SERVICE,
+            method: 'refreshCli',
+            parameters: [
+              { name: 'cli', wire: 'cli', source: 'json', codec: cliNameCodec() },
+              { name: 'force', wire: 'force', source: 'json', codec: booleanCodec() },
+            ],
+            invocation: { kind: 'direct' },
+            result: { mode: 'src-json' },
+          },
+          {
+            id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/updateGlobalRole`,
+            service: REMOTE_SERVICE,
+            namespace: REMOTE_SERVICE,
+            method: 'updateGlobalRole',
+            parameters: [
+              { name: 'roleId', wire: 'roleId', source: 'json', codec: roleIdCodec() },
+              { name: 'patch', wire: 'patch', source: 'json', codec: jsonValueCodec() },
             ],
             invocation: { kind: 'direct' },
             result: { mode: 'src-json' },
@@ -230,23 +272,98 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** CLI 探测结果 → 只读视图；`null` 表示宿主没有返回探测数据。 */
+    /** 外部 CLI 的固定顺序（与 Host `CLI_NAMES` 一致；详情页三行只显示这三个）。 */
+    const CLI_NAMES = ['codex', 'codebuddy', 'claude']
+    const CLI_LABELS = {
+      codex: 'Codex',
+      codebuddy: 'CodeBuddy',
+      claude: 'Claude Code',
+    }
+
+    /**
+     * CLI「偏好 + preflight」状态 → 只读视图。
+     * 只认稳定枚举；拿不到证据时 `ready='unknown'`、`enabled=false`，不猜。
+     */
+    function normalizeCliState(item, cli) {
+      const source = asObject(item)
+      const name = asString(source.cli) || cli
+      const ready = source.ready === 'ready' || source.ready === 'blocked' ? source.ready : 'unknown'
+      return {
+        cli: name,
+        label: asString(source.label) || CLI_LABELS[name] || name,
+        category: 'external',
+        userPreference:
+          source.userPreference === 'enabled' || source.userPreference === 'disabled'
+            ? source.userPreference
+            : 'unset',
+        enabled: source.enabled === true,
+        ready,
+        blockedReason: ready === 'ready' ? null : asString(source.blockedReason) || 'evidence-missing',
+        manualSteps: asArray(source.manualSteps).map(String).slice(0, 6),
+        retryable: source.retryable === true,
+        autoFix: false,
+        installed: source.installed === true,
+        version: asString(source.version),
+        path: asString(source.path),
+        source: asString(source.source),
+        login: source.login === true || source.login === false ? source.login : 'unknown',
+        hostIntegration:
+          source.hostIntegration === true || source.hostIntegration === false
+            ? source.hostIntegration
+            : 'unknown',
+        firstDetection: source.firstDetection === true,
+        notes: asArray(source.notes).map(String).slice(0, 8),
+        checkedAt: typeof source.checkedAt === 'string' ? source.checkedAt : null,
+      }
+    }
+
+    /** CLI 数组 → 固定三行；缺失项按 unknown/关闭呈现（不伪造已检测）。 */
     function normalizeCli(value) {
       if (!Array.isArray(value)) return null
-      return value
-        .filter((item) => item && typeof item === 'object')
-        .map((item) => ({
-          cli: asString(item.cli),
-          label: asString(item.label) || asString(item.cli),
-          // 宿主自报分类；老版本 host 没有该字段时按外部 CLI 处理（探测只覆盖外部）。
-          category: asString(item.category) || 'external',
-          installed: item.installed === true,
-          path: asString(item.path),
-          version: asString(item.version),
-          source: asString(item.source),
-          notes: asArray(item.notes).map(String),
-          checkedAt: typeof item.checkedAt === 'string' ? item.checkedAt : null,
-        }))
+      const byCli = new Map()
+      for (const item of value) {
+        if (!item || typeof item !== 'object') continue
+        const cli = asString(item.cli)
+        if (!CLI_NAMES.includes(cli)) continue
+        byCli.set(cli, normalizeCliState(item, cli))
+      }
+      return CLI_NAMES.map(
+        (cli) =>
+          byCli.get(cli) ?? {
+            cli,
+            label: CLI_LABELS[cli],
+            category: 'external',
+            userPreference: 'unset',
+            enabled: false,
+            ready: 'unknown',
+            blockedReason: 'evidence-missing',
+            manualSteps: [],
+            retryable: true,
+            autoFix: false,
+            installed: false,
+            version: '',
+            path: '',
+            source: '',
+            login: 'unknown',
+            hostIntegration: 'unknown',
+            firstDetection: false,
+            notes: [],
+            checkedAt: null,
+          },
+      )
+    }
+
+    /** 通道实例 → 只读选项（频道/模型/强度选项的唯一来源）。 */
+    function normalizeChannelOption(channel) {
+      const source = asObject(channel)
+      return {
+        channelId: asString(source.channelId),
+        description: asString(source.description),
+        kind: asString(source.kind),
+        provider: asString(source.provider),
+        model: asString(source.model),
+        reasoning: asString(source.reasoning),
+      }
     }
 
     /** 全局配置视图；缺字段回退到空串/默认值，不猜。 */
@@ -331,12 +448,33 @@ window.__ModuleLoader__.load({
     /** 来源层只认三层继承的固定枚举；其余一律 unknown（不猜）。 */
     const SOURCE_LAYERS = new Set(['global', 'project', 'session'])
 
+    /** 三色/就绪/额度只认稳定枚举（Host `deriveRoleView` 的产物）。 */
+    function normalizeRoleState(value) {
+      const source = asObject(value)
+      const preference = source.userPreference
+      const readiness = source.readiness
+      const quota = source.quota
+      const color = source.color
+      return {
+        userPreference:
+          preference === 'enabled' || preference === 'disabled' ? preference : 'unset',
+        readiness:
+          readiness === 'ready' || readiness === 'blocked' ? readiness : 'unknown',
+        readinessReason: asString(source.readinessReason) || 'PROVIDER_EVIDENCE_MISSING',
+        quota:
+          quota === 'available' || quota === 'exhausted' || quota === 'not_applicable'
+            ? quota
+            : 'unknown',
+        color: color === 'green' || color === 'yellow' ? color : 'gray',
+        availability: asString(source.availability) || 'unknown',
+      }
+    }
+
     /**
-     * 会话生效视图 `{ effective, overrides, sources }` → 只读投影。
+     * 会话生效视图 `{ effective, overrides, sources, channels, roleStates }` → 只读投影。
      *
-     * Remote 返回值是外部数据：逐字段收窄。`sources.roles[roleId]` 是
-     * `resolveEffectiveConfig()` 的产物，`layer` 只会是 global/project/session；
-     * `overrides[roleId]` 是会话层字段补丁（空对象 = 没有覆盖）。
+     * Remote 返回值是外部数据：逐字段收窄。`sources.roles[roleId].fields` 给出
+     * 每个字段的来源层；`roleStates` 给出三色（缺失时按灰/未知，不伪造 ready）。
      * @param {unknown} value
      */
     function normalizeSessionConfigView(value) {
@@ -345,6 +483,15 @@ window.__ModuleLoader__.load({
       const overrides = asObject(source.overrides)
       const sources = asObject(source.sources)
       const roleSources = asObject(sources.roles)
+      const stateById = new Map()
+      for (const item of asArray(source.roleStates)) {
+        const state = normalizeRoleState(item)
+        const roleId = asString(asObject(item).roleId)
+        if (roleId) stateById.set(roleId, state)
+      }
+      const fieldKeys = ['name', 'aliases', 'description', 'prompt', 'enabled']
+      const channelKeys = ['channelId', 'kind', 'provider', 'cli', 'model', 'reasoning']
+
       /** @type {any[]} */
       const roles = asArray(effective.roles)
         .filter((role) => role && typeof role === 'object')
@@ -356,15 +503,47 @@ window.__ModuleLoader__.load({
             : 'unknown'
           const channel = asObject(role.channel)
           const overridePatch = asObject(overrides[roleId])
+          const rawFields = asObject(roleSource.fields)
+          /** @type {Record<string, string>} */
+          const fieldSources = {}
+          for (const key of fieldKeys) {
+            const value = asString(rawFields[key])
+            fieldSources[key] = SOURCE_LAYERS.has(value) ? value : 'default'
+          }
+          for (const key of channelKeys) {
+            const value = asString(rawFields[`channel.${key}`])
+            fieldSources[`channel.${key}`] = SOURCE_LAYERS.has(value) ? value : 'default'
+          }
+          const fallback = normalizeRoleState({
+            userPreference: role.enabled === false ? 'disabled' : 'unset',
+            readiness: 'unknown',
+            quota: 'unknown',
+            color: 'gray',
+            availability: 'unknown',
+          })
           return {
             roleId,
             name: asString(role.name),
             aliases: asArray(role.aliases).map(String),
+            description: asString(role.description),
+            prompt: asString(role.prompt),
+            enabled: role.enabled !== false,
+            channel: {
+              channelId: asString(channel.channelId),
+              kind: asString(channel.kind),
+              provider: asString(channel.provider),
+              cli: asString(channel.cli),
+              model: asString(channel.model),
+              reasoning: asString(channel.reasoning),
+            },
             channelId: asString(channel.channelId),
             provider: asString(channel.provider),
             model: asString(channel.model),
+            reasoning: asString(channel.reasoning),
             sourceLayer: layer,
+            fieldSources,
             overrideFields: Object.keys(overridePatch).sort(),
+            state: stateById.get(roleId) ?? fallback,
           }
         })
       return {
@@ -373,6 +552,14 @@ window.__ModuleLoader__.load({
         defaultRoleSource: SOURCE_LAYERS.has(asString(sources.defaultRoleId))
           ? asString(sources.defaultRoleId)
           : 'default',
+        // 详情页下拉只列真实通道实例；空数组表示「待配置」，不补造模型表。
+        channels: asArray(source.channels).map(normalizeChannelOption),
+        warnings: asArray(source.warnings)
+          .filter((item) => item && typeof item === 'object')
+          .map((item) => ({
+            code: asString(item.code) || 'SESSION_CONFIG_WARNING',
+            message: asString(item.message),
+          })),
       }
     }
 
@@ -426,6 +613,86 @@ window.__ModuleLoader__.load({
             },
           }
         }
+      }
+    }
+
+    /**
+     * 统一 Remote 调用：能力检测 + `{ok,value}` 解包 + 不抛错。
+     * 写操作失败必须原样返回错误（调用方不做乐观更新）。
+     * @param {any | (() => any | null)} serviceOrGet
+     * @param {string | null | undefined} mountFailure
+     */
+    function makeRemoteCall(serviceOrGet, mountFailure) {
+      return async (method, args = []) => {
+        if (mountFailure) {
+          return { ok: false, error: { code: 'REMOTE_MOUNT_FAILED', message: mountFailure } }
+        }
+        const service = typeof serviceOrGet === 'function' ? serviceOrGet() : serviceOrGet
+        if (!service || typeof service[method] !== 'function') {
+          return {
+            ok: false,
+            error: { code: 'REMOTE_UNAVAILABLE', message: `remote.meetingstone.${method} 尚未就绪` },
+          }
+        }
+        try {
+          const envelope = await service[method](...args)
+          if (!envelope || envelope.ok !== true) {
+            const failure = asObject(envelope && envelope.error)
+            return {
+              ok: false,
+              error: {
+                code: asString(failure.code) || 'REMOTE_CALL_FAILED',
+                message: asString(failure.message),
+              },
+            }
+          }
+          const payload = envelope.value
+          // Host 业务失败也放在 `value.ok:false` 里（Gateway 传输本身成功）：
+          // 写操作必须把它当失败返回，调用方才能不做乐观更新。
+          if (payload && typeof payload === 'object' && payload.ok === false) {
+            return {
+              ok: false,
+              error: {
+                code: asString(payload.code) || 'REMOTE_CALL_FAILED',
+                message: asString(payload.message) || '操作失败',
+                data: payload,
+              },
+            }
+          }
+          return { ok: true, value: payload }
+        } catch (error) {
+          return {
+            ok: false,
+            error: {
+              code:
+                error && typeof error === 'object' && typeof error.code === 'string'
+                  ? error.code
+                  : 'REMOTE_CALL_FAILED',
+              message: error instanceof Error ? error.message : String(error),
+            },
+          }
+        }
+      }
+    }
+
+    /** 会话写操作（只写当前会话覆盖；不碰全局/项目）。 */
+    function makeSessionActions(serviceOrGet, mountFailure) {
+      const call = makeRemoteCall(serviceOrGet, mountFailure)
+      return {
+        setOverride: (sessionId, roleId, field, value) =>
+          call('setSessionOverride', [sessionId, roleId, field, value]),
+        clearOverride: (sessionId, roleId, field) =>
+          call('clearSessionOverride', [sessionId, roleId, field]),
+      }
+    }
+
+    /** 配置写/检测操作（CLI 开关 + 全局角色；全局写入由调用方二次确认）。 */
+    function makeConfigActions(serviceOrGet, mountFailure) {
+      const call = makeRemoteCall(serviceOrGet, mountFailure)
+      return {
+        setCliEnabled: (cli, enabled) => call('setCliEnabled', [cli, enabled]),
+        refreshCli: (cli, force) => call('refreshCli', [cli, Boolean(force)]),
+        updateGlobalRole: (roleId, patch) => call('updateGlobalRole', [roleId, patch]),
       }
     }
 
@@ -489,6 +756,73 @@ window.__ModuleLoader__.load({
         'data-tone': tone,
         style: { ...TAG_BASE, ...TAG_TONES[tone] },
         children: props?.children,
+      })
+    }
+
+    /**
+     * 原生 Two-state Switch（**不自绘三态控件**）：`button[role=switch]` +
+     * `aria-checked`，轨道颜色只表达「三色语义」（灰/黄/绿），状态本身仍是开/关。
+     * 不依赖 primitives（官方包不可 require），不使用 DOM/CSS 注入。
+     * @param {{
+     *   checked: boolean,
+     *   label: string,
+     *   title?: string,
+     *   disabled?: boolean,
+     *   color?: 'gray' | 'yellow' | 'green',
+     *   onChange?: (next: boolean) => void,
+     * }} props
+     */
+    function Switch(props) {
+      const checked = props?.checked === true
+      const color = props?.color === 'green' || props?.color === 'yellow' ? props.color : 'gray'
+      const offTrack = 'var(--dsw-alias-border-l4)'
+      const onTrack =
+        color === 'green'
+          ? 'var(--dsw-alias-state-success-primary)'
+          : color === 'yellow'
+            ? 'var(--dsw-alias-state-warn-primary)'
+            : 'var(--dsw-alias-label-tertiary)'
+      const disabled = props?.disabled === true
+      return jsxs('button', {
+        type: 'button',
+        role: 'switch',
+        'aria-checked': checked,
+        'aria-label': asString(props?.label),
+        title: asString(props?.title),
+        disabled,
+        onClick: () => {
+          if (disabled) return
+          if (typeof props?.onChange === 'function') props.onChange(!checked)
+        },
+        style: {
+          position: 'relative',
+          boxSizing: 'border-box',
+          width: 32,
+          height: 18,
+          padding: 0,
+          border: 'none',
+          borderRadius: 999,
+          background: checked ? onTrack : offTrack,
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          opacity: disabled ? 0.5 : 1,
+          flexShrink: 0,
+          transition: 'background 120ms ease',
+        },
+        children: [
+          jsx('span', {
+            'aria-hidden': 'true',
+            style: {
+              position: 'absolute',
+              top: 2,
+              left: checked ? 16 : 2,
+              width: 14,
+              height: 14,
+              borderRadius: '50%',
+              background: 'var(--dsw-alias-bg-layer-3)',
+              transition: 'left 120ms ease',
+            },
+          }),
+        ],
       })
     }
 
@@ -672,9 +1006,9 @@ window.__ModuleLoader__.load({
       headerTitle: '角色',
       headerDesc: '查看当前会话角色（只读）',
       tabTitle: '集合石角色',
-      paneTitle: '当前会话角色（只读）',
+      paneTitle: '当前会话角色',
       paneReadonlyNote:
-        '只读：展示三层继承（全局 → 项目 → 会话）后的生效角色与来源；会话级编辑待真机验证后接入',
+        '开关只写当前会话；灰=关闭或依赖阻断，黄=额度耗尽，绿=正常/未知。',
       openPanel: '打开集合石角色面板',
       noRoles: '当前没有可用角色',
       aliasLabel: '别名',
@@ -691,6 +1025,69 @@ window.__ModuleLoader__.load({
       overrideFieldsLabel: '覆盖字段',
       renderFailed: '面板渲染失败，详情见宿主日志',
       remoteUnavailableHint: '远程不可用',
+      // U2：设置页两区 + 角色三色二态 + 二级详情
+      cliSection: '外部 CLI 连接',
+      rolesSection: '默认角色配置',
+      templateName: '取经五人组',
+      templateDesc: '唐僧、悟空、八戒、沙僧、小白五人各司其职；模型与通道按角色单独配置。',
+      cliSwitchLabel: '启用',
+      cliOff: '关闭',
+      cliOn: '开启',
+      cliOffFailed: '关闭失败',
+      cliOnFailed: '检测未通过，保持关闭',
+      cliRetry: '重新检测',
+      cliDetecting: '检测中…',
+      manualSteps: '人工步骤',
+      noCliStates: '未获取到 CLI 状态（不影响角色配置）',
+      // 角色列表
+      roleListTitle: '本对话角色',
+      roleListNote: '开关只写当前会话；灰=关闭或依赖阻断，黄=额度耗尽，绿=正常/未知。',
+      roleOpenDetail: '查看角色详情',
+      roleEnabled: '已启用',
+      roleDisabled: '已关闭',
+      roleBlocked: '依赖阻断',
+      roleQuota: '额度耗尽',
+      roleUnknown: '状态未知',
+      roleSwitchLabel: '启用角色',
+      roleSwitchFailed: '写入失败，未改变当前状态',
+      noRolesDetail: '没有可编辑的角色',
+      // 详情
+      detailTitle: '角色详情',
+      detailBack: '返回角色列表',
+      scopeSession: '本会话',
+      scopeGlobal: '全局',
+      scopeGlobalNote: '全局修改会写入 profile，影响所有会话；保存前需二次确认。',
+      scopeGlobalBlocked: '全局层不支持恢复继承（会被项目/会话覆盖）',
+      fieldName: '名称',
+      fieldAliases: '简称',
+      fieldDescription: '描述',
+      fieldChannel: 'CLI / 通道',
+      fieldModel: '模型',
+      fieldReasoning: '思考强度',
+      fieldPrompt: '角色 Prompt',
+      fieldUnset: '未设置',
+      channelUnset: '未指定通道（继承）',
+      unsupported: '不支持',
+      pendingConfig: '待配置',
+      restoreInherit: '恢复继承',
+      saveDetail: '保存修改',
+      savingDetail: '保存中…',
+      detailSaved: '已保存',
+      detailNoChanges: '没有需要保存的差异',
+      confirmGlobal: '确认写入全局配置？',
+      confirm: '确认',
+      cancel: '取消',
+      noModelOptions: '当前通道没有配置模型',
+      noReasoningOptions: '当前通道没有配置思考强度',
+      sourceColumn: '来源',
+      detailInvalidName: '名称不能为空',
+      detailInvalidPrompt: 'Prompt 不能为空；如需恢复继承请用「恢复继承」',
+      detailInvalidAliases: '简称格式：逗号分隔的字符串',
+      detailReadOnly: '当前角色来自会话新增，全局层不可编辑',
+      warningPrefix: '读取告警',
+      loadError: '读取失败',
+      required: '必填',
+      unchanged: '未修改',
     }
     const en = {
       nav: 'MeetingStone',
@@ -754,9 +1151,9 @@ window.__ModuleLoader__.load({
       headerTitle: 'Roles',
       headerDesc: 'View session roles (read-only)',
       tabTitle: 'MeetingStone Roles',
-      paneTitle: 'Session roles (read-only)',
+      paneTitle: 'Session roles',
       paneReadonlyNote:
-        'Read-only: shows effective roles after global → project → session inheritance, with sources; session editing lands after live verification',
+        'The switch only writes the current session; gray=off or blocked, yellow=quota exhausted, green=ready/unknown.',
       openPanel: 'Open MeetingStone role panel',
       noRoles: 'No roles available',
       aliasLabel: 'Aliases',
@@ -773,6 +1170,67 @@ window.__ModuleLoader__.load({
       overrideFieldsLabel: 'Override fields',
       renderFailed: 'Failed to render this panel; see host logs',
       remoteUnavailableHint: 'Remote unavailable',
+      // U2: settings sections + tri-color role switches + detail view
+      cliSection: 'External CLI connections',
+      rolesSection: 'Default role configuration',
+      templateName: 'Journey to the West five',
+      templateDesc: 'Tangtang, Wukong, Bajie, Sashi and Xiaobai share duties; model and channel are configured per role.',
+      cliSwitchLabel: 'Enable',
+      cliOff: 'Off',
+      cliOn: 'On',
+      cliOffFailed: 'Failed to disable',
+      cliOnFailed: 'Preflight failed; kept off',
+      cliRetry: 'Re-check',
+      cliDetecting: 'Checking…',
+      manualSteps: 'Manual steps',
+      noCliStates: 'CLI states unavailable (role configuration is unaffected)',
+      roleListTitle: 'Session roles',
+      roleListNote: 'The switch only writes the current session; gray=off or blocked, yellow=quota exhausted, green=ready/unknown.',
+      roleOpenDetail: 'Open role detail',
+      roleEnabled: 'Enabled',
+      roleDisabled: 'Off',
+      roleBlocked: 'Blocked',
+      roleQuota: 'Quota exhausted',
+      roleUnknown: 'Unknown',
+      roleSwitchLabel: 'Enable role',
+      roleSwitchFailed: 'Write failed; state unchanged',
+      noRolesDetail: 'No editable roles',
+      detailTitle: 'Role detail',
+      detailBack: 'Back to role list',
+      scopeSession: 'This session',
+      scopeGlobal: 'Global',
+      scopeGlobalNote: 'Global changes are written to the profile and affect every session; a second confirmation is required.',
+      scopeGlobalBlocked: 'Restore inheritance is not available at the global layer',
+      fieldName: 'Name',
+      fieldAliases: 'Aliases',
+      fieldDescription: 'Description',
+      fieldChannel: 'CLI / channel',
+      fieldModel: 'Model',
+      fieldReasoning: 'Reasoning',
+      fieldPrompt: 'Role prompt',
+      fieldUnset: 'Not set',
+      channelUnset: 'No channel (inherit)',
+      unsupported: 'Unsupported',
+      pendingConfig: 'Pending configuration',
+      restoreInherit: 'Restore inheritance',
+      saveDetail: 'Save changes',
+      savingDetail: 'Saving…',
+      detailSaved: 'Saved',
+      detailNoChanges: 'No differences to save',
+      confirmGlobal: 'Write to global configuration?',
+      confirm: 'Confirm',
+      cancel: 'Cancel',
+      noModelOptions: 'No model configured for this channel',
+      noReasoningOptions: 'No reasoning configured for this channel',
+      sourceColumn: 'Source',
+      detailInvalidName: 'Name cannot be empty',
+      detailInvalidPrompt: 'Prompt cannot be empty; use Restore inheritance instead',
+      detailInvalidAliases: 'Aliases must be comma-separated strings',
+      detailReadOnly: 'This role is defined in the session; the global layer is read-only',
+      warningPrefix: 'Warning',
+      loadError: 'Load failed',
+      required: 'Required',
+      unchanged: 'Unchanged',
     }
 
     /** availability → 宿主 Tag 的 tone/文案 key（tone 取值见官方 TAG_TONES）。 */
@@ -801,146 +1259,143 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 文本链接按钮（无边框、token 色）；设置页/详情页复用。 */
+    const linkButton = {
+      background: 'none',
+      border: 'none',
+      padding: 0,
+      color: 'var(--dsw-alias-state-business-primary)',
+      fontFamily: 'inherit',
+      fontSize: 12,
+      lineHeight: '18px',
+      cursor: 'pointer',
+      flexShrink: 0,
+    }
+
     /**
-     * CLI 连接：紧凑一行一个（名称 + 版本 + 状态），并区分宿主 / 外部 CLI。
-     * 宿主行是当前 DSH（页面能渲染即说明宿主在运行）；外部行只投影真实探测结果，
-     * 拿不到就明说，不猜。
+     * CLI 状态 → 固定三行（Codex / CodeBuddy / Claude）。
+     * 缺失项按 unknown/关闭呈现，不伪造已检测；只投影状态，不显示版本/路径/额度。
+     * @param {any[] | null | undefined} cliStates
      */
-    function CliList({ t, global, remoteOk }) {
-      const hostRow = jsxs(
-        'div',
-        {
-          style: row,
-          children: [
-            jsx('span', { style: category, children: t('categoryHost') }),
-            jsx('span', { children: t('hostName') }),
-            jsx('span', { style: meta, children: '—' }),
-            jsx('span', { style: grow }),
-            remoteOk === false
-              ? jsx(Tag, { tone: 'danger', children: t('remoteUnavailableHint') })
-              : jsx(Tag, { tone: 'info', children: t('hostRunning') }),
-          ],
-        },
-        'host',
-      )
-
-      /** @type {any[]} */
-      const children = [hostRow]
-      if (!global.cli) {
-        const message = global.cliError === 'CLI_PROBE_TIMEOUT' ? t('cliTimeout') : t('noCli')
-        children.push(jsx('p', { style: note, children: message }, 'cli-note'))
-      } else if (global.cli.length === 0) {
-        children.push(jsx('span', { style: dim, children: t('none') }, 'cli-none'))
-      } else {
-        for (const item of global.cli) {
-          const label = item.label || item.cli || t('unknown')
-          const version = item.installed ? item.version : ''
-          children.push(
-            jsxs(
-              'div',
-              {
-                style: row,
-                children: [
-                  jsx('span', { style: category, children: t('categoryExternal') }),
-                  jsx('span', { children: label }),
-                  version ? jsx('span', { style: code, children: `v${version.replace(/^v/, '')}` }) : null,
-                  jsx('span', { style: grow }),
-                  jsx(Tag, {
-                    tone: item.installed ? 'info' : 'neutral',
-                    children: item.installed ? t('installed') : t('notInstalled'),
-                  }),
-                ],
-              },
-              item.cli || label,
-            ),
-          )
-        }
+    function cliRowsOf(cliStates) {
+      const list = Array.isArray(cliStates) ? cliStates : []
+      const byCli = new Map()
+      for (const item of list) {
+        const cli = asString(item?.cli)
+        if (CLI_NAMES.includes(cli)) byCli.set(cli, item)
       }
-      return jsxs('div', { style: list, children })
-    }
-
-    /** 高级：CLI 完整路径（仅已安装）。完整路径从区 1 移入此处，避免主页面噪声。 */
-    function CliPaths({ t, global }) {
-      const installed = (global.cli || []).filter((item) => item.installed && item.path)
-      if (installed.length === 0) return jsx('span', { style: dim, children: t('none') })
-      return jsxs('div', {
-        style: list,
-        children: installed.map((item) => {
-          const label = item.label || item.cli || t('unknown')
-          return jsxs(
-            'div',
-            {
-              style: row,
-              children: [
-                jsx('span', { children: label }),
-                jsx('span', { style: grow }),
-                jsx('span', { style: meta, children: item.path }),
-              ],
-            },
-            item.cli || label,
-          )
-        }),
-      })
-    }
-
-    /** 高级：通道模型映射（channelId → kind·provider·model·reasoning）。 */
-    function ChannelModels({ t, global }) {
-      if (global.channels.length === 0) return jsx('span', { style: dim, children: t('noChannels') })
-      return jsxs('div', {
-        style: list,
-        children: global.channels.map((channel) => {
-          const detail = [channel.kind, channel.provider].filter(Boolean).join(' · ')
-          return jsxs(
-            'div',
-            {
-              style: row,
-              children: [
-                jsx('span', { style: code, children: channel.channelId || t('unknown') }),
-                jsx('span', { style: grow }),
-                detail ? jsx('span', { style: dim, children: detail }) : null,
-                jsx('span', { style: dim, children: channel.model || t('notSet') }),
-                channel.reasoning ? jsx('span', { style: dim, children: `(${channel.reasoning})` }) : null,
-              ],
-            },
-            channel.channelId || channel.model,
-          )
-        }),
-      })
+      return CLI_NAMES.map(
+        (cli) =>
+          byCli.get(cli) ?? {
+            cli,
+            label: CLI_LABELS[cli],
+            userPreference: 'unset',
+            enabled: false,
+            ready: 'unknown',
+            blockedReason: 'evidence-missing',
+            manualSteps: [],
+            retryable: true,
+          },
+      )
     }
 
     /**
-     * 纯函数渲染「已就绪」设置页（V1 三区）。抽出来便于 stub harness 断言结构，
-     * 不依赖 React 状态机。advancedOpen 默认 false（高级区默认收起）。
+     * 一行外部 CLI：名称 + 原生 Switch。**不显示**版本/路径/额度/通道/徽章。
+     * 只有该行刚发生过开/关失败时，才追加「一行摘要 + 人工步骤 + 重新检测」。
+     */
+    function CliSwitchRow({ t, row, pending, failure, onToggle, onRetry }) {
+      const reason = row.ready === 'ready' ? '' : asString(row.blockedReason)
+      const title = reason ? `${row.label || row.cli} · ${reason}` : row.label || row.cli
+      const stepText = asArray(failure?.manualSteps).map(String).join('；')
+      /** @type {any[]} */
+      const children = [
+        jsx('span', { style: grow, children: row.label || row.cli }),
+        jsx(Switch, {
+          // 有失败记录时强制显示为关：失败不做乐观假开启。
+          checked: failure ? false : row.enabled === true,
+          label: `${t('cliSwitchLabel')} ${row.label || row.cli}`,
+          title,
+          disabled: pending === true,
+          color: failure ? 'gray' : row.enabled === true ? 'green' : 'gray',
+          onChange: (next) => onToggle(row.cli, next),
+        }),
+      ]
+      if (failure) {
+        children.push(
+          jsxs(
+            'div',
+            {
+              style: { display: 'flex', flexDirection: 'column', gap: 4, width: '100%', paddingLeft: 0 },
+              children: [
+                jsx('p', {
+                  role: 'status',
+                  style: {
+                    ...note,
+                    color: 'var(--dsw-alias-state-error-primary)',
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                  },
+                  title: `${asString(failure.code)} ${asString(failure.message)}`,
+                  children: asString(failure.message) || t('cliOnFailed'),
+                }),
+                stepText
+                  ? jsxs('div', { style: meta, children: [`${t('manualSteps')}：`, stepText] })
+                  : null,
+                failure.retryable === false
+                  ? null
+                  : jsx('button', {
+                      type: 'button',
+                      style: linkButton,
+                      disabled: pending === true,
+                      onClick: () => onRetry(row.cli),
+                      children: pending === true ? t('cliDetecting') : t('cliRetry'),
+                    }),
+              ],
+            },
+            `cli-failure-${row.cli}`,
+          ),
+        )
+      }
+      return jsxs('div', { style: { ...row, flexWrap: 'wrap' }, children }, row.cli)
+    }
+
+    /**
+     * 设置页：**只保留两区**。
+     *
+     * 1) 外部 CLI 连接：Codex / CodeBuddy / Claude 三行，每行只有名称 + Switch；
+     * 2) 默认角色配置：模板名 + 一句说明 + 角色数量 + 「管理角色」入口。
+     *
+     * 并行上限、同项目串行、全局调度、高级设置、通道实例、配置文件路径、DSH 宿主行
+     * 全部删除；错误只在首屏一行摘要，详情折叠，无错误不占位。
+     *
      * @param {(key: string) => string} t
      * @param {any} snapshot
      * @param {{
-     *   advancedOpen?: boolean,
+     *   cliStates?: any[] | null,
+     *   cliPending?: Record<string, boolean>,
+     *   cliFailures?: Record<string, any>,
      *   errorOpen?: boolean,
      *   openRoles?: () => void,
-     *   onToggleAdvanced?: () => void,
+     *   onToggleCli?: (cli: string, next: boolean) => void,
+     *   onRetryCli?: (cli: string) => void,
      *   onToggleError?: () => void,
      * }} opts
      */
     function renderSection(t, snapshot, opts = {}) {
-      const global = snapshot.global
-      const advancedOpen = opts.advancedOpen === true
+      const global = asObject(snapshot?.global)
+      const rows = cliRowsOf(
+        opts.cliStates !== undefined ? opts.cliStates : global.cli,
+      )
+      const pending = asObject(opts.cliPending)
+      const failures = asObject(opts.cliFailures)
       const errorOpen = opts.errorOpen === true
       const openRoles = typeof opts.openRoles === 'function' ? opts.openRoles : () => {}
-      const onToggleAdvanced =
-        typeof opts.onToggleAdvanced === 'function' ? opts.onToggleAdvanced : () => {}
+      const onToggleCli = typeof opts.onToggleCli === 'function' ? opts.onToggleCli : () => {}
+      const onRetryCli = typeof opts.onRetryCli === 'function' ? opts.onRetryCli : () => {}
       const onToggleError = typeof opts.onToggleError === 'function' ? opts.onToggleError : () => {}
+      const lastError = snapshot?.lastError
 
-      const roleCount = snapshot.roles.length
-      const defaultRole = global.defaultRoleId
-        ? snapshot.roles.find((role) => role.roleId === global.defaultRoleId)
-        : undefined
-      const defaultRoleLabel = defaultRole
-        ? `${defaultRole.name || defaultRole.roleId}（${defaultRole.roleId}）`
-        : t('notSet')
-      const limits = global.limits
-
-      // 错误：首屏一行摘要（不换行）；详情默认折叠，点击展开。无错误不占位。
-      const lastError = snapshot.lastError
       const errorCard = !lastError
         ? null
         : jsxs('div', {
@@ -952,12 +1407,18 @@ window.__ModuleLoader__.load({
                 children: [
                   jsx(Tag, { tone: 'danger', children: t('errorWarning') }),
                   jsx('span', {
-                    style: { ...grow, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-                    children: `[${lastError.code}] ${lastError.message || t('unknown')}`,
+                    style: {
+                      ...grow,
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    },
+                    title: `[${asString(lastError.code)}] ${asString(lastError.message)}`,
+                    children: `[${asString(lastError.code)}] ${asString(lastError.message)}`,
                   }),
                   jsx('button', {
                     type: 'button',
-                    style: { ...dim, background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0 },
+                    style: linkButton,
                     'aria-expanded': errorOpen,
                     onClick: onToggleError,
                     children: errorOpen ? t('errorHideDetails') : t('errorDetails'),
@@ -968,8 +1429,11 @@ window.__ModuleLoader__.load({
                 ? jsxs('div', {
                     style: { ...note, display: 'flex', flexDirection: 'column', gap: 4 },
                     children: [
-                      jsx('div', { children: lastError.message || t('unknown') }),
-                      jsx('div', { style: meta, children: `${lastError.code}${lastError.source ? ` · ${lastError.source}` : ''}` }),
+                      jsx('div', { children: asString(lastError.message) || t('unknown') }),
+                      jsx('div', {
+                        style: meta,
+                        children: `${asString(lastError.code)}${lastError.source ? ` · ${lastError.source}` : ''}`,
+                      }),
                       lastError.at ? jsx('div', { style: meta, children: lastError.at }) : null,
                     ],
                   })
@@ -977,133 +1441,100 @@ window.__ModuleLoader__.load({
             ],
           })
 
-      // 高级区（默认收起）：隔离 / CLI 完整路径 / 通道实例 / 配置文件 / 日志目录。
-      const advancedBody = !advancedOpen
-        ? null
-        : jsxs('div', {
-            style: card,
+      const cliCard = jsxs('div', {
+        style: card,
+        children: [
+          // 拿不到状态时只解释一次；三行仍以 unknown/关呈现（不伪造已检测）。
+          (opts.cliStates === undefined || opts.cliStates === null) &&
+          (global.cli === null || global.cli === undefined)
+            ? jsx('p', { style: note, children: t('noCliStates') })
+            : null,
+          jsx('div', {
+            style: list,
+            children: rows.map((row) =>
+              jsx(
+                CliSwitchRow,
+                {
+                  t,
+                  row,
+                  pending: pending[row.cli] === true,
+                  failure: failures[row.cli] ?? null,
+                  onToggle: onToggleCli,
+                  onRetry: onRetryCli,
+                },
+                `cli-${row.cli}`,
+              ),
+            ),
+          }),
+        ],
+      })
+
+      const roleCount = asArray(snapshot?.roles).length
+      const templateCard = jsxs('div', {
+        style: card,
+        children: [
+          jsx('div', { style: { ...heading, fontSize: 13 }, children: t('templateName') }),
+          jsx('p', { style: note, children: t('templateDesc') }),
+          jsxs('div', {
+            style: alignRow,
             children: [
-              jsxs('dl', {
-                style: kv,
-                children: [
-                  kvRow(
-                    t('isolation'),
-                    limits.defaultIsolation === 'none' ? t('isolationNone') : t('isolationWorktree'),
-                    'isolation',
-                  ),
-                ],
+              jsx('span', { children: t('roleCount') }),
+              jsx('span', { style: dim, children: String(roleCount) }),
+              jsx('span', { style: grow }),
+              jsx('button', {
+                type: 'button',
+                style: linkButton,
+                onClick: openRoles,
+                children: t('manageRoles'),
               }),
-              jsx('div', { style: subheading, children: t('cliPaths') }),
-              jsx(CliPaths, { t, global }),
-              jsx('div', { style: subheading, children: t('channelInstances') }),
-              jsx(ChannelModels, { t, global }),
-              jsx('div', { style: subheading, children: t('configFile') }),
-              jsxs('div', {
-                style: row,
-                children: [
-                  jsx('span', { style: code, children: 'cordis.patch.yml' }),
-                  jsx('span', { style: grow }),
-                  jsx('button', {
-                    type: 'button',
-                    style: { ...dim, background: 'none', border: 'none', cursor: 'pointer', padding: 0 },
-                    onClick: () => {},
-                    children: t('openConfig'),
-                  }),
-                ],
-              }),
-              jsx('p', { style: note, children: t('diagLog') }),
             ],
-          })
+          }),
+        ],
+      })
 
       return jsxs('div', {
         style: root,
         children: [
           errorCard,
-          // 区 1：CLI 连接（紧凑一行一个：宿主 / 外部 CLI + 版本 + 状态）。
-          jsx('h3', { style: heading, children: t('cli') }),
-          jsx('div', {
-            style: card,
-            children: jsx(CliList, { t, global, remoteOk: !snapshot.unavailable }),
-          }),
-          // 区 2：默认协作配置（角色数量 + 默认角色 + 管理入口合并为一行）。
-          jsx('h3', { style: heading, children: t('collab') }),
-          jsx('div', {
-            style: card,
-            children: jsxs('div', {
-              style: list,
-              children: [
-                jsxs('div', {
-                  style: { ...alignRow, flexWrap: 'wrap' },
-                  children: [
-                    jsx('span', { children: t('roleCount') }),
-                    jsx('span', { style: dim, children: String(roleCount) }),
-                    jsx('span', { style: dim, children: '·' }),
-                    jsx('span', { children: t('defaultRole') }),
-                    jsx('span', { style: dim, children: defaultRoleLabel }),
-                    jsx('span', { style: grow }),
-                    jsx('button', {
-                      type: 'button',
-                      style: { ...dim, background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0 },
-                      onClick: openRoles,
-                      children: t('manageRoles'),
-                    }),
-                  ],
-                }),
-                jsxs('div', {
-                  style: alignRow,
-                  children: [
-                    jsx('span', { children: t('parallelLimit') }),
-                    jsx('span', { style: alignValue, children: String(limits.maxParallelWritesTotal) }),
-                  ],
-                }),
-                jsxs('div', {
-                  style: alignRow,
-                  children: [
-                    jsx('span', { children: t('serializeWrites') }),
-                    jsx('span', { style: alignValue, children: limits.serializeWrites ? t('on') : t('off') }),
-                  ],
-                }),
-                jsxs('div', {
-                  style: alignRow,
-                  children: [
-                    jsx('span', { children: t('dispatchNotes') }),
-                    jsx('span', { style: alignValue, children: global.dispatchNotes || t('none') }),
-                  ],
-                }),
-              ],
-            }),
-          }),
-          // 区 3：高级设置（默认收起）。
-          jsxs('div', {
-            style: { display: 'flex', alignItems: 'center', gap: 10 },
-            children: [
-              jsx('h3', { style: { ...heading, flex: 1 }, children: t('advanced') }),
-              jsx('button', {
-                type: 'button',
-                style: { ...dim, background: 'none', border: 'none', cursor: 'pointer', padding: 0 },
-                'aria-expanded': advancedOpen,
-                onClick: onToggleAdvanced,
-                children: advancedOpen ? t('closeAdvanced') : t('openAdvanced'),
-              }),
-            ],
-          }),
-          advancedBody,
+          jsx('h3', { style: heading, children: t('cliSection') }),
+          cliCard,
+          jsx('h3', { style: heading, children: t('rolesSection') }),
+          templateCard,
         ],
       })
     }
 
-    /** 只读 section：V1 三区结构 + 最近错误（条件显示）；无任何搜索/编辑/动画。 */
-    function Section({ t, list: load, openRoles }) {
+    /** 用一行 Remote 返回值替换本地 CLI 行（按 cli 对齐；不改变其他行）。 */
+    function replaceCliRow(states, next) {
+      const cli = asString(next?.cli)
+      if (!cli) return states
+      const list = Array.isArray(states) ? states.slice() : cliRowsOf(null)
+      const index = list.findIndex((item) => item?.cli === cli)
+      if (index >= 0) list[index] = { ...list[index], ...next, cli }
+      else list.push({ ...next, cli })
+      return list
+    }
+
+    /**
+     * 设置页组件：两区 + 错误摘条件显示。
+     * CLI 开关失败不做乐观更新：失败时开关保持关闭，并显示一行摘要/人工步骤/重新检测。
+     */
+    function Section({ t, list: load, openRoles, setCliEnabled, refreshCli }) {
       const [state, setState] = react.useState({ status: 'loading' })
-      const [advancedOpen, setAdvancedOpen] = react.useState(false)
       const [errorOpen, setErrorOpen] = react.useState(false)
+      const [cliStates, setCliStates] = react.useState(null)
+      const [cliPending, setCliPending] = react.useState({})
+      const [cliFailures, setCliFailures] = react.useState({})
+
       react.useEffect(() => {
         let current = true
         Promise.resolve()
           .then(() => load())
           .then(
             (snapshot) => {
-              if (current) setState({ status: 'ready', snapshot })
+              if (!current) return
+              setState({ status: 'ready', snapshot })
+              setCliStates(Array.isArray(snapshot?.global?.cli) ? snapshot.global.cli : null)
             },
             (error) => {
               if (current) {
@@ -1118,6 +1549,93 @@ window.__ModuleLoader__.load({
           current = false
         }
       }, [load])
+
+      /** 清掉某个 CLI 的失败记录（不改开关）。 */
+      function clearFailure(cli) {
+        setCliFailures((previous) => {
+          if (!previous || !Object.hasOwn(previous, cli)) return previous
+          const next = { ...previous }
+          delete next[cli]
+          return next
+        })
+      }
+
+      /** 写开关：先置 pending；成功后才替换本地行；失败保持关闭。 */
+      async function toggleCli(cli, next) {
+        if (typeof setCliEnabled !== 'function') {
+          setCliFailures((previous) => ({
+            ...previous,
+            [cli]: {
+              code: 'REMOTE_UNAVAILABLE',
+              message: t('remoteUnavailableHint'),
+              manualSteps: [],
+              retryable: true,
+            },
+          }))
+          return
+        }
+        setCliPending((previous) => ({ ...previous, [cli]: true }))
+        clearFailure(cli)
+        const result = await setCliEnabled(cli, next)
+        setCliPending((previous) => ({ ...previous, [cli]: false }))
+        if (result?.ok === true) {
+          const payload = asObject(result.value)
+          const nextState = payload.state ? normalizeCliState(payload.state, cli) : null
+          if (nextState) {
+            setCliStates((previous) => replaceCliRow(previous, nextState))
+          } else if (next === false) {
+            setCliStates((previous) =>
+              replaceCliRow(previous, { cli, enabled: false, userPreference: 'disabled' }),
+            )
+          }
+          return
+        }
+        const error = asObject(result?.error)
+        const data = asObject(error.data)
+        setCliFailures((previous) => ({
+          ...previous,
+          [cli]: {
+            code: asString(error.code) || 'CLI_PREFERENCE_PREFLIGHT_FAILED',
+            message: asString(error.message) || t('cliOnFailed'),
+            manualSteps: asArray(data.manualSteps).map(String),
+            retryable: data.retryable !== false,
+          },
+        }))
+        // 明确保持关闭：不做乐观假开启。
+        setCliStates((previous) =>
+          replaceCliRow(previous, {
+            cli,
+            enabled: false,
+            userPreference: next === false ? 'disabled' : 'unset',
+            ready: 'blocked',
+          }),
+        )
+      }
+
+      /** 重新检测：只读 preflight（force 绕过缓存），不写配置。 */
+      async function retryCli(cli) {
+        if (typeof refreshCli !== 'function') return
+        setCliPending((previous) => ({ ...previous, [cli]: true }))
+        const result = await refreshCli(cli, true)
+        setCliPending((previous) => ({ ...previous, [cli]: false }))
+        if (result?.ok === true) {
+          const payload = asObject(result.value)
+          const nextState = payload.cli ? normalizeCliState(payload.cli, cli) : null
+          if (nextState) setCliStates((previous) => replaceCliRow(previous, nextState))
+          clearFailure(cli)
+          return
+        }
+        const error = asObject(result?.error)
+        setCliFailures((previous) => ({
+          ...previous,
+          [cli]: {
+            code: asString(error.code) || 'CLI_PREFLIGHT_FAILED',
+            message: asString(error.message) || t('cliOnFailed'),
+            manualSteps: [],
+            retryable: true,
+          },
+        }))
+      }
 
       if (state.status === 'loading') {
         return jsx('div', {
@@ -1138,8 +1656,6 @@ window.__ModuleLoader__.load({
 
       const snapshot = state.snapshot
       const unavailable = snapshot.unavailable
-      // 加载成功但 remote 未就绪：仍渲染三区骨架，让页面可见并解释原因。
-      // 渲染异常由 safeRender 记统一日志并渲染一行回退提示（宿主 boundary 之外自救）。
       return safeRender(
         'section',
         'render',
@@ -1155,10 +1671,13 @@ window.__ModuleLoader__.load({
                   })
                 : null,
               renderSection(t, snapshot, {
-                advancedOpen,
+                cliStates,
+                cliPending,
+                cliFailures,
                 errorOpen,
                 openRoles,
-                onToggleAdvanced: () => setAdvancedOpen(!advancedOpen),
+                onToggleCli: toggleCli,
+                onRetryCli: retryCli,
                 onToggleError: () => setErrorOpen(!errorOpen),
               }),
             ],
@@ -1239,7 +1758,7 @@ window.__ModuleLoader__.load({
      * @param {() => Promise<any>} loader
      * @param {(key: string) => string} t
      */
-    function registerSection(slotCtx, loader, t) {
+    function registerSection(slotCtx, loader, t, configActions = {}) {
       if (
         !slotCtx?.slots ||
         typeof slotCtx.slots.inject !== 'function' ||
@@ -1257,6 +1776,15 @@ window.__ModuleLoader__.load({
             locale: NS,
             inject: () => ({
               list: loader,
+              // 区 1 开关：开启前 Host 强制 preflight；失败不写配置。
+              setCliEnabled: (cli, enabled) =>
+                typeof configActions.setCliEnabled === 'function'
+                  ? configActions.setCliEnabled(cli, enabled)
+                  : { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '配置远程未装配' } },
+              refreshCli: (cli, force) =>
+                typeof configActions.refreshCli === 'function'
+                  ? configActions.refreshCli(cli, force)
+                  : { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '配置远程未装配' } },
               // 区 2「管理角色」入口：打开右侧栏会话角色面板（复用既有 TAB_ID）。
               openRoles: () => {
                 try {
@@ -1272,85 +1800,740 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * 右侧栏只读面板（P0-S0 恢复 strict Remote 后）。
-     *
-     * 会话级写入 `setSessionOverride` / `clearSessionOverride` 已具备 strict 契约，
-     * 但本版**不接写 UI**（先过真机门禁）。面板只调用 strict
-     * `getSessionConfig(sessionId)`，展示 `{effective, overrides, sources}` 的只读
-     * 投影（每个角色的来源层 + 是否有会话覆盖）；调用失败只显示一行错误摘要。
-     */
-    function channelTextOf(role, t) {
-      const parts = [role.channelId, role.provider, role.model].filter(Boolean)
-      return parts.length > 0 ? parts.join(' · ') : t('notSet')
-    }
-
     /** 来源层 → i18n key + 宿主 Tag tone（固定枚举，不猜）。 */
     function sourceMeta(layer) {
       if (layer === 'global') return { key: 'sourceGlobal', tone: 'neutral' }
       if (layer === 'project') return { key: 'sourceProject', tone: 'info' }
       if (layer === 'session') return { key: 'sourceSession', tone: 'warning' }
+      if (layer === 'default') return { key: 'sourceDefault', tone: 'quiet' }
       return { key: 'sourceUnknown', tone: 'quiet' }
     }
 
-    /** 单个角色的只读卡片：名称 / ID / 来源（全局/项目/会话）/ 是否有覆盖 / 通道。 */
-    function RoleReadonlyCard({ t, role }) {
-      const aliases = asArray(role.aliases).filter(Boolean)
-      const overrideFields = asArray(role.overrideFields).filter(Boolean)
-      const overridden = overrideFields.length > 0
-      const src = sourceMeta(role.sourceLayer)
+    /** 字段来源（缺失 → default；不把未知来源猜成 global）。 */
+    function fieldSourceOf(view, roleId, field) {
+      const role = asArray(view?.roles).find((item) => item?.roleId === roleId)
+      const source = asString(role?.fieldSources?.[field])
+      return source || 'default'
+    }
+
+    /** 三色 → Tag tone（只用宿主已有 tone，不新增色板）。 */
+    function roleColorTone(color) {
+      if (color === 'green') return 'success'
+      if (color === 'yellow') return 'warning'
+      return 'neutral'
+    }
+
+    /**
+     * 阻断/额度原因的**一行**说明（只用于 Tooltip 与列表下方说明，不展开细节）。
+     * @param {(key: string) => string} t
+     * @param {any} role
+     */
+    function roleReasonOf(t, role) {
+      const state = asObject(role?.state)
+      if (role?.enabled === false) return t('roleDisabled')
+      if (state.quota === 'exhausted') return t('roleQuota')
+      if (state.readiness === 'blocked') {
+        const reason = asString(state.readinessReason)
+        return reason ? `${t('roleBlocked')} · ${reason}` : t('roleBlocked')
+      }
+      if (state.readiness === 'unknown') return t('roleUnknown')
+      return ''
+    }
+
+    /** 详情页输入控件样式（原生 input/select/textarea + token；不注入 CSS）。 */
+    const inputStyle = {
+      boxSizing: 'border-box',
+      width: '100%',
+      padding: '5px 8px',
+      border: '0.5px solid var(--dsw-alias-border-l3)',
+      borderRadius: 'var(--dsw-radius-sm, 6px)',
+      background: 'var(--dsw-alias-bg-layer-3)',
+      color: C.primary,
+      fontFamily: 'inherit',
+      fontSize: 13,
+      lineHeight: '20px',
+    }
+    const textareaStyle = { ...inputStyle, minHeight: 64, resize: 'vertical' }
+    const fieldGrid = {
+      display: 'grid',
+      gridTemplateColumns: '128px minmax(0, 1fr)',
+      gap: '6px 10px',
+      alignItems: 'start',
+      padding: '6px 0',
+      borderTop: '0.5px solid var(--dsw-alias-border-l4)',
+    }
+    const fieldLabel = { display: 'flex', alignItems: 'center', gap: 6, paddingTop: 4 }
+    const scopeButton = {
+      ...inputStyle,
+      width: 'auto',
+      padding: '2px 10px',
+      cursor: 'pointer',
+      fontSize: 12,
+    }
+    /** 说明文字样式（复用设置页的 note；避免两处字号漂移）。 */
+    const noteStyle = note
+
+    /**
+     * 详情页字段行：字段名 + 来源 Tag + 控件 + 恢复继承。
+     * `canRestore` 只在字段来源 = session（会话覆盖存在）时为 true。
+     */
+    function detailField(t, opts) {
+      const source = sourceMeta(opts.source)
+      return jsxs(
+        'div',
+        {
+          style: fieldGrid,
+          children: [
+            jsxs('div', {
+              style: fieldLabel,
+              children: [
+                jsx('span', { style: { fontSize: 12, lineHeight: '18px', color: C.secondary }, children: opts.label }),
+                jsx(Tag, { tone: source.tone, children: t(source.key) }),
+              ],
+            }),
+            jsx('div', { style: { minWidth: 0 }, children: opts.control }),
+            opts.canRestore
+              ? jsx('div', {
+                  style: { gridColumn: '2', marginTop: -2 },
+                  children: jsx('button', {
+                    type: 'button',
+                    style: { ...linkButton, fontSize: 11 },
+                    disabled: opts.disabled === true,
+                    onClick: opts.onRestore,
+                    children: t('restoreInherit'),
+                  }),
+                })
+              : null,
+            opts.note ? jsx('div', { style: { gridColumn: '2', ...meta }, children: opts.note }) : null,
+          ],
+        },
+        opts.key,
+      )
+    }
+
+    /** 单行 role switch（列表用）；颜色表达三色，状态仍是开/关。 */
+    function roleSwitchOf(t, role, pending, onToggle) {
+      const reason = roleReasonOf(t, role)
+      return jsx(Switch, {
+        checked: role.enabled === true,
+        label: `${t('roleSwitchLabel')}: ${role.name || role.roleId}`,
+        title: reason || (role.enabled === true ? t('roleEnabled') : t('roleDisabled')),
+        disabled: pending === true,
+        color: asObject(role.state).color,
+        onChange: (next) => onToggle(role.roleId, next),
+      })
+    }
+
+    /**
+     * 角色列表（右侧栏）：每行只有名称 + 三色二态 Switch；点击名称进详情。
+     * **不显示**模型/别名/通道细节；阻断/额度原因以 Tooltip + 一行说明给出。
+     * @param {(key: string) => string} t
+     * @param {any} view
+     * @param {{ onSelect?: Function, onToggleRole?: Function, pendingRoleIds?: string[], warning?: string }} [opts]
+     */
+    function renderRoleList(t, view, opts = {}) {
+      const roles = asArray(view?.roles)
+      const pending = new Set(asArray(opts.pendingRoleIds).map(String))
+      const onSelect = typeof opts.onSelect === 'function' ? opts.onSelect : () => {}
+      const onToggleRole = typeof opts.onToggleRole === 'function' ? opts.onToggleRole : () => {}
+      const note = asString(opts.warning)
       return jsxs('div', {
-        style: { ...card, gap: 4 },
+        style: { display: 'flex', flexDirection: 'column', gap: 6 },
         children: [
-          jsxs('div', {
-            style: { ...row, alignItems: 'flex-start', flexWrap: 'wrap' },
-            children: [
-              jsx('strong', { children: role.name || role.roleId || t('unknown') }),
-              jsx('span', { style: grow }),
-              jsx(Tag, { tone: src.tone, children: `${t('sourceLabel')}: ${t(src.key)}` }),
-              jsx(Tag, {
-                tone: overridden ? 'warning' : 'quiet',
-                children: overridden ? t('overrideYes') : t('overrideNo'),
-              }),
-            ],
-          }),
-          role.roleId
-            ? jsxs('div', { style: meta, children: [`${t('roleIdLabel')}: `, role.roleId] })
-            : null,
-          jsxs('div', {
-            style: meta,
-            children: [`${t('aliasLabel')}: `, aliases.length > 0 ? aliases.join(', ') : t('none')],
-          }),
-          jsxs('div', {
-            style: meta,
-            children: [`${t('channelLabel')}: `, channelTextOf(role, t)],
-          }),
-          overridden
-            ? jsxs('div', {
-                style: meta,
-                children: [`${t('overrideFieldsLabel')}: `, overrideFields.join(', ')],
+          note
+            ? jsx('p', {
+                role: 'status',
+                style: { ...noteStyle, color: 'var(--dsw-alias-state-error-primary)' },
+                children: note,
               })
             : null,
+          roles.length === 0
+            ? jsx('p', { style: noteStyle, children: t('noRoles') })
+            : jsx('div', {
+                style: list,
+                children: roles.map((role) => {
+                  const reason = roleReasonOf(t, role)
+                  return jsxs(
+                    'div',
+                    {
+                      style: {
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 10,
+                        padding: '6px 0',
+                        borderTop: '0.5px solid var(--dsw-alias-border-l4)',
+                      },
+                      children: [
+                        jsxs('div', {
+                          style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 },
+                          children: [
+                            jsx('button', {
+                              type: 'button',
+                              style: {
+                                background: 'none',
+                                border: 'none',
+                                padding: 0,
+                                textAlign: 'left',
+                                fontFamily: 'inherit',
+                                fontSize: 13,
+                                lineHeight: '20px',
+                                fontWeight: 600,
+                                color: C.primary,
+                                cursor: 'pointer',
+                                wordBreak: 'break-word',
+                              },
+                              'aria-label': `${t('roleOpenDetail')}: ${role.name || role.roleId}`,
+                              onClick: () => onSelect(role.roleId),
+                              children: role.name || role.roleId || t('unknown'),
+                            }),
+                            reason
+                              ? jsx('span', {
+                                  style: { ...meta, color: C.tertiary },
+                                  children: reason,
+                                })
+                              : null,
+                          ],
+                        }),
+                        roleSwitchOf(t, role, pending.has(role.roleId), onToggleRole),
+                      ],
+                    },
+                    role.roleId || role.name,
+                  )
+                }),
+              }),
         ],
       })
     }
 
-    /** 纯函数渲染只读面板，便于 stub harness 断言结构。 */
-    function renderRolePane(t, view) {
-      const roles = asArray(view?.roles)
+    /** 详情 draft：只包含可编辑字段；初始化自生效角色。 */
+    function draftOfRole(role) {
+      const channel = asObject(role?.channel)
+      return {
+        name: asString(role?.name),
+        aliases: asArray(role?.aliases).map(String).join(', '),
+        description: asString(role?.description),
+        prompt: asString(role?.prompt),
+        channelId: asString(channel.channelId),
+        model: asString(channel.model),
+        reasoning: asString(channel.reasoning),
+      }
+    }
+
+    /** 逗号（中/英）分隔 → 去重简称数组。 */
+    function parseAliases(text) {
+      const seen = new Set()
+      const out = []
+      for (const part of String(text ?? '').split(/[,，]/)) {
+        const value = part.trim()
+        if (!value || seen.has(value)) continue
+        seen.add(value)
+        out.push(value)
+      }
+      return out
+    }
+
+    /**
+     * 详情页的「模型 / 思考强度」选项：只来自真实通道实例。
+     * 选中了 channelId → 只列该实例声明的模型/强度；
+     * 未选 channelId → 列同 kind+provider 的实例值（去重）；都没有 → 空（显示待配置）。
+     * @param {any} view
+     * @param {any} role
+     * @param {any} draft
+     */
+    function detailOptionsOf(view, role, draft) {
+      const channels = asArray(view?.channels)
+      const instance = channels.find(
+        (channel) => asString(channel.channelId) && channel.channelId === asString(draft?.channelId),
+      )
+      const channel = asObject(role?.channel)
+      let peers = []
+      if (instance) peers = [instance]
+      else if (channel.kind || channel.provider) {
+        peers = channels.filter(
+          (item) =>
+            (!channel.kind || item.kind === channel.kind) &&
+            (!channel.provider || item.provider === channel.provider),
+        )
+      }
+      const unique = (values) => {
+        const set = new Set()
+        for (const value of values) {
+          const text = asString(value)
+          if (text) set.add(text)
+        }
+        return [...set]
+      }
+      const models = unique([
+        ...peers.map((item) => item.model),
+        asString(draft?.model),
+      ])
+      const reasonings = unique([
+        ...peers.map((item) => item.reasoning),
+        asString(draft?.reasoning),
+      ])
+      return {
+        channels,
+        instance: instance ?? null,
+        models,
+        reasonings,
+      }
+    }
+
+    /**
+     * 会话 scope 的「只写差异」变更列表。
+     * - 名称/Prompt 不能写成空字符串：留空时改为「恢复继承」。
+     * - 切换通道实例时把 kind/provider/model/reasoning 一起对齐（避免派单 CHANNEL_MISMATCH）。
+     * @returns {{ changes: Array<{field: string, value?: any, restore?: true}>, error: string | null }}
+     */
+    function buildSessionChanges(t, role, draft, channels) {
+      const changes = []
+      const current = asObject(role?.channel)
+      const name = asString(draft?.name).trim()
+      if (!name) return { changes, error: t('detailInvalidName') }
+      if (name !== asString(role?.name)) changes.push({ field: 'name', value: name })
+
+      const aliases = parseAliases(draft?.aliases)
+      const currentAliases = asArray(role?.aliases).map(String)
+      if (aliases.join('\u0000') !== currentAliases.join('\u0000')) {
+        changes.push({ field: 'aliases', value: aliases })
+      }
+
+      const description = asString(draft?.description)
+      if (description !== asString(role?.description)) {
+        changes.push({ field: 'description', value: description })
+      }
+
+      const prompt = asString(draft?.prompt)
+      if (prompt !== asString(role?.prompt)) {
+        if (!prompt.trim()) changes.push({ field: 'prompt', restore: true })
+        else changes.push({ field: 'prompt', value: prompt })
+      }
+
+      const channelId = asString(draft?.channelId)
+      if (channelId !== asString(current.channelId)) {
+        if (!channelId) {
+          for (const key of ['channelId', 'kind', 'provider', 'model', 'reasoning']) {
+            changes.push({ field: `channel.${key}`, restore: true })
+          }
+        } else {
+          const instance = asArray(channels).find((item) => asString(item.channelId) === channelId)
+          if (!instance || (!asString(instance.provider) && !asString(instance.kind))) {
+            return { changes, error: t('pendingConfig') }
+          }
+          changes.push({ field: 'channel.channelId', value: channelId })
+          if (instance.kind) changes.push({ field: 'channel.kind', value: instance.kind })
+          if (instance.provider) changes.push({ field: 'channel.provider', value: instance.provider })
+          for (const key of ['model', 'reasoning']) {
+            const value = asString(instance[key])
+            if (value) changes.push({ field: `channel.${key}`, value })
+            else if (asString(current[key])) changes.push({ field: `channel.${key}`, restore: true })
+          }
+        }
+      } else {
+        for (const key of ['model', 'reasoning']) {
+          const value = asString(draft?.[key])
+          if (value === asString(current[key])) continue
+          if (!value) changes.push({ field: `channel.${key}`, restore: true })
+          else changes.push({ field: `channel.${key}`, value })
+        }
+      }
+      return { changes, error: null }
+    }
+
+    /**
+     * 全局 scope 的 patch（一次写入，交给 S2 global writer）。空字符串不写入：
+     * 全局层没有「删除字段」语义，Prompt/名称留空视为无效输入。
+     * @returns {{ patch: Record<string, any>, error: string | null }}
+     */
+    function buildGlobalPatch(t, role, draft, channels) {
+      /** @type {Record<string, any>} */
+      const patch = {}
+      const name = asString(draft?.name).trim()
+      if (!name) return { patch, error: t('detailInvalidName') }
+      if (name !== asString(role?.name)) patch.name = name
+
+      const aliases = parseAliases(draft?.aliases)
+      if (aliases.join('\u0000') !== asArray(role?.aliases).map(String).join('\u0000')) {
+        patch.aliases = aliases
+      }
+      const description = asString(draft?.description)
+      if (description !== asString(role?.description)) patch.description = description
+
+      const prompt = asString(draft?.prompt)
+      if (prompt !== asString(role?.prompt)) {
+        if (!prompt.trim()) return { patch, error: t('detailInvalidPrompt') }
+        patch.prompt = prompt
+      }
+
+      const current = asObject(role?.channel)
+      const channelId = asString(draft?.channelId)
+      /** @type {Record<string, string>} */
+      const channelPatch = {}
+      if (channelId !== asString(current.channelId)) {
+        if (!channelId) return { patch, error: t('scopeGlobalBlocked') }
+        const instance = asArray(channels).find((item) => asString(item.channelId) === channelId)
+        if (!instance || (!asString(instance.provider) && !asString(instance.kind))) {
+          return { patch, error: t('pendingConfig') }
+        }
+        channelPatch.channelId = channelId
+        if (instance.kind) channelPatch.kind = instance.kind
+        if (instance.provider) channelPatch.provider = instance.provider
+        if (instance.model) channelPatch.model = instance.model
+        if (instance.reasoning) channelPatch.reasoning = instance.reasoning
+      } else {
+        for (const key of ['model', 'reasoning']) {
+          const value = asString(draft?.[key])
+          if (!value) continue
+          if (value !== asString(current[key])) channelPatch[key] = value
+        }
+      }
+      if (Object.keys(channelPatch).length > 0) patch.channel = channelPatch
+      return { patch, error: null }
+    }
+
+    /** 会话保存：逐字段写覆盖（服务端只存差异），失败立即停止；不乐观更新。 */
+    async function saveSessionChanges({ roleId, changes, setOverride, clearOverride, reload }) {
+      let applied = 0
+      for (const change of changes) {
+        const result = change.restore
+          ? await clearOverride(roleId, change.field)
+          : await setOverride(roleId, change.field, change.value)
+        if (!result || result.ok !== true) {
+          return { ok: false, applied, error: result?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' } }
+        }
+        applied += 1
+      }
+      const loaded = await reload()
+      if (!loaded || loaded.ok !== true) {
+        return { ok: false, applied, error: loaded?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' } }
+      }
+      return { ok: true, applied, view: loaded.view }
+    }
+
+    /** 全局保存：一次 patch 写入（调用方必须先做二次确认）。 */
+    async function saveGlobalPatch({ roleId, patch, updateGlobalRole, reload }) {
+      const result = await updateGlobalRole(roleId, patch)
+      if (!result || result.ok !== true) {
+        return { ok: false, error: result?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' } }
+      }
+      const loaded = await reload()
+      if (!loaded || loaded.ok !== true) {
+        return { ok: false, error: loaded?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' } }
+      }
+      return { ok: true, view: loaded.view, value: result.value }
+    }
+
+    /**
+     * 角色开关：只写**当前会话**覆盖（`enabled`），成功后 reload。
+     * 失败原样返回，不做乐观假开启。
+     */
+    async function toggleSessionRole({ roleId, next, setOverride, reload }) {
+      if (typeof setOverride !== 'function') {
+        return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '会话写入未装配' } }
+      }
+      const result = await setOverride(roleId, 'enabled', next === true)
+      if (!result || result.ok !== true) {
+        return { ok: false, error: result?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' } }
+      }
+      const loaded = await reload()
+      if (!loaded || loaded.ok !== true) {
+        return { ok: false, error: loaded?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' }, value: result.value }
+      }
+      return { ok: true, view: loaded.view, value: result.value }
+    }
+
+    /** 详情页错误行（一行摘要；完整 message 放 title）。 */
+    function detailErrorLine(t, error) {
+      if (!error) return null
+      const message = asString(error.message) || t('loadFailed')
+      return jsx('p', {
+        role: 'alert',
+        style: {
+          ...noteStyle,
+          color: 'var(--dsw-alias-state-error-primary)',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        },
+        title: `${asString(error.code)} ${message}`,
+        children: `${asString(error.code)} ${message}`,
+      })
+    }
+
+    /**
+     * 二级详情（会话/全局两 scope 复用）。
+     * @param {(key: string) => string} t
+     * @param {any} view
+     * @param {string} roleId
+     * @param {{
+     *   scope?: 'session' | 'global',
+     *   draft?: any,
+     *   onDraft?: (field: string, value: string) => void,
+     *   onBack?: Function,
+     *   onScope?: (scope: 'session' | 'global') => void,
+     *   onSave?: Function,
+     *   onRestore?: (field: string) => void,
+     *   onCancelConfirm?: Function,
+     *   saving?: boolean,
+     *   confirming?: boolean,
+     *   error?: any,
+     * }} [opts]
+     */
+    function renderRoleDetail(t, view, roleId, opts = {}) {
+      const role = asArray(view?.roles).find((item) => item.roleId === roleId)
+      if (!role) {
+        return jsxs('div', {
+          style: { display: 'flex', flexDirection: 'column', gap: 8 },
+          children: [
+            jsx('p', { style: noteStyle, children: t('noRolesDetail') }),
+            jsx('button', { type: 'button', style: linkButton, onClick: opts.onBack, children: t('detailBack') }),
+          ],
+        })
+      }
+      const scope = opts.scope === 'global' ? 'global' : 'session'
+      const draft = opts.draft ?? draftOfRole(role)
+      const options = detailOptionsOf(view, role, draft)
+      const disabled = opts.saving === true
+      const onDraft = typeof opts.onDraft === 'function' ? opts.onDraft : () => {}
+      const onRestore = typeof opts.onRestore === 'function' ? opts.onRestore : () => {}
+      const canRestore = (field) => scope === 'session' && fieldSourceOf(view, roleId, field) === 'session'
+      const text = (field, value, extra = {}) =>
+        jsx('input', {
+          type: 'text',
+          style: inputStyle,
+          value: asString(value),
+          disabled,
+          onChange: (event) => onDraft(field, event?.target?.value ?? ''),
+          ...extra,
+        })
+      const channelControl = jsxs('select', {
+        style: inputStyle,
+        value: asString(draft.channelId),
+        disabled,
+        onChange: (event) => onDraft('channelId', event?.target?.value ?? ''),
+        children: [
+          jsx('option', { value: '', children: t('channelUnset') }),
+          ...options.channels.map((channel) =>
+            jsx(
+              'option',
+              {
+                value: asString(channel.channelId),
+                children:
+                  [asString(channel.channelId), asString(channel.kind), asString(channel.provider)]
+                    .filter(Boolean)
+                    .join(' · ') || asString(channel.channelId),
+              },
+              `channel-${channel.channelId}`,
+            ),
+          ),
+        ],
+      })
+      const modelControl =
+        options.models.length === 0
+          ? jsx('span', { style: noteStyle, children: `${t('unsupported')} · ${t('noModelOptions')}` })
+          : jsxs('select', {
+              style: inputStyle,
+              value: asString(draft.model),
+              disabled,
+              onChange: (event) => onDraft('model', event?.target?.value ?? ''),
+              children: options.models.map((value) => jsx('option', { value, children: value }, `model-${value}`)),
+            })
+      const reasoningControl =
+        options.reasonings.length === 0
+          ? jsx('span', { style: noteStyle, children: `${t('unsupported')} · ${t('noReasoningOptions')}` })
+          : jsxs('select', {
+              style: inputStyle,
+              value: asString(draft.reasoning),
+              disabled,
+              onChange: (event) => onDraft('reasoning', event?.target?.value ?? ''),
+              children: options.reasonings.map((value) => jsx('option', { value, children: value }, `reasoning-${value}`)),
+            })
+
+      const fields = [
+        detailField(t, {
+          key: 'name',
+          label: t('fieldName'),
+          source: fieldSourceOf(view, roleId, 'name'),
+          canRestore: canRestore('name'),
+          onRestore: () => onRestore('name'),
+          disabled,
+          control: text('name', draft.name),
+        }),
+        detailField(t, {
+          key: 'aliases',
+          label: t('fieldAliases'),
+          source: fieldSourceOf(view, roleId, 'aliases'),
+          canRestore: canRestore('aliases'),
+          onRestore: () => onRestore('aliases'),
+          disabled,
+          control: text('aliases', draft.aliases, { placeholder: t('detailInvalidAliases') }),
+        }),
+        detailField(t, {
+          key: 'description',
+          label: t('fieldDescription'),
+          source: fieldSourceOf(view, roleId, 'description'),
+          canRestore: canRestore('description'),
+          onRestore: () => onRestore('description'),
+          disabled,
+          control: text('description', draft.description),
+        }),
+        detailField(t, {
+          key: 'channel.channelId',
+          label: t('fieldChannel'),
+          source: fieldSourceOf(view, roleId, 'channel.channelId'),
+          canRestore: canRestore('channel.channelId'),
+          onRestore: () => onRestore('channel.channelId'),
+          disabled,
+          control: channelControl,
+        }),
+        detailField(t, {
+          key: 'channel.model',
+          label: t('fieldModel'),
+          source: fieldSourceOf(view, roleId, 'channel.model'),
+          canRestore: canRestore('channel.model'),
+          onRestore: () => onRestore('channel.model'),
+          disabled,
+          control: modelControl,
+        }),
+        detailField(t, {
+          key: 'channel.reasoning',
+          label: t('fieldReasoning'),
+          source: fieldSourceOf(view, roleId, 'channel.reasoning'),
+          canRestore: canRestore('channel.reasoning'),
+          onRestore: () => onRestore('channel.reasoning'),
+          disabled,
+          control: reasoningControl,
+        }),
+        detailField(t, {
+          key: 'prompt',
+          label: t('fieldPrompt'),
+          source: fieldSourceOf(view, roleId, 'prompt'),
+          canRestore: canRestore('prompt'),
+          onRestore: () => onRestore('prompt'),
+          disabled,
+          control: jsx('textarea', {
+            style: textareaStyle,
+            value: asString(draft.prompt),
+            disabled,
+            onChange: (event) => onDraft('prompt', event?.target?.value ?? ''),
+          }),
+        }),
+      ]
+
+      return jsxs('div', {
+        style: { display: 'flex', flexDirection: 'column', gap: 8 },
+        children: [
+          jsxs('div', {
+            style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+            children: [
+              jsx('button', {
+                type: 'button',
+                style: { ...linkButton, color: C.secondary },
+                onClick: opts.onBack,
+                children: `← ${t('detailBack')}`,
+              }),
+              jsx('strong', { style: { fontSize: 13, lineHeight: '20px' }, children: role.name || role.roleId }),
+              jsx(Tag, { tone: roleColorTone(asObject(role.state).color), children: t('detailTitle') }),
+            ],
+          }),
+          jsxs('div', {
+            style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+            children: [
+              jsx('button', {
+                type: 'button',
+                style: {
+                  ...scopeButton,
+                  background:
+                    scope === 'session'
+                      ? 'var(--dsw-alias-bg-module-platform)'
+                      : 'var(--dsw-alias-bg-layer-3)',
+                },
+                'aria-pressed': scope === 'session',
+                onClick: () => opts.onScope?.('session'),
+                children: t('scopeSession'),
+              }),
+              jsx('button', {
+                type: 'button',
+                style: {
+                  ...scopeButton,
+                  background:
+                    scope === 'global'
+                      ? 'var(--dsw-alias-bg-module-platform)'
+                      : 'var(--dsw-alias-bg-layer-3)',
+                },
+                'aria-pressed': scope === 'global',
+                onClick: () => opts.onScope?.('global'),
+                children: t('scopeGlobal'),
+              }),
+            ],
+          }),
+          scope === 'global'
+            ? jsxs('div', {
+                style: { display: 'flex', flexDirection: 'column', gap: 2 },
+                children: [
+                  jsx('p', {
+                    style: { ...noteStyle, color: 'var(--dsw-alias-state-warn-primary)' },
+                    children: t('scopeGlobalNote'),
+                  }),
+                  jsx('p', { style: meta, children: t('scopeGlobalBlocked') }),
+                ],
+              })
+            : null,
+          detailErrorLine(t, opts.error),
+          jsx('div', { style: { display: 'flex', flexDirection: 'column' }, children: fields }),
+          opts.confirming
+            ? jsxs('div', {
+                style: { ...card, gap: 4, borderColor: 'var(--dsw-alias-state-warn-primary)' },
+                children: [
+                  jsx('div', { style: noteStyle, children: t('confirmGlobal') }),
+                  jsxs('div', {
+                    style: { display: 'flex', gap: 8 },
+                    children: [
+                      jsx('button', {
+                        type: 'button',
+                        style: { ...scopeButton, color: 'var(--dsw-alias-state-warn-primary)' },
+                        onClick: opts.onSave,
+                        children: t('confirm'),
+                      }),
+                      jsx('button', {
+                        type: 'button',
+                        style: scopeButton,
+                        onClick: opts.onCancelConfirm,
+                        children: t('cancel'),
+                      }),
+                    ],
+                  }),
+                ],
+              })
+            : jsx('div', {
+                style: { display: 'flex', alignItems: 'center', gap: 8 },
+                children: jsx('button', {
+                  type: 'button',
+                  style: scopeButton,
+                  disabled,
+                  onClick: opts.onSave,
+                  children: disabled ? t('savingDetail') : t('saveDetail'),
+                }),
+              }),
+        ],
+      })
+    }
+
+    /**
+     * 右侧栏角色面板：列表 ↔ 详情（同栏切换，不新造弹窗体系）。
+     * 列表开关只写当前会话；详情支持会话/全局两 scope。
+     */
+    function renderRolePane(t, view, opts = {}) {
+      const selectedRoleId = asString(opts.selectedRoleId)
       return jsxs('div', {
         style: root,
         children: [
           jsx('h3', { style: heading, children: t('paneTitle') }),
-          jsx('p', { style: note, role: 'status', children: t('paneReadonlyNote') }),
-          roles.length === 0
-            ? jsx('p', { style: note, children: t('noRoles') })
-            : jsxs('div', {
-                style: list,
-                children: roles.map((role) =>
-                  jsx(RoleReadonlyCard, { t, role }, role.roleId || role.name),
-                ),
-              }),
+          jsx('p', { style: noteStyle, children: t('roleListNote') }),
+          detailErrorLine(t, opts.error),
+          selectedRoleId
+            ? renderRoleDetail(t, view, selectedRoleId, opts)
+            : renderRoleList(t, view, opts),
         ],
       })
     }
@@ -1361,7 +2544,7 @@ window.__ModuleLoader__.load({
         style: root,
         children: [
           jsx('h3', { style: heading, children: t('paneTitle') }),
-          jsx('p', { style: note, role: 'status', 'aria-live': 'polite', children: t('loading') }),
+          jsx('p', { style: noteStyle, role: 'status', 'aria-live': 'polite', children: t('loading') }),
         ],
       })
     }
@@ -1375,10 +2558,10 @@ window.__ModuleLoader__.load({
         role: 'alert',
         children: [
           jsx('h3', { style: heading, children: t('paneTitle') }),
-          jsx('p', { style: note, children: t('paneReadonlyNote') }),
+          jsx('p', { style: noteStyle, children: t('roleListNote') }),
           jsx('p', {
             style: {
-              ...note,
+              ...noteStyle,
               color: 'var(--dsw-alias-state-error-primary)',
               whiteSpace: 'nowrap',
               overflow: 'hidden',
@@ -1492,11 +2675,30 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 右侧栏只读面板：strict `getSessionConfig(sessionId)` → 来源/覆盖投影。
-     * loader 不抛；失败时渲染一行错误摘要（不空白）。
+     * 右侧栏角色面板：列表 ↔ 详情（同栏切换，不新造弹窗体系）。
+     *
+     * - 列表开关只写**当前会话**覆盖（`setSessionOverride(...,'enabled',…)`），
+     *   成功后 reload；失败不乐观更新。
+     * - 详情支持「本会话 / 全局」两 scope：会话只写差异；全局走 S2 global writer，
+     *   保存前必须二次确认。
+     * - Remote 失败只显示一行错误摘要，不抛、不空白。
      */
-    function SidebarRolePane({ t, loadSession }) {
+    function SidebarRolePane({
+      t,
+      loadSession,
+      setOverride,
+      clearOverride,
+      updateGlobalRole,
+    }) {
       const [state, setState] = react.useState({ status: 'loading' })
+      const [selectedRoleId, setSelectedRoleId] = react.useState('')
+      const [scope, setScope] = react.useState('session')
+      const [draft, setDraft] = react.useState(null)
+      const [pendingRoleIds, setPendingRoleIds] = react.useState([])
+      const [saving, setSaving] = react.useState(false)
+      const [confirming, setConfirming] = react.useState(false)
+      const [actionError, setActionError] = react.useState(null)
+
       react.useEffect(() => {
         let current = true
         Promise.resolve()
@@ -1508,9 +2710,8 @@ window.__ModuleLoader__.load({
           .then(
             (result) => {
               if (!current) return
-              if (result && result.ok === true) {
-                setState({ status: 'ready', view: result.view })
-              } else {
+              if (result && result.ok === true) setState({ status: 'ready', view: result.view })
+              else {
                 setState({
                   status: 'error',
                   error: (result && result.error) || { code: 'REMOTE_CALL_FAILED', message: '' },
@@ -1534,12 +2735,180 @@ window.__ModuleLoader__.load({
         }
       }, [loadSession])
 
+      /** 重新读取会话视图（写操作后刷新；失败不覆盖当前列表）。 */
+      async function reload() {
+        const result = await loadSession()
+        if (result && result.ok === true) {
+          setState({ status: 'ready', view: result.view })
+        }
+        return result
+      }
+
+      /** 详情 draft 回到当前生效值。 */
+      function resetDraft(view, roleId) {
+        const role = asArray(view?.roles).find((item) => item.roleId === roleId)
+        setDraft(role ? draftOfRole(role) : null)
+      }
+
+      function selectRole(roleId) {
+        setSelectedRoleId(roleId)
+        setScope('session')
+        setConfirming(false)
+        setActionError(null)
+        resetDraft(state.view, roleId)
+      }
+
+      function backToList() {
+        setSelectedRoleId('')
+        setDraft(null)
+        setConfirming(false)
+        setActionError(null)
+      }
+
+      function changeScope(next) {
+        setScope(next === 'global' ? 'global' : 'session')
+        setConfirming(false)
+        setActionError(null)
+      }
+
+      /** 改 draft；切换通道实例时把模型/强度带成该实例的值。 */
+      function updateDraft(field, value) {
+        setDraft((previous) => {
+          const next = { ...(previous ?? {}), [field]: value }
+          if (field === 'channelId') {
+            const instance = asArray(state.view?.channels).find(
+              (channel) => asString(channel.channelId) === asString(value),
+            )
+            next.model = instance ? asString(instance.model) : ''
+            next.reasoning = instance ? asString(instance.reasoning) : ''
+          }
+          return next
+        })
+        setConfirming(false)
+        setActionError(null)
+      }
+
+      /** 开关角色：只写当前会话；失败不做乐观假开启。 */
+      async function toggleRole(roleId, next) {
+        setPendingRoleIds((previous) => [...previous, roleId])
+        setActionError(null)
+        const result = await toggleSessionRole({
+          roleId,
+          next,
+          setOverride,
+          reload,
+        })
+        setPendingRoleIds((previous) => previous.filter((id) => id !== roleId))
+        if (result.ok !== true) {
+          setActionError(result.error)
+          return
+        }
+        if (selectedRoleId === roleId) resetDraft(result.view, roleId)
+      }
+
+      /** 恢复单字段继承（仅会话 scope 有意义）。 */
+      async function restoreField(field) {
+        if (!selectedRoleId || typeof clearOverride !== 'function') return
+        setSaving(true)
+        setActionError(null)
+        const result = await clearOverride(selectedRoleId, field)
+        if (result && result.ok === true) {
+          const loaded = await reload()
+          if (loaded && loaded.ok === true) resetDraft(loaded.view, selectedRoleId)
+        } else {
+          setActionError((result && result.error) || { code: 'REMOTE_CALL_FAILED', message: '' })
+        }
+        setSaving(false)
+      }
+
+      /** 保存（会话=逐字段差异；全局=一次 patch + 二次确认）。 */
+      async function saveDetail() {
+        const role = asArray(state.view?.roles).find((item) => item.roleId === selectedRoleId)
+        if (!role || !draft) return
+
+        if (scope === 'global') {
+          if (!confirming) {
+            setConfirming(true)
+            return
+          }
+          const built = buildGlobalPatch(t, role, draft, state.view?.channels)
+          if (built.error) {
+            setConfirming(false)
+            setActionError({ code: 'DETAIL_INVALID', message: built.error })
+            return
+          }
+          if (Object.keys(built.patch).length === 0) {
+            setConfirming(false)
+            setActionError({ code: 'DETAIL_NO_CHANGES', message: t('detailNoChanges') })
+            return
+          }
+          setSaving(true)
+          const result = await saveGlobalPatch({
+            roleId: selectedRoleId,
+            patch: built.patch,
+            updateGlobalRole,
+            reload,
+          })
+          setSaving(false)
+          setConfirming(false)
+          if (result.ok !== true) {
+            setActionError(result.error)
+            return
+          }
+          resetDraft(result.view, selectedRoleId)
+          return
+        }
+
+        const built = buildSessionChanges(t, role, draft, state.view?.channels)
+        if (built.error) {
+          setActionError({ code: 'DETAIL_INVALID', message: built.error })
+          return
+        }
+        if (built.changes.length === 0) {
+          setActionError({ code: 'DETAIL_NO_CHANGES', message: t('detailNoChanges') })
+          return
+        }
+        setSaving(true)
+        const result = await saveSessionChanges({
+          roleId: selectedRoleId,
+          changes: built.changes,
+          setOverride,
+          clearOverride,
+          reload,
+        })
+        setSaving(false)
+        if (result.ok !== true) {
+          setActionError(result.error)
+          return
+        }
+        resetDraft(result.view, selectedRoleId)
+      }
+
       if (state.status === 'loading') return renderPaneLoading(t)
       if (state.status === 'error') return renderPaneError(t, state.error)
+      const warnings = asArray(state.view?.warnings).map((item) => asString(item.message)).filter(Boolean)
       return safeRender(
         'sidebar',
         'render',
-        () => renderRolePane(t, state.view),
+        () =>
+          renderRolePane(t, state.view, {
+            selectedRoleId,
+            scope,
+            draft,
+            saving,
+            confirming,
+            error: actionError,
+            pendingRoleIds,
+            warning: warnings.length > 0 ? `${t('warningPrefix')}: ${warnings.join(' | ')}` : '',
+            onSelect: selectRole,
+            onBack: backToList,
+            onScope: changeScope,
+            onDraft: updateDraft,
+            onSave: saveDetail,
+            onRestore: restoreField,
+            onCancelConfirm: () => setConfirming(false),
+            onToggleRole: toggleRole,
+          }),
         () => renderPaneError(t, { code: 'RENDER_FAILED', message: t('renderFailed') }),
       )
     }
@@ -1618,6 +2987,9 @@ window.__ModuleLoader__.load({
         })
       }
       const loadSession = makeSessionConfigLoader(deps.getService, deps.mountError)
+      const sessionActions =
+        deps.sessionActions ?? makeSessionActions(deps.getService, deps.mountError)
+      const configActions = deps.configActions ?? makeConfigActions(deps.getService, deps.mountError)
       // 2) keyed seats（scope session）
       slotCtx.slots.inject('sidebar.right.pane.tab', () =>
         slotCtx.slots.register(
@@ -1628,6 +3000,10 @@ window.__ModuleLoader__.load({
             inject: (/** @type {string} */ sessionId) => ({
               sessionId,
               loadSession: () => loadSession(sessionId),
+              setOverride: (roleId, field, value) =>
+                sessionActions.setOverride(sessionId, roleId, field, value),
+              clearOverride: (roleId, field) => sessionActions.clearOverride(sessionId, roleId, field),
+              updateGlobalRole: (roleId, patch) => configActions.updateGlobalRole(roleId, patch),
               t,
             }),
           },
@@ -1731,12 +3107,19 @@ window.__ModuleLoader__.load({
         ctx.effect(() => () => unmount(), 'meetingstone: remote contribution')
       }
 
-      const deps = { getService, mountError }
+      const deps = {
+        getService,
+        mountError,
+        sessionActions: makeSessionActions(getService, mountError),
+        configActions: makeConfigActions(getService, mountError),
+      }
       const mountFailure = mountError ? { code: 'REMOTE_MOUNT_FAILED', message: mountError } : undefined
 
       // 2) 注册顺序：header → section → sidebar。header 永不因 mount 失败而缺失。
       guard('header', 'register', () => registerHeaderAction(ctx, deps, t))
-      guard('section', 'register', () => registerSection(ctx, makeLoader(getService, mountFailure), t))
+      guard('section', 'register', () =>
+        registerSection(ctx, makeLoader(getService, mountFailure), t, deps.configActions),
+      )
       guard('sidebar', 'register', () => registerSidebarTab(ctx, deps, t))
     }
 
@@ -1746,19 +3129,34 @@ window.__ModuleLoader__.load({
     exports.__test = {
       normalizeSnapshot,
       normalizeGlobal,
+      normalizeCli,
+      normalizeCliState,
       unavailableSnapshot,
       normalizeSessionConfigView,
       renderSection,
       renderRolePane,
+      renderRoleList,
+      renderRoleDetail,
       renderPaneError,
       renderPaneLoading,
-      RoleReadonlyCard,
-      CliList,
-      CliPaths,
-      ChannelModels,
+      draftOfRole,
+      detailOptionsOf,
+      buildSessionChanges,
+      buildGlobalPatch,
+      saveSessionChanges,
+      saveGlobalPatch,
+      toggleSessionRole,
+      fieldSourceOf,
+      roleReasonOf,
+      cliRowsOf,
+      CliSwitchRow,
       Tag,
+      Switch,
       IconUsers,
       safeRender,
+      makeRemoteCall,
+      makeSessionActions,
+      makeConfigActions,
       REMOTE_CONTRIBUTION,
       SESSION_DESCRIPTORS,
       SESSION_TYPES,

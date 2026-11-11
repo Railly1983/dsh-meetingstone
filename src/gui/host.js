@@ -31,6 +31,7 @@ import { createRequire } from 'node:module'
 import { roleAvailability } from '../dsh/register.js'
 import { deriveRoleView } from './state-model.js'
 import { CLI_SPECS } from '../cli/probe.js'
+import { deriveCliState } from '../cli/preferences.js'
 import { createSessionRemoteHandlers } from './session-remote.js'
 import { registerSessionStrictRemotes } from './typert.js'
 
@@ -43,10 +44,24 @@ export const GUI_REMOTE_SERVICE = 'meetingstone'
 const REMOTE_METHOD_DESCRIPTOR_VERSION = 1
 
 /**
- * 暴露无参 `list` + 三个带参会话方法。
+ * 本插件暴露的全部 Remote 方法（SRC marker 与 strict 定义共用）。
+ * 顺序固定：list → 会话三方法 → 配置三方法（测试断言顺序）。
+ */
+export const GUI_REMOTE_METHODS = Object.freeze([
+  'list',
+  'getSessionConfig',
+  'setSessionOverride',
+  'clearSessionOverride',
+  'setCliEnabled',
+  'refreshCli',
+  'updateGlobalRole',
+])
+
+/**
+ * 暴露无参 `list` + 三个带参会话方法 + 三个配置方法。
  *
  * 0.2.0 曾因手写带参 descriptor 被 Gateway 拒绝（`has no strict codec`）而移除
- * 三个会话方法；本版按官方生成物的写法恢复：
+ * 三个会话方法；本版按官方生成物的写法恢复（会话 3 + 配置 3）：
  *  - Host：真实 zod schema 构造 `{mode:"strict", typeSymbol, create}`，
  *    经 `createTypertRemoteInfo` 生成 descriptor，再由 `ctx.typert.register()`
  *    写入 Host 定义（`src/gui/typert.js`）；
@@ -113,7 +128,7 @@ function normalizeError(value, source, now = Date.now()) {
  * @param {any} ctx
  * @param {any} [sources] `resolveEffectiveConfig(...).sources`（用于区分显式 enabled 与默认值）
  */
-function roleView(role, ctx, sources = null) {
+export function roleView(role, ctx, sources = null) {
   const channel = role?.channel
   let subagents = null
   try {
@@ -156,8 +171,8 @@ function channelView(channel) {
   }
 }
 
-/** 通道实例的完整只读视图（设置页用，含模型/强度）。 */
-function channelDetailView(channel) {
+/** 通道实例的完整只读视图（设置页/详情页用，含模型/强度）。 */
+export function channelDetailView(channel) {
   return {
     channelId: typeof channel?.channelId === 'string' ? channel.channelId : '',
     description: typeof channel?.description === 'string' ? channel.description : '',
@@ -463,7 +478,7 @@ export function markRemoteMethod(prototype, method, Remote) {
  * strict codec 决定），不会拖垮 `list`、工具或派单。
  *
  * @param {any} ctx Host 插件 ctx
- * @param {{ snapshot: () => any, sessionApi?: any }} deps
+ * @param {{ snapshot: () => any, sessionApi?: any, configApi?: any }} deps
  */
 export function registerGuiRemote(ctx, deps) {
   if (!ctx || typeof deps?.snapshot !== 'function') {
@@ -479,6 +494,25 @@ export function registerGuiRemote(ctx, deps) {
     const handlers = deps.sessionApi
       ? createSessionRemoteHandlers(deps.sessionApi, { RemoteError })
       : null
+    const configApi = deps.configApi && typeof deps.configApi === 'object' ? deps.configApi : null
+
+    /**
+     * 把 `deriveCliState` 的结果转成 Remote 可透传的视图。
+     * @param {string} cli
+     * @param {any} preflight
+     */
+    function cliStateOf(cli, preflight) {
+      const preference = configApi && typeof configApi.getCliPreference === 'function'
+        ? configApi.getCliPreference(cli)
+        : null
+      const state = deriveCliState({
+        cli,
+        preference: preference?.ok === true ? preference.preference : 'unset',
+        preflight,
+      })
+      return cliStateView(state)
+    }
+
     class MeetingStoneGuiRemote extends TypertRemoteService {
       constructor(context) {
         super(context, GUI_REMOTE_SERVICE)
@@ -506,8 +540,46 @@ export function registerGuiRemote(ctx, deps) {
         if (!handlers) throw new RemoteError('MEETINGSTONE_GUI_REMOTE_UNAVAILABLE', '会话远程未装配')
         return handlers.clearSessionOverride(sessionId, roleId, field)
       }
+
+      /**
+       * 开关外部 CLI（strict：cli/enabled）。
+       * 开启前强制 preflight；失败时**不写配置**（保持关闭），并把人工步骤一并返回。
+       */
+      async setCliEnabled(cli, enabled) {
+        if (!configApi || typeof configApi.setCliEnabled !== 'function') {
+          throw new RemoteError('MEETINGSTONE_GUI_REMOTE_UNAVAILABLE', '配置远程未装配')
+        }
+        const result = await configApi.setCliEnabled(cli, enabled)
+        // 只有真正跑过 preflight 才回传派生状态；关闭/幂等没有新证据，不回传假 ready。
+        const state = result && result.preflight ? cliStateOf(cli, result.preflight) : null
+        return { ...result, state }
+      }
+
+      /**
+       * 重新检测一个外部 CLI（strict：cli/force）。
+       * 只读取证据，不写配置；force=true 绕过 probe 缓存。
+       */
+      async refreshCli(cli, force) {
+        if (!configApi || typeof configApi.preflightCli !== 'function') {
+          throw new RemoteError('MEETINGSTONE_GUI_REMOTE_UNAVAILABLE', '配置远程未装配')
+        }
+        const checked = await configApi.preflightCli(cli, { force: force === true })
+        if (!checked || checked.ok !== true) return checked
+        return { ok: true, cli: cliStateOf(cli, checked.preflight) }
+      }
+
+      /**
+       * 改全局角色的字段（strict：roleId/patch）。
+       * 只走 S2 的 global writer（profile patch，保留未知字段）；前端负责二次确认。
+       */
+      async updateGlobalRole(roleId, patch) {
+        if (!configApi || typeof configApi.updateGlobalRole !== 'function') {
+          throw new RemoteError('MEETINGSTONE_GUI_REMOTE_UNAVAILABLE', '配置远程未装配')
+        }
+        return configApi.updateGlobalRole(roleId, patch)
+      }
     }
-    for (const method of ['list', 'getSessionConfig', 'setSessionOverride', 'clearSessionOverride']) {
+    for (const method of GUI_REMOTE_METHODS) {
       markRemoteMethod(MeetingStoneGuiRemote.prototype, method, Remote)
     }
     const instance = new MeetingStoneGuiRemote(ctx)
@@ -541,7 +613,7 @@ export function registerGuiRemote(ctx, deps) {
 /** 供 stub harness 断言 marker 形状（不用于生产逻辑）。 */
 export const GUI_REMOTE_DESCRIPTOR = Object.freeze({
   version: REMOTE_METHOD_DESCRIPTOR_VERSION,
-  methods: Object.freeze(['list', 'getSessionConfig', 'setSessionOverride', 'clearSessionOverride']),
+  methods: GUI_REMOTE_METHODS,
 })
 
 export default registerGuiRemote

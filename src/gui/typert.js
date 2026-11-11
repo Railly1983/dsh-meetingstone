@@ -98,7 +98,7 @@ export function buildSessionRemoteManifest({ zod, createInfo }) {
 }
 
 /**
- * 在 typert 服务就绪后注册三个 strict Remote。**永不抛**。
+ * 在 typert 服务就绪后注册六个 strict Remote（会话 3 + 配置 3）。**永不抛**。
  *
  * @param {any} ctx Host 插件 ctx
  * @param {object} [options]
