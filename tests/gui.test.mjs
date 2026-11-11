@@ -295,7 +295,9 @@ async function loadClientHarness(values = {}) {
     }
     if (name === 'react') return fakeReact
     if (name === '@deepseek-ai/dsh-client-ui-primitives') {
-      return { Tag: function Tag() {} }
+      // U1a：primitives 不在 asar node_modules，官方禁止第三方插件 require；
+      // client 必须自绘 Tag/图标。这里故意让 require 失败，回归“又粘回来”。
+      throw new Error('stub require: primitives must not be required')
     }
     // 宿主 web 模块表的平台 seed 词；官方 client bundle 同样 require("zod")。
     if (name === 'zod') {
@@ -326,16 +328,52 @@ async function loadClientHarness(values = {}) {
   const exports = captured.factory(fakeRequire)
   const sidebarTabRegisters = []
   const sidebarOpenCalls = []
+  const sessionCalls = []
+  const sessionValue =
+    values.sessionValue !== undefined
+      ? values.sessionValue
+      : {
+          ok: true,
+          value: {
+            effective: {
+              roles: [
+                {
+                  roleId: 'role-sashi',
+                  name: '沙僧',
+                  aliases: ['SS'],
+                  channel: { channelId: 'ch-acp-flash', provider: 'acp', model: 'flash-1' },
+                },
+              ],
+              channels: [],
+              defaultRoleId: 'role-sashi',
+              dispatchNotes: '',
+              projectRules: [],
+            },
+            // role-sashi 在会话层覆盖了 model；来源层是 project。
+            overrides: { 'role-sashi': { channel: { model: 'flash-2' } } },
+            sources: {
+              roles: { 'role-sashi': { layer: 'project', fields: { 'channel.model': 'project' } } },
+              defaultRoleId: 'project',
+              dispatchNotes: 'default',
+              projectRules: [],
+            },
+          },
+        }
   const remote = {
     async $mount(contribution) {
       mounted.push(contribution)
       if (values.mountError) throw values.mountError
       return async () => {}
     },
-    // 只暴露无参 list；带参会话方法已从客户端移除。
+    // 无参 list + strict 会话方法（P0-S0 恢复；U1a 侧栏只读接 getSessionConfig）。
     meetingstone: {
       async list() {
         return remoteValue
+      },
+      async getSessionConfig(sessionId) {
+        sessionCalls.push(sessionId)
+        if (values.sessionThrows) throw values.sessionThrows
+        return sessionValue
       },
     },
     pluginInventory: {
@@ -419,6 +457,7 @@ async function loadClientHarness(values = {}) {
     remote,
     sidebarTabRegisters,
     sidebarOpenCalls,
+    sessionCalls,
     react: fakeReact,
     logs,
   }
@@ -600,6 +639,87 @@ test('Browser half：normalizeGlobal 收窄全局配置/CLI 数据', async () =>
   assert.equal(global.cliError, null)
 })
 
+test('Browser half：本地 Tag / 内联 SVG 只用宿主 token（无 primitives）', async () => {
+  const { exports } = await loadClientHarness()
+  const Tag = exports.__test.Tag
+
+  const info = Tag({ tone: 'info', children: 'ok' })
+  assert.equal(info.type, 'span')
+  assert.equal(info.props['data-tone'], 'info')
+  assert.match(info.props.style.color, /--dsw-alias-state-business-primary/)
+  assert.match(info.props.style.background, /color-mix/)
+
+  const danger = Tag({ tone: 'danger', children: 'bad' })
+  assert.match(danger.props.style.color, /--dsw-alias-state-error-primary/)
+
+  // 未知 tone 回退 outline，不产生不存在的 token。
+  const unknown = Tag({ tone: 'nope', children: 'x' })
+  assert.equal(unknown.props['data-tone'], 'outline')
+  assert.match(unknown.props.style.border, /--dsw-alias-border-l4/)
+
+  const icon = exports.__test.IconUsers({ size: 16 })
+  assert.equal(icon.type, 'svg')
+  assert.equal(icon.props['aria-hidden'], 'true')
+  assert.equal(icon.props.focusable, 'false')
+  assert.equal(icon.props.stroke, 'currentColor')
+  assert.equal(icon.props.width, 16)
+  assert.equal(icon.props.height, 16)
+})
+
+test('Browser half：normalizeSessionConfigView 收窄脏数据（未知来源→unknown）', async () => {
+  const { exports } = await loadClientHarness()
+  assert.deepEqual(exports.__test.normalizeSessionConfigView(null), {
+    roles: [],
+    defaultRoleId: '',
+    defaultRoleSource: 'default',
+  })
+
+  const view = exports.__test.normalizeSessionConfigView({
+    effective: {
+      roles: [
+        null,
+        1,
+        { roleId: 'r1', name: 'A', aliases: 'x', channel: null },
+        { roleId: 'r2', channel: { model: 'm' } },
+      ],
+      defaultRoleId: 'r1',
+    },
+    overrides: { r1: {}, r2: { model: 'm' } },
+    sources: {
+      roles: { r1: { layer: 'session' }, r2: { layer: 'bogus' } },
+      defaultRoleId: 'session',
+    },
+  })
+  assert.deepEqual(
+    view.roles.map((role) => [role.roleId, role.sourceLayer, role.overrideFields]),
+    [
+      ['r1', 'session', []],
+      ['r2', 'unknown', ['model']],
+    ],
+  )
+  assert.deepEqual(view.roles[0].aliases, [])
+  assert.equal(view.defaultRoleSource, 'session')
+})
+
+test('Browser half：渲染期错误走统一日志（module/phase/version/stack），返回回退节点', async () => {
+  const { exports, logs } = await loadClientHarness()
+  const fallback = exports.__test.safeRender(
+    'sidebar',
+    'render',
+    () => {
+      throw new Error('render boom')
+    },
+    () => ({ type: 'p', props: { role: 'alert', children: 'fallback' } }),
+  )
+  assert.equal(fallback.type, 'p', '渲染失败必须返回回退节点（不抛）')
+
+  const errLine = logs.find(([level]) => level === 'error')?.[1] ?? ''
+  assert.match(errLine, /^\[meetingstone\] gui module=sidebar phase=render version=0\.1\.0-alpha /)
+  assert.match(errLine, /error=render boom/)
+  assert.match(errLine, /stack=/)
+  assert.doesNotMatch(errLine, /token|secret|password|api[_-]?key/i, '日志不记录凭证')
+})
+
 test('Browser half：$mount 失败时 header/section/sidebar 都注册，header 不消失且可提示', async () => {
   const { registrations, injectCalls, react } = await loadClientHarness({
     mountError: new Error('mount boom'),
@@ -621,8 +741,10 @@ test('Browser half：$mount 失败时 header/section/sidebar 都注册，header 
   assert.deepEqual(snapshot.roles, [])
 
   const pane = registrations.find((r) => r.options.name === 'sidebar.right.pane.tab')
-  const paneSnapshot = await pane.options.inject('sess-1').list()
-  assert.equal(paneSnapshot.unavailable.code, 'REMOTE_MOUNT_FAILED')
+  const paneResult = await pane.options.inject('sess-1').loadSession()
+  assert.equal(paneResult.ok, false, 'mount 失败时侧栏 loader 返回错误结果而不是抛')
+  assert.equal(paneResult.error.code, 'REMOTE_MOUNT_FAILED')
+  assert.match(paneResult.error.message, /mount boom/)
 
   // header 仍在：render 时 remoteReady=false，点击显示「远程不可用」。
   const header = registrations[0]
@@ -702,7 +824,43 @@ test('Browser half：顶部集合石入口（conversation.session.header.actions
   assert.equal(typeof props.openRolePanel, 'function')
   const element = Component(props)
   const button = element.props.children.find((c) => c && c.type === 'button')
-  assert.ok(button, '入口是图标按钮')
+  assert.ok(button, '入口是按钮')
+  // 无障碍：可访问名在外层 button，SVG 自身 aria-hidden。
+  assert.equal(button.props['aria-label'], 'headerTitle')
+  assert.equal(button.props.title, 'headerDesc')
+  assert.equal(button.props.type, 'button')
+  assert.equal(button.props.className, 'dsh-meetingstone-header-entry')
+  // 宿主 token 样式：去掉默认粗边框 + 0.5px border token + 官方 sm toolbar 背景/圆角 + hover/focus 钩子。
+  assert.match(button.props.style.border, /0\.5px solid var\(--dsw-alias-border-l3\)/)
+  assert.match(button.props.style.background, /--dsw-alias-button-tool-bar-fill/)
+  assert.match(button.props.style.borderRadius, /--dsw-radius-sm/)
+  assert.equal(typeof button.props.onMouseEnter, 'function')
+  assert.equal(typeof button.props.onFocus, 'function')
+  // 内联 SVG（不再依赖 primitives.Icon）：16px、aria-hidden、focusable=false。
+  const findSvg = (node) => {
+    if (!node || typeof node !== 'object') return null
+    if (node.type === 'svg') return node
+    // stub jsx 不执行函数组件；展开一次（IconUsers）后再找。
+    if (typeof node.type === 'function' && node.props?.children === undefined) {
+      return findSvg(node.type(node.props))
+    }
+    const children = node.props?.children
+    const list = Array.isArray(children) ? children : children ? [children] : []
+    for (const child of list) {
+      const found = findSvg(child)
+      if (found) return found
+    }
+    return null
+  }
+  const svgNode = findSvg(button)
+  assert.ok(svgNode, 'header 必须渲染内联 SVG')
+  assert.equal(svgNode.props['aria-hidden'], 'true')
+  assert.equal(svgNode.props.focusable, 'false')
+  assert.equal(svgNode.props.width, 16)
+  // 文案「角色」在按钮内可见（测试 locale 用 key 回退，真实 zh 字典在源码断言）。
+  const buttonStrings = []
+  collectStrings(button, buttonStrings)
+  assert.ok(buttonStrings.includes('headerTitle'), '顶部入口显示文案')
   assert.equal(typeof button.props.onClick, 'function')
   button.props.onClick()
   assert.deepEqual(sidebarOpenCalls, ['meetingstone-roles', { params: {} }], '点击应打开右侧栏 tab（openTab(kind, {params})）')
@@ -717,7 +875,9 @@ test('Browser half：右侧栏两步式注册（sidebarRightTabs + 两个 keyed 
   const tab = sidebarTabRegisters[0]
   assert.equal(tab.id, TAB_ID)
   assert.equal(tab.kind, 'meetingstone-roles')
-  assert.equal(typeof tab.priority, 'number')
+  // 官方契约：priority 是档位字符串 extension|builtin|fallback，不是数字。
+  assert.equal(tab.priority, 'extension')
+  assert.equal(typeof tab.priority, 'string')
   assert.equal(typeof tab.title, 'function')
 
   // 第 2 步：keyed seat（内容 + 标题，scope session）
@@ -731,27 +891,76 @@ test('Browser half：右侧栏两步式注册（sidebarRightTabs + 两个 keyed 
   assert.equal(typeof pane[0].Component, 'function')
 })
 
-test('Browser half：右侧栏 pane 只读渲染角色名/别名/可用性/通道，无写操作控件', async () => {
-  const { exports, registrations } = await loadClientHarness()
+test('Browser half：右侧栏 pane 调 strict getSessionConfig，只读展示来源/覆盖', async () => {
+  const { exports, registrations, sessionCalls } = await loadClientHarness()
   const pane = registrations.find((r) => r.options.name === 'sidebar.right.pane.tab')
   const props = pane.options.inject('sess-p1')
-  assert.equal(typeof props.list, 'function')
-  const snapshot = await props.list()
-  assert.equal(snapshot.roles[0].roleId, 'role-sashi')
+  assert.equal(props.sessionId, 'sess-p1')
+  assert.equal(typeof props.loadSession, 'function')
+  assert.equal(props.list, undefined, '侧栏不再消费无参 list 快照')
+
+  const result = await props.loadSession()
+  assert.deepEqual(sessionCalls, ['sess-p1'], '必须带 sessionId 调 strict getSessionConfig')
+  assert.equal(result.ok, true)
+  assert.equal(result.view.roles[0].roleId, 'role-sashi')
+  assert.equal(result.view.roles[0].sourceLayer, 'project', '来源层来自 sources.roles[].layer')
+  assert.deepEqual(result.view.roles[0].overrideFields, ['channel'], '覆盖来自 overrides[roleId]')
+  assert.equal(result.view.defaultRoleSource, 'project')
 
   const t = (k) => k
-  const tree = exports.__test.renderRolePane(t, snapshot)
+  const tree = exports.__test.renderRolePane(t, result.view)
   const strings = []
   collectStringsDeep(tree, strings)
   assert.ok(strings.includes('沙僧'), '角色名可见')
   assert.ok(strings.includes('SS'), '别名可见')
-  assert.ok(strings.includes('available'), '可用性可见')
+  assert.ok(strings.includes('sourceLabel: sourceProject'), '来源（项目）可见')
+  assert.ok(strings.includes('overrideYes'), '有覆盖标记可见')
+  assert.ok(strings.includes('overrideFieldsLabel: '), '覆盖字段标签可见')
+  assert.ok(strings.includes('channel'), '覆盖字段名可见')
   assert.ok(strings.includes('ch-acp-flash · acp · flash-1'), '通道可见')
   assert.ok(strings.includes('paneReadonlyNote'), '顶部只读说明可见')
   assert.ok(!findNode(tree, (n) => n.type === 'input'), '只读面板不得有输入框')
+  assert.ok(!findNode(tree, (n) => n.type === 'select'), '只读面板不得有选择器')
   assert.ok(!strings.includes('restore'), '不得有恢复继承按钮')
   assert.ok(!strings.includes('saved'), '不得有保存状态')
   assert.ok(!strings.includes('manageRoles'), '面板内不得出现编辑入口')
+})
+
+test('Browser half：getSessionConfig 失败时 pane 只显示一行错误摘要（不抛、不空白）', async () => {
+  const failure = {
+    ok: false,
+    error: { code: 'SESSION_GUI_SESSION_ROOT_UNKNOWN', message: '无法定位项目根' },
+  }
+  const { exports, registrations } = await loadClientHarness({ sessionValue: failure })
+  const pane = registrations.find((r) => r.options.name === 'sidebar.right.pane.tab')
+  const result = await pane.options.inject('sess-x').loadSession()
+  assert.equal(result.ok, false, 'loader 返回错误结果而不是 reject')
+  assert.equal(result.error.code, 'SESSION_GUI_SESSION_ROOT_UNKNOWN')
+
+  const t = (k) => k
+  const tree = exports.__test.renderPaneError(t, result.error)
+  const strings = []
+  collectStringsDeep(tree, strings)
+  assert.ok(strings.includes('paneTitle'), '标题仍在（不是空白）')
+  assert.ok(strings.includes('paneReadonlyNote'), '只读说明仍在')
+  assert.ok(
+    strings.join(' ').includes('[SESSION_GUI_SESSION_ROOT_UNKNOWN] 无法定位项目根'),
+    '错误码 + 摘要可见',
+  )
+  assert.ok(findNode(tree, (n) => n.props && n.props.role === 'alert'), '失败时是 alert')
+  assert.ok(
+    findNode(tree, (n) => n.props && n.props.style && n.props.style.whiteSpace === 'nowrap'),
+    '错误摘要保持一行（nowrap）',
+  )
+})
+
+test('Browser half：getSessionConfig 抛错时 loader 收口为 REMOTE_CALL_FAILED，不冒泡', async () => {
+  const { registrations } = await loadClientHarness({ sessionThrows: new Error('gateway boom') })
+  const pane = registrations.find((r) => r.options.name === 'sidebar.right.pane.tab')
+  const result = await pane.options.inject('sess-y').loadSession()
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'REMOTE_CALL_FAILED')
+  assert.match(result.error.message, /gateway boom/)
 })
 
 test('Browser half：list 失败（ok!==true）时 loader 抛错而非伪装', async () => {
@@ -781,6 +990,27 @@ test('client 源文件：无占位数据，且命名空间读取走 ctx.get 惰�
   assert.match(source, /require\('zod'\)/, '浏览器侧必须复用宿主平台 seed 的 zod')
   assert.match(source, /mode: 'strict'/, '参数 codec 必须 strict')
   assert.doesNotMatch(source, /src-json[^\n]*parameters/, '不得用 src-json 伪造带参方法')
+  // U1a：合规化——不再 require primitives，改为自绘控件 + 宿主 token。
+  assert.doesNotMatch(
+    source,
+    /require\('@deepseek-ai\/dsh-client-ui-primitives'\)/,
+    '不得 require primitives（不在 asar node_modules，官方 practices.md:35 禁止）',
+  )
+  assert.doesNotMatch(source, /\bprimitives\./, '不得再使用 primitives.* 导出面')
+  assert.match(source, /function Tag\(/, '本地最小 Tag')
+  assert.match(source, /function IconUsers\(/, '内联 SVG 图标')
+  assert.match(source, /var\(--dsw-alias-/, '样式使用宿主 token')
+  assert.match(source, /priority: 'extension'/, 'priority 必须是官方档位字符串')
+  // U1a：侧栏只读接 strict getSessionConfig；失败不抛。
+  assert.match(source, /loadSession:/, '侧栏 seat 注入会话 loader')
+  assert.match(source, /service\.getSessionConfig\(sessionId\)/, '调用 strict getSessionConfig')
+  assert.match(source, /function makeSessionConfigLoader\(/, '独立的不抛 loader')
+  // 顶部文案「角色」+ SVG（无 Icon 依赖）。
+  assert.match(source, /headerTitle: '角色'/)
+  assert.match(source, /IconUsers, \{ size: 16 \}/)
+  // 渲染期错误也走统一日志（module/phase/version/stack）。
+  assert.match(source, /function safeRender\(/, '渲染期 guard')
+  assert.match(source, /guiLog\('error', module, phase/, '渲染错误走统一日志')
 })
 
 // 递归收集 JSX 树中的文本节点。
