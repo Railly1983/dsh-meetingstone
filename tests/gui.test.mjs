@@ -17,6 +17,7 @@ import { readFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { z } from 'zod'
 
 import { createRegistry } from '../src/roles/registry.js'
 import {
@@ -25,6 +26,7 @@ import {
   markRemoteMethod,
   GUI_REMOTE_SERVICE,
 } from '../src/gui/host.js'
+import { SESSION_REMOTE_TYPES } from '../src/gui/typert-spec.js'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -295,6 +297,11 @@ async function loadClientHarness(values = {}) {
     if (name === '@deepseek-ai/dsh-client-ui-primitives') {
       return { Tag: function Tag() {} }
     }
+    // 宿主 web 模块表的平台 seed 词；官方 client bundle 同样 require("zod")。
+    if (name === 'zod') {
+      if (values.omitZod) throw new Error('stub: zod unavailable')
+      return { z }
+    }
     throw new Error(`stub require: unexpected module ${name}`)
   }
 
@@ -436,11 +443,11 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
 
   assert.equal(mounted.length, 1)
   assert.equal(mounted[0].package, 'dsh-meetingstone')
-  // 只保留无参 list：带参会话方法在真机被 Gateway strict codec 拒绝（0.2.0 回退）。
-  assert.equal(mounted[0].descriptors.length, 1)
+  // list（无参 SRC）+ 三个 strict 会话方法（P0-S0 恢复）。
+  assert.equal(mounted[0].descriptors.length, 4)
   assert.deepEqual(
     mounted[0].descriptors.map((d) => d.method),
-    ['list'],
+    ['list', 'getSessionConfig', 'setSessionOverride', 'clearSessionOverride'],
   )
   assert.deepEqual(mounted[0].descriptors[0].parameters, [], 'list 必须无参')
   const listDesc = mounted[0].descriptors.find((d) => d.method === 'list')
@@ -453,6 +460,34 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
     invocation: { kind: 'direct' },
     result: { mode: 'src-json' },
   })
+
+  // 参数 codec 必须是 strict + 真实 zod，且 typeSymbol 与 Host 契约逐字一致。
+  const getDesc = mounted[0].descriptors.find((d) => d.method === 'getSessionConfig')
+  const setDesc = mounted[0].descriptors.find((d) => d.method === 'setSessionOverride')
+  const clearDesc = mounted[0].descriptors.find((d) => d.method === 'clearSessionOverride')
+  assert.equal(getDesc.parameters.length, 1)
+  assert.equal(getDesc.parameters[0].codec.mode, 'strict')
+  assert.equal(getDesc.parameters[0].codec.typeSymbol, SESSION_REMOTE_TYPES.sessionId)
+  assert.equal(typeof getDesc.parameters[0].codec.create, 'function')
+  assert.doesNotThrow(() => getDesc.parameters[0].codec.create().parse('sess-1'))
+  assert.throws(() => getDesc.parameters[0].codec.create().parse(''))
+  assert.throws(() => getDesc.parameters[0].codec.create().parse(123))
+
+  assert.deepEqual(
+    setDesc.parameters.map((p) => p.wire),
+    ['sessionId', 'roleId', 'field', 'value'],
+  )
+  assert.ok(setDesc.parameters.every((p) => p.codec.mode === 'strict' && p.codec.typeSymbol))
+  assert.equal(setDesc.parameters[1].codec.typeSymbol, SESSION_REMOTE_TYPES.roleId)
+  assert.equal(setDesc.parameters[2].codec.typeSymbol, SESSION_REMOTE_TYPES.field)
+  assert.equal(setDesc.parameters[3].codec.typeSymbol, SESSION_REMOTE_TYPES.value)
+
+  assert.deepEqual(
+    clearDesc.parameters.map((p) => p.wire),
+    ['sessionId', 'roleId', 'field'],
+  )
+  assert.equal(clearDesc.parameters[2].acceptsUndefined, true, 'clear.field 可省略')
+  assert.ok(clearDesc.parameters.every((p) => p.codec.mode === 'strict' && p.codec.typeSymbol))
 
   const injected = options.inject()
   const snapshot = await injected.list()
@@ -739,9 +774,13 @@ test('client 源文件：无占位数据，且命名空间读取走 ctx.get 惰�
   assert.doesNotMatch(source, /ctx\.inject\(\[REMOTE_INJECT\]/, '不得把注册阻塞在 ctx.inject 回调')
   assert.match(source, /ctx\.get\(/, '命名空间服务应通过 ctx.get 惰性获取')
   assert.match(source, /service\.list\(\)/, '数据读取应发生在惰性解析出的服务上')
-  // 0.2.0 回退：带参会话 Remote 方法不得再出现在客户端。
-  assert.doesNotMatch(source, /method: '(getSessionConfig|setSessionOverride|clearSessionOverride)'/)
-  assert.doesNotMatch(source, /service\.(getSessionConfig|setSessionOverride|clearSessionOverride)\(/)
+  // P0-S0：带参会话 Remote 恢复，且必须使用真实 zod strict codec。
+  assert.match(source, /method: 'getSessionConfig'/)
+  assert.match(source, /method: 'setSessionOverride'/)
+  assert.match(source, /method: 'clearSessionOverride'/)
+  assert.match(source, /require\('zod'\)/, '浏览器侧必须复用宿主平台 seed 的 zod')
+  assert.match(source, /mode: 'strict'/, '参数 codec 必须 strict')
+  assert.doesNotMatch(source, /src-json[^\n]*parameters/, '不得用 src-json 伪造带参方法')
 })
 
 // 递归收集 JSX 树中的文本节点。
@@ -942,4 +981,43 @@ test('Browser half：V1 三区结构 + 删除区块不再渲染 + 错误条件 +
     !findNode(collapsed, (n) => n.props && n.props.role === 'alert'),
     '无错误时不渲染 alert（不占位、不显示「无」）',
   )
+})
+
+test('strict 契约：Host descriptor 与 Client contribution 的 method/参数/typeSymbol 完全一致', async () => {
+  const { createTypertRemoteInfo } = await import('@deepseek-ai/dsh-typert-protocol/remote-info')
+  const { createSessionRemoteSpec } = await import('../src/gui/typert-spec.js')
+  const host = createTypertRemoteInfo(createSessionRemoteSpec(z), z).descriptors
+  const { exports, mounted } = await loadClientHarness()
+  assert.deepEqual(exports.__test.SESSION_TYPES, SESSION_REMOTE_TYPES, '全部 typeSymbol 必须与 Host 契约一致')
+  const client = mounted[0].descriptors.filter((d) => d.method !== 'list')
+
+  assert.deepEqual(client.map((d) => d.method), host.map((d) => d.method))
+  for (const hostDesc of host) {
+    const clientDesc = client.find((d) => d.method === hostDesc.method)
+    assert.ok(clientDesc, `client 缺少 ${hostDesc.method}`)
+    assert.equal(clientDesc.id, hostDesc.id)
+    assert.equal(clientDesc.parameters.length, hostDesc.parameters.length)
+    for (let i = 0; i < hostDesc.parameters.length; i += 1) {
+      assert.equal(clientDesc.parameters[i].wire, hostDesc.parameters[i].wire)
+      assert.equal(clientDesc.parameters[i].source, hostDesc.parameters[i].source)
+      assert.equal(
+        clientDesc.parameters[i].acceptsUndefined ?? false,
+        hostDesc.parameters[i].acceptsUndefined ?? false,
+      )
+      assert.equal(
+        clientDesc.parameters[i].codec.typeSymbol,
+        hostDesc.parameters[i].codec.typeSymbol,
+        `${hostDesc.method}.${hostDesc.parameters[i].wire} typeSymbol 必须与 Host 一致`,
+      )
+      assert.equal(clientDesc.parameters[i].codec.mode, 'strict')
+    }
+  }
+})
+
+test('Browser half：zod 不可用时只挂无参 list（不伪造 strict）', async () => {
+  const { mounted, logs } = await loadClientHarness({ omitZod: true })
+  assert.equal(mounted.length, 1)
+  assert.deepEqual(mounted[0].descriptors.map((d) => d.method), ['list'])
+  const hasStrictLog = logs.some(([level, line]) => level === 'warn' && line.includes('ZOD_UNAVAILABLE'))
+  assert.equal(hasStrictLog, true, 'zod 不可用时必须留下明确降级日志')
 })

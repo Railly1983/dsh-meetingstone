@@ -25,6 +25,8 @@ import { createNodeSessionOverrideStore } from './session/store.js'
 import { createRunStore } from './run-store.js'
 import { createWorktreeManager } from './worktree.js'
 import { createGuiState, registerGuiRemote } from './gui/host.js'
+import { createSessionGuiApi } from './gui/session.js'
+import { createSessionRootResolver } from './gui/session-root.js'
 
 /**
  * 宿主运行时把 `@deepseek-ai/dsh-tools` 作为 shared package 提供。
@@ -99,15 +101,26 @@ export function apply(ctx, config = {}) {
   const sessionStore = createNodeSessionOverrideStore()
 
   /**
-   * sessionId → 项目根 映射。派单/工具执行时由 `resolveRegistry` 记录，
-   * 用于读取该会话的 `.meetingstone/sessions/<sessionId>.json` 覆盖。
-   *
-   * 注意：会话级编辑 GUI（src/gui/session.js）**暂不接入客户端**——手写带参
-   * Remote 被宿主 Gateway 的 strict codec 校验拒绝（真机错误见 docs/gui-0.2.0.md §6）；
-   * 该映射仅服务派单时的会话配置解析。
+   * sessionId → 项目根 映射。派单/工具执行时由 `resolveRegistry` 记录，作为
+   * 官方 live Session/Agent 查询的兜底（新会话未派单时由 `ctx.sessions.get()`
+   * 的 `header.cwd` 直接解析，见 src/gui/session-root.js）。
    * @type {Map<string, string>}
    */
   const sessionRoots = new Map()
+
+  /**
+   * 会话级配置 GUI 的 Host 逻辑（get/set/clear）。传输层 strict 定义在
+   * `src/gui/host.js` 注册；本对象只做继承解析、白名单校验与落盘。
+   */
+  const sessionGuiApi = createSessionGuiApi({
+    cfg,
+    projectStore,
+    sessionStore,
+    resolveProjectRoot: createSessionRootResolver({
+      ctx,
+      fallback: (sessionId) => sessionRoots.get(sessionId) ?? null,
+    }),
+  })
 
   /** @type {import('./roles/registry.js').RoleRegistry} */
   const globalRegistry = createRegistry({ globalRoles: cfg.roles ?? [] })
@@ -381,13 +394,12 @@ export function apply(ctx, config = {}) {
     })
     registered = true
 
-    // GUI 只读 Remote：宿主注册 `meetingstone/list`（SRC marker），浏览器 half 用
-    // ctx.remote.meetingstone.list() 取快照。宿主没有 Typert 协议时静默跳过，
-    // 不影响工具与派单（设置页会显示“读取失败”，不会假装有数据）。
-    // 只有无参 list：带参会话方法会被 Gateway strict codec 拒绝（真机证据见
-    // docs/gui-0.2.0.md §6），src/gui/session.js 暂不接入客户端。
+    // GUI Remote：宿主注册 `meetingstone/list`（SRC marker）与三个会话方法的
+    // strict 定义（真实 zod + ctx.typert.register）。宿主缺少 Typert/zod 时静默
+    // 跳过 strict 方法，不影响工具与派单（设置页会显示“读取失败”，不会假装有数据）。
     const guiRemote = registerGuiRemote(ctx, {
       snapshot: () => gui.fullSnapshot(),
+      sessionApi: sessionGuiApi,
     })
     const remoteStatus =
       guiRemote.registered === true
@@ -395,7 +407,16 @@ export function apply(ctx, config = {}) {
         : `status=skipped reason=${guiRemote.reason}${
             guiRemote.error ? ` error=${guiRemote.error}` : ''
           }${guiRemote.stack ? ` stack=${guiRemote.stack}` : ''}`
-    const remoteLine = `[${name}] gui module=remote phase=register version=${PLUGIN_VERSION} ${remoteStatus}`
+    const strictStatus = guiRemote.strict
+      ? ` strict=${
+          guiRemote.strict.registered === true
+            ? guiRemote.strict.deferred === true
+              ? 'deferred'
+              : 'ok'
+            : `skipped(${guiRemote.strict.reason ?? 'unknown'})`
+        }`
+      : ''
+    const remoteLine = `[${name}] gui module=remote phase=register version=${PLUGIN_VERSION} ${remoteStatus}${strictStatus}`
     if (typeof ctx.logger?.info === 'function') ctx.logger.info(remoteLine)
     else console.log(remoteLine)
 
