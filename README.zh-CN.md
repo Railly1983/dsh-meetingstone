@@ -55,6 +55,7 @@ npm run verify                                              # 1) 门禁，必须
 | [安全与权限](docs/security.md) | 权限边界与"不提供只读通道"的原因 |
 | [工作树隔离（自动 + 手动）](docs/worktree-isolation.md) | 默认每任务独立工作树、失败关闭、人工合并/清理；文件布局隔离≠权限沙箱 |
 | [并行多任务方案（已实现）](docs/plan/2026-11-11-parallel-plan.md) | 悟空裁决、两级额度、失败关闭、不自动清理 |
+| [发布清单（0.1.0-alpha）](docs/release/0.1.0-alpha-checklist.md) | 版本同步、门禁、npm/GitHub 发布步骤、回滚与已知限制 |
 | [兼容性](docs/compatibility.md) | 宿主/provider/本机 CLI 的实测组合 |
 | [事故复盘](docs/audit/13-incident-tool-schema.md) | 2026-11-10 工具 schema 事故与门禁 |
 | [阶段 0 审计](docs/audit/00-summary.md) | A/B/C 分类与最小自研范围 |
