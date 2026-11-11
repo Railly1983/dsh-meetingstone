@@ -4,8 +4,8 @@
 > `meetingstone-dispatch` Job（`角色简称 · 简短目标`，见 §7）；查看/停止任务使用宿主
 > `@deepseek-ai/dsh-tool-jobs` 提供的能力与面板。本页面只负责角色/通道/错误的只读展示，不复制任务列表。
 
-范围：**只读，接真实数据**。V1 精简为三个区，复用宿主 primitives / 主题 / i18n / a11y，
-不新增 UI 体系：
+范围：**只读，接真实数据**。V1 精简为三个区，复用宿主主题 token / i18n / a11y；
+控件按官方 CSS 自绘（**不 require primitives**），不新增 UI 体系：
 
 1. **CLI 连接**：紧凑一行一个，名称 + 版本 + 状态；区分宿主（DeepSeek Harness）与外部
    CLI（codex / codebuddy / claude）；完整路径移入高级。
@@ -19,9 +19,13 @@
 一行摘要，详情默认折叠，无错误不占位。
 
 不做搜索 / 筛选 / 排序 / 操作按钮 / 编辑 / 任务控制 / 图表 / 动画（除协作区的「管理角色」
-入口按钮，点击打开既有右侧栏会话角色面板）。遵循宿主设计：用宿主 UI 组件
-（`@deepseek-ai/dsh-client-ui-primitives` 的 `Tag`）与主题 token（`var(--dsw-alias-label-*)`）、
-官方间距/字号（gap 12/10px、13px/20px、max-width 760px），不自带 CSS 框架、不自造色板。
+入口按钮，点击打开既有右侧栏会话角色面板）。遵循宿主设计：控件按官方 CSS 自绘（本地
+`Tag` span + 16px 内联 SVG），只用主题 token（`var(--dsw-alias-label-*)`、
+`--dsw-alias-border-l4`、`--dsw-alias-button-tool-bar-*`、`--dsw-radius-*`、
+`--dsw-focus-ring-*`）与官方间距/字号（gap 12/10px、13px/20px、max-width 760px），
+不自带 CSS 框架、不自造色板。**不 require** `@deepseek-ai/dsh-client-ui-primitives`：
+P0-U0 核验确认该包不在 asar 的 `node_modules`，且官方
+`practices.md:35` 明确禁止第三方插件 require 它。
 
 ## 1. 调研结论（证据）
 
@@ -40,7 +44,7 @@
 | Client 怎么拿 Host 数据 | 浏览器 half 先 `ctx.remote.$mount(contribution)` 安装 `remote.<namespace>` 服务，再 `ctx.remote.<namespace>.<method>()`；返回值是 `{ ok:true, value }` / `{ ok:false, error }`。官方生成物 `typert.remote-client.js` 提供 contribution descriptor | `dsh-client-ui-settings-plugin-inventory/lib/client.js:963-1015`；`dsh-api-gateway/lib/client.browser.js:1599-1702`；`dsh-host-plugin-inventory/lib/typert.remote-client.js:51-70` |
 | 生成物字段 | contribution = `{ package, descriptors:[{ id, service, namespace, method, parameters, invocation:{kind:"direct"}, result:{mode:"strict"\|"src-json", ...} }] }`。`remotes.register()` 会校验：`id/service/namespace/method` 非空；result codec 必须是 strict + `typeSymbol` + `create()`，或 `{mode:"src-json"}`。零参数只读方法不需要参数 codec | 同上 `typert.remote-client.js`；`dsh-typert-registry/lib/index.js:143-155,584-627`；`dsh-api-gateway/lib/client.browser.js:1720-1760,1820-1845` |
 | `require()` 宿主 ESM 包 | 桌面运行时 Node 24 支持 `require()` ESM；本仓库已有 `require('@deepseek-ai/dsh-tools')` 先例，故 Host 侧用同样的 `createRequire` 懒加载 `@deepseek-ai/dsh-typert-protocol` | `resources/runtime/versions.json`（node `24.21.0`）；`src/index.js:40-46` |
-| 只读展示组件 | 官方只读列表用 `@deepseek-ai/dsh-client-ui-primitives`：`Tag({ tone, children })`。`tone` 取值见官方映射 `neutral / warning / info / danger`。该包在 asar 内**无物理目录**，是 loader 别名提供的共享模块 | `dsh-client-ui-settings-plugin-inventory/lib/client.js:266-281` |
+| 只读展示组件 | 官方内部用 `@deepseek-ai/dsh-client-ui-primitives` 的 `Tag({ tone, children })`（`tone`: `neutral/warning/info/danger`）。但该包在 asar 内**无物理目录**，只是 loader 别名提供的 bundle 共享模块，且官方 `practices.md:35` **禁止第三方插件 require**；U1a 起本插件**不 require**，按官方 `._tag_*[data-tone=...]` CSS 自绘 `span`（token 同上），图标用 16px 内联 SVG | `dsh-client-ui-settings-plugin-inventory/lib/client.js:266-281`；`dsh-web-frontend/dist/assets/index-lh_YM6sT.css`（tag/tone 规则）；`dsh-agent-preset/skills/cordis-plugin-development/references/practices.md:35` |
 
 补充：本仓库现有工具（`meetingstone_list_roles` 等）是 `ctx.tools` 的**模型工具**，不是浏览器 remote。
 本版把同一份 Host 数据投影到 Remote face：`src/gui/host.js` 直接复用
@@ -163,36 +167,50 @@ node scripts/verify-package.mjs
 
 ## 5. V1 UI：对话顶部入口 + 右侧栏只读角色面板（决策 2/3/4/5/6）
 
-在 0.2.0 只读页之外，本版提供「会话角色」入口与只读面板，复用同一套官方 slot 注册
-与无参 `list()` 数据，不新建 UI 体系、不做 DOM/CSS 注入。
+在 0.2.0 只读页之外，本版提供「会话角色」入口与只读面板，复用同一套官方 slot 注册；
+设置页仍用无参 `list()`，侧栏面板改用 strict `getSessionConfig(sessionId)`，不新建 UI
+体系、不做 DOM/CSS 注入。
 
 ### 5.1 顶部集合石入口（header action，稳定性优先）
 
 - slot：`conversation.session.header.actions`（`kind:list, scope:session`）。
 - 注册形状（对齐官方约定）：`{ name, id, order, locale, inject(sessionId) }`；组件渲染
-  图标按钮（宿主 `@deepseek-ai/dsh-client-ui-primitives` 的 `Icon`，缺失时回退文字）。
+  **内联 SVG（users 风格 16px）+ 文案「角色」**（U1a：不再依赖 primitives 的 `Icon`）。
+  `aria-label` / `title` 保留在外层 button，SVG 自身 `aria-hidden="true"`、
+  `focusable="false"`。
+- 样式全部用宿主 token：`background: var(--dsw-alias-button-tool-bar-fill)`、hover
+  `--dsw-alias-button-tool-bar-hover`、`border: 0.5px solid var(--dsw-alias-border-l3)`
+  （替换掉原生 button 粗边框）、`border-radius: var(--dsw-radius-sm)`、focus
+  `--dsw-focus-ring-width/color`；尺寸对齐官方 `sm` Button（28px / 12px 字号 / 0 10px padding）。
 - **注册顺序固定为 header → section → sidebar**，每段独立 guard。header 的注册**不依赖**
   `$mount` 成功：挂载失败时仍注册，`inject` 返回 `remoteReady:false`，按钮 tooltip 与
   点击提示均为「远程不可用」，入口不会消失。
 - 点击（remote 就绪）→ `ctx.sidebarRight.openTab(TAB_KIND, { params: {} })` 打开右侧栏 tab。
-- 注册失败统一日志格式：
-  `[meetingstone] gui module=<module> phase=<phase> version=<v> error=… stack=…`；
+- 注册/渲染失败统一日志格式：
+  `[meetingstone] gui module=<module> phase=<register|render> version=<v> error=… stack=…`；
   成功为同格式 `status=ok`。一段失败不影响其他段；日志不记录凭证。
 
 ### 5.2 右侧栏 tab（两步式）
 
-1. `ctx.sidebarRightTabs.register({ id, kind, priority, title })` 注册 tab 本体
-   （能力检测：服务不存在时跳过 tab 本体，但仍注册 seat）。
+1. `ctx.sidebarRightTabs.register({ id, kind, priority: 'extension', title })` 注册 tab
+   本体（能力检测：服务不存在时跳过 tab 本体，但仍注册 seat）。
+   **`priority` 必须是官方档位字符串** `extension|builtin|fallback`，不是数字（P0-U0 §6）。
 2. 注册两个 keyed seat（scope session，id 与 tab 对齐）：
    - `sidebar.right.pane.tab` → 面板内容 `SidebarRolePane`
    - `sidebar.right.pane.tab.title` → 标题 `SidebarRoleTitle`
 
-### 5.3 面板内容：只读角色列表
+### 5.3 面板内容：只读会话生效配置（strict Remote）
 
-- 数据只来自无参 `ctx.remote.meetingstone.list()`（全局角色库快照）；不改写、不写盘。
-- 每个角色渲染：角色名、别名、可用性 Tag、通道（`channelId · provider · model`）。
-- 顶部固定说明：**当前版本只读（展示全局角色库）；会话级覆盖编辑待宿主生成式 Remote 支持**。
-- 没有输入框 / 保存 / 恢复继承等写操作；角色为空或 remote 不可用时显示可读说明。
+- 数据来自 strict `ctx.remote.meetingstone.getSessionConfig(sessionId)`，返回
+  `{ effective, overrides, sources }`；**不改写、不写盘、不调用 set/clear**。
+- 每个角色渲染：角色名、角色 ID、别名、通道（`channelId · provider · model`），以及
+  **来源层**（全局 / 项目 / 会话，来自 `sources.roles[roleId].layer`）和**是否有会话覆盖**
+  （`overrides[roleId]` 非空；有覆盖时列出覆盖字段名）。
+- 顶部固定说明：**只读：展示三层继承（全局 → 项目 → 会话）后的生效角色与来源；
+  会话级编辑待真机验证后接入**。
+- 调用失败（`ok:false` 或抛错）不抛出、不空白：保留标题 + 只读说明，并显示**一行**
+  错误摘要（`[code] message`，`nowrap + ellipsis`，完整内容在 `title` 里）。
+- 没有输入框 / 保存 / 恢复继承等写操作；角色为空时显示可读说明。
 
 ### 5.4 Host 远程方法：`list` + 三个 strict 会话方法（P0-S0）
 
@@ -244,16 +262,19 @@ node scripts/smoke-client-inject.mjs  # 真实 Cordis：mount 失败仍注册 he
 ```
 
 `tests/gui.test.mjs` 覆盖：Client 4 个 descriptor（list + 三个 strict 会话方法）；Host/Client
-method、参数 wire 与 typeSymbol 完全一致；header 最先注册且 `$mount` 失败不消失；pane 只读
-渲染且无 input/保存控件；错误摘要默认折叠；单模块注册失败不影响其他模块；统一日志格式与
-「日志不含凭证」断言。`tests/session-gui-api.test.mjs` 直接测试 `createSessionGuiApi` 的继承语义；
-`tests/typert-contract.test.mjs` 覆盖 Host strict 注册与参数校验。会话写 UI 仍未接入（见 §8）。
+method、参数 wire 与 typeSymbol 完全一致；header 最先注册且 `$mount` 失败不消失；header 用
+内联 SVG + aria-label/title；pane 调 strict `getSessionConfig` 且只读展示来源/覆盖、无
+input/保存控件；失败时一行错误摘要；单模块注册失败不影响其他模块；注册/渲染统一日志格式与
+「日志不含凭证」断言。`tests/gui-primitives.stub.test.mjs` 额外断言源码不再 require
+primitives、priority 为字符串档位。`tests/session-gui-api.test.mjs` 直接测试
+`createSessionGuiApi` 的继承语义；`tests/typert-contract.test.mjs` 覆盖 Host strict 注册与
+参数校验。会话写 UI 仍未接入（见 §8/§9）。
 
 ## 6. 限制与未验证项（如实登记）
 
 - **真机 GUI 未验证**：本环境无法启动 DSH 桌面端，未做截图级确认。`settings.section` 是否
-  真实出现、`Tag`/主题 token 的实际渲染、`ctx.remote.$mount` 与宿主 Gateway 的真实传输，
-  都只做了源码级对齐 + stub harness。
+  真实出现、本地 `Tag`/内联 SVG/主题 token 的实际渲染、`ctx.remote.$mount` 与宿主 Gateway
+  的真实传输，都只做了源码级对齐 + stub harness。
 - **项目级 `.meetingstone.json` 覆盖在设置页不可见**：Remote 调用没有会话 cwd，
   无法定位项目根，因此只展示插件行生效的全局 `config`。项目覆盖仍只影响派单/工具。
   若将来要展示项目视图，需要 `RemoteScope` 或由客户端显式传项目身份（会引入权限/上下文问题）。
@@ -271,17 +292,17 @@ method、参数 wire 与 typeSymbol 完全一致；header 最先注册且 `$moun
 - **既有 flaky 测试**：`tests/parallel.test.mjs` 的「真实并行：两任务时间重叠」在全量并发下
   偶发失败（两任务区间恰好相切），单跑通过；与本次改动无关。
 - **V1 UI 真机未验证**：header action（`conversation.session.header.actions`）、右侧栏两步式
-  注册（`sidebarRightTabs.register` + `sidebar.right.pane.tab` / `.title` seat）、`Icon` 渲染、
-  `ctx.sidebarRight.openTab(TAB_KIND, …)` 的打开语义，均只做了源码级对齐 + stub harness 结构断言，
-  未做真机渲染确认。本次修复的「header 不消失」需在真机重启后再确认一次。
+  注册（`sidebarRightTabs.register` + `sidebar.right.pane.tab` / `.title` seat）、内联 SVG 与
+  token 样式、`ctx.sidebarRight.openTab(TAB_KIND, …)` 的打开语义，均只做了源码级对齐 + stub
+  harness 结构断言，未做真机渲染确认。本次修复的「header 不消失」需在真机重启后再确认一次。
 - **`sidebarRightTabs.open` 方法名未核实**：打开右侧栏用的是 `ctx.sidebarRight.openTab(kind, …)`；
   真机若实际为其他方法名，需在 `openRolePanelOf` 内调整（入口本身仍存在，不会因此消失）。
 - **带参会话 Remote 已恢复，但真机未验证**：Host strict 定义、Client strict 参数 codec、
   `ctx.typert.register` 时序、卸载注销目前只做了源码级对齐 + 单测（`tests/typert-contract.test.mjs`、
   `tests/gui.test.mjs`）。必须在隔离 profile 真机确认：无 `has no strict codec`、set/clear 生效、
   非法参数被 Host 拒绝、卸载后端点消失。真机步骤见 §8.4。
-- **面板仍为纯只读**：右侧栏只渲染 `list()` 快照；三个会话 Remote 已可用，但本版**不写 UI**
-  （P0-S0 门禁要求先通过真机验证）。
+- **面板只读且已接 strict Remote**：右侧栏读 `getSessionConfig(sessionId)`（来源/覆盖只读投影），
+  **不调用** set/clear、不写盘；写 UI 仍受 P0-S0 门禁约束（见 §9.3）。
 - **`sessionRoots` 降为兜底**：`index.js` 仍在派单/工具执行时记录 sessionId→项目根；正常读取
   优先走 `ctx.sessions`/`ctx.agents` 的 `header.cwd`（`src/gui/session-root.js`）。
 
@@ -447,3 +468,38 @@ typeSymbol 一致；真实 `TypertRegistry` 接受 manifest 且 `dispose()` 后�
   `ctx.sessionQuery.observeSession()`（异步、只读），需要把 resolver 改成 async。
 - **结果 codec**：Host 结果虽为 strict，但未提供 `encode/decode`；Gateway 原样透传，
   Client 端 `result.mode:"src-json"`。这不影响参数校验，但结果不做结构裁剪。
+
+## 9. U1a 客户端合规化（去 primitives + strict 只读面板）
+
+### 9.1 合规说明
+
+| 项 | 之前 | U1a 之后 | 依据 |
+| --- | --- | --- | --- |
+| `@deepseek-ai/dsh-client-ui-primitives` | `require(...)` + `Tag`/`Icon` | **不 require**；本地 `Tag`（span + token）+ 16px 内联 SVG | `docs/gui-api-verification.md` §1/§5/§8；官方 `practices.md:35` |
+| `Tag` 外观 | `primitives.Tag({tone})` | 逐条抄官方 `._tag_*[data-tone=...]` CSS（`--dsw-alias-border-l4`、`--dsw-alias-state-*`、`bg-module-platform`） | `index-lh_YM6sT.css`（tag 规则） |
+| 顶部入口 | `<button>` 默认样式 + 文字回退 | 内联 users SVG + 文案「角色」；`border: 0.5px solid var(--dsw-alias-border-l3)`、toolbar fill/hover、`radius-sm`、focus ring token；保留 aria-label/title | 官方 `_button_1ulci_` / `_toolbar_` CSS |
+| 侧栏 tab `priority` | 数字 `50` | 字符串 `'extension'` | `dsh-client-ui-sidebar-right/lib/client.js:4834-4846` |
+| 诊断 | 只覆盖注册期 | 注册 + 渲染期统一 `[meetingstone] gui module=… phase=… version=…`（失败带 `error=`/`stack=`，不记凭证） | 本文件 §5.1 |
+| 能力检测 | `sidebarRightTabs` 先检测 | 额外：调用 `getSessionConfig` 前检测服务/方法；缺失返回可解释错误 | — |
+
+### 9.2 只读范围（本版边界）
+
+- 侧栏面板**只调用** strict `getSessionConfig(sessionId)`，只投影
+  `{ effective, overrides, sources }`：角色名/ID/别名/通道 + 来源层（全局/项目/会话）+
+  是否有会话覆盖（覆盖字段名）。
+- **不调用** `setSessionOverride` / `clearSessionOverride`，不写 `.meetingstone/sessions/*`。
+- 失败（`ok:false` / 抛错 / 缺 sessionId / 服务未就绪 / `$mount` 失败）一律收口为
+  `{ ok:false, error:{ code, message } }`：面板显示一行 `[code] message` 摘要，不抛、不空白。
+- 没有输入框、下拉、保存、恢复继承等写控件；`renderRolePane` 的结构测试会断言这一点。
+
+### 9.3 后续可写计划（门禁不变）
+
+1. **真机验证先行**：按 §8.4 在隔离 profile 确认 `getSessionConfig` 的 strict 传输、来源层
+   与覆盖字段与 Host 一致；确认面板打开不产生写副作用。
+2. **只读面板稳定后**再评估字段级编辑：复用 `getSessionConfig` 的 `overrides` 渲染
+   「恢复继承」与单字段编辑；写入仍只走 `setSessionOverride`/`clearSessionOverride`。
+3. 写 UI 必须先过 P0-S0 门禁（真机 `$mount`、参数校验、卸载注销、A/B 会话隔离），
+   并保持「只写差异」与「恢复继承」语义；在此之前不新增任何写控件。
+4. 若真机确认 `sidebarRightTabs.open` 等入口方法名有变化，只调整 `openRolePanelOf`，不影响
+   只读数据链路。
+

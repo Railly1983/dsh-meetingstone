@@ -8,8 +8,12 @@
  *      · apply() 里 ctx.slots.inject("settings.section", () => ctx.slots.register({...}, Comp))
  *      · 主题用宿主 CSS token var(--dsw-alias-*)，间距/字号见其 CSS module
  *  - dsh/node_modules/@deepseek-ai/dsh-client-ui-settings-plugin-inventory/lib/client.js
- *      · 只读列表用 @deepseek-ai/dsh-client-ui-primitives 的 Tag({ tone, children })
+ *      · 只读 Tag 的官方外观（P0-U0 取证：`._tag_*[data-tone=...]` CSS）
  *      · `inject: ["remote","remote.pluginInventory"]` + `ctx.remote.pluginInventory.list()`
+ *      · ⚠️ 官方内部用 `@deepseek-ai/dsh-client-ui-primitives`，但该包不在 app.asar 的
+ *        node_modules，且官方 `practices.md:35` 禁止第三方插件 require；本文件因此
+ *        **不 require primitives**，改为本地最小 Tag（span + `--dsw-alias-*` token）
+ *        与 16px 内联 SVG（图标不引入新库）。
  *  - dsh/node_modules/@deepseek-ai/dsh-api-gateway/lib/client.browser.js:1669-1677
  *      · `ctx.remote.$mount(contribution)` 安装 `remote.<namespace>` 服务
  *      · 命名空间服务名 = `remote.${namespace}`（同文件 2074-2076），由
@@ -40,10 +44,8 @@ window.__ModuleLoader__.load({
 
     let jsxRuntime = require('react/jsx-runtime')
     let react = require('react')
-    let primitives = require('@deepseek-ai/dsh-client-ui-primitives')
     let jsx = jsxRuntime.jsx
     let jsxs = jsxRuntime.jsxs
-    let Tag = primitives.Tag
 
     /**
      * 真实 zod：宿主 web 模块表的平台 seed 词（`staticModules`）包含 `zod`
@@ -326,12 +328,231 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** 来源层只认三层继承的固定枚举；其余一律 unknown（不猜）。 */
+    const SOURCE_LAYERS = new Set(['global', 'project', 'session'])
+
+    /**
+     * 会话生效视图 `{ effective, overrides, sources }` → 只读投影。
+     *
+     * Remote 返回值是外部数据：逐字段收窄。`sources.roles[roleId]` 是
+     * `resolveEffectiveConfig()` 的产物，`layer` 只会是 global/project/session；
+     * `overrides[roleId]` 是会话层字段补丁（空对象 = 没有覆盖）。
+     * @param {unknown} value
+     */
+    function normalizeSessionConfigView(value) {
+      const source = asObject(value)
+      const effective = asObject(source.effective)
+      const overrides = asObject(source.overrides)
+      const sources = asObject(source.sources)
+      const roleSources = asObject(sources.roles)
+      /** @type {any[]} */
+      const roles = asArray(effective.roles)
+        .filter((role) => role && typeof role === 'object')
+        .map((role) => {
+          const roleId = asString(role.roleId)
+          const roleSource = asObject(roleSources[roleId])
+          const layer = SOURCE_LAYERS.has(asString(roleSource.layer))
+            ? asString(roleSource.layer)
+            : 'unknown'
+          const channel = asObject(role.channel)
+          const overridePatch = asObject(overrides[roleId])
+          return {
+            roleId,
+            name: asString(role.name),
+            aliases: asArray(role.aliases).map(String),
+            channelId: asString(channel.channelId),
+            provider: asString(channel.provider),
+            model: asString(channel.model),
+            sourceLayer: layer,
+            overrideFields: Object.keys(overridePatch).sort(),
+          }
+        })
+      return {
+        roles,
+        defaultRoleId: asString(effective.defaultRoleId),
+        defaultRoleSource: SOURCE_LAYERS.has(asString(sources.defaultRoleId))
+          ? asString(sources.defaultRoleId)
+          : 'default',
+      }
+    }
+
+    /**
+     * 侧栏只读 loader：调用 strict `getSessionConfig(sessionId)`。
+     * **不抛**：成功 `{ ok:true, view }`，失败 `{ ok:false, error:{ code, message } }`，
+     * 让面板能显示一行错误摘要而不是空白/崩溃。能力检测后才调用。
+     * @param {any | (() => any | null)} serviceOrGet
+     * @param {string | null} [mountFailure]
+     */
+    function makeSessionConfigLoader(serviceOrGet, mountFailure) {
+      return async (sessionId) => {
+        if (mountFailure) {
+          return { ok: false, error: { code: 'REMOTE_MOUNT_FAILED', message: mountFailure } }
+        }
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          return { ok: false, error: { code: 'SESSION_ID_MISSING', message: '缺少会话 id' } }
+        }
+        const service = typeof serviceOrGet === 'function' ? serviceOrGet() : serviceOrGet
+        if (!service || typeof service.getSessionConfig !== 'function') {
+          return {
+            ok: false,
+            error: {
+              code: 'REMOTE_UNAVAILABLE',
+              message: 'remote.meetingstone.getSessionConfig 尚未就绪',
+            },
+          }
+        }
+        try {
+          const result = await service.getSessionConfig(sessionId)
+          if (!result || result.ok !== true) {
+            const failure = asObject(result && result.error)
+            return {
+              ok: false,
+              error: {
+                code: asString(failure.code) || 'REMOTE_CALL_FAILED',
+                message: asString(failure.message),
+              },
+            }
+          }
+          return { ok: true, view: normalizeSessionConfigView(result.value) }
+        } catch (error) {
+          return {
+            ok: false,
+            error: {
+              code:
+                error && typeof error === 'object' && typeof error.code === 'string'
+                  ? error.code
+                  : 'REMOTE_CALL_FAILED',
+              message: error instanceof Error ? error.message : String(error),
+            },
+          }
+        }
+      }
+    }
+
     // 直接消费宿主主题 token，不自带色板/框架；间距、字号沿用官方 settings-plugins
     // 的 CSS module（gap 12/10px、13px/20px、max-width 760px）。
     const C = {
       primary: 'var(--dsw-alias-label-primary)',
       secondary: 'var(--dsw-alias-label-secondary)',
       tertiary: 'var(--dsw-alias-label-tertiary)',
+    }
+
+    /**
+     * 本地最小 Tag：外观逐条抄宿主官方 `._tag_*[data-tone=...]` CSS
+     * （docs/gui-api-verification.md §8 / P0-U0 取证），只用 `--dsw-alias-*` token。
+     * 不 require primitives（该包不在 asar node_modules，且官方禁止第三方插件 require）。
+     */
+    const TAG_BASE = {
+      display: 'inline-flex',
+      alignItems: 'center',
+      borderRadius: 999,
+      padding: '1px 8px',
+      fontSize: 11,
+      lineHeight: '17px',
+      fontWeight: 500,
+      whiteSpace: 'nowrap',
+      flexShrink: 0,
+    }
+    const TAG_TONES = {
+      outline: {
+        border: '0.5px solid var(--dsw-alias-border-l4)',
+        color: 'var(--dsw-alias-label-tertiary)',
+      },
+      solid: { background: 'var(--dsw-alias-label-primary)', color: 'var(--dsw-alias-bg-layer-3)' },
+      neutral: {
+        background: 'var(--dsw-alias-bg-module-platform)',
+        color: 'var(--dsw-alias-label-secondary)',
+      },
+      quiet: { color: 'var(--dsw-alias-label-tertiary)' },
+      success: {
+        background: 'color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent)',
+        color: 'var(--dsw-alias-state-success-primary)',
+      },
+      info: {
+        background: 'color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent)',
+        color: 'var(--dsw-alias-state-business-primary)',
+      },
+      warning: {
+        background: 'color-mix(in srgb, var(--dsw-alias-state-warn-primary) 12%, transparent)',
+        color: 'var(--dsw-alias-state-warn-primary)',
+      },
+      danger: {
+        background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent)',
+        color: 'var(--dsw-alias-state-error-primary)',
+      },
+    }
+
+    /** @param {{ tone?: string, children?: any }} props */
+    function Tag(props) {
+      const tone = typeof props?.tone === 'string' && TAG_TONES[props.tone] ? props.tone : 'outline'
+      return jsx('span', {
+        'data-tone': tone,
+        style: { ...TAG_BASE, ...TAG_TONES[tone] },
+        children: props?.children,
+      })
+    }
+
+    /**
+     * 顶部入口图标：16px 内联 SVG（users 风格，regular stroke 1.5）。
+     * 不依赖宿主 `Icon`（P0-U0 核验：无通用 Icon 导出、无 users 图标名）。
+     */
+    function IconUsers({ size = 16 } = {}) {
+      return jsxs('svg', {
+        width: size,
+        height: size,
+        viewBox: '0 0 24 24',
+        fill: 'none',
+        stroke: 'currentColor',
+        strokeWidth: 1.5,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+        'aria-hidden': 'true',
+        focusable: 'false',
+        children: [
+          jsx('path', { d: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2' }),
+          jsx('circle', { cx: 9, cy: 7, r: 4 }),
+          jsx('path', { d: 'M22 21v-2a4 4 0 0 0-3-3.87' }),
+          jsx('path', { d: 'M16 3.13a4 4 0 0 1 0 7.75' }),
+        ],
+      })
+    }
+
+    /**
+     * 统一 GUI 日志（模块 / 阶段 / 插件版本）；apply() 时绑定 ctx.logger。
+     * 渲染期崩溃也走这里，便于在宿主 boundary 吞错前留下可定位记录。
+     */
+    let guiLog = () => {}
+
+    /**
+     * 渲染期 guard：组件自己的渲染异常写统一日志并渲染回退节点，
+     * 不让宿主 boundary 只剩一个空的 `data-slot-error`。不记录任何凭证。
+     * @param {string} module
+     * @param {string} phase
+     * @param {() => any} render
+     * @param {() => any} [fallback]
+     */
+    function safeRender(module, phase, render, fallback) {
+      try {
+        return render()
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const stack =
+          error instanceof Error && error.stack
+            ? String(error.stack).replace(/\s+/g, ' ').slice(0, 600)
+            : ''
+        guiErrors.push(`${module}: ${message}`)
+        guiLog('error', module, phase, `error=${message}${stack ? ` stack=${stack}` : ''}`)
+        return typeof fallback === 'function' ? fallback() : null
+      }
+    }
+
+    /** 渲染失败回退节点（一行可读提示，不空白）。 */
+    function renderFailureNote(t) {
+      return jsx('p', {
+        role: 'alert',
+        style: { ...note, color: 'var(--dsw-alias-state-error-primary)' },
+        children: t('renderFailed'),
+      })
     }
     const root = { maxWidth: 760, display: 'flex', flexDirection: 'column', gap: 14, color: C.primary }
     const heading = { margin: 0, fontSize: 14, fontWeight: 600, lineHeight: '22px' }
@@ -448,15 +669,27 @@ window.__ModuleLoader__.load({
       hostName: 'DeepSeek Harness',
       hostRunning: '运行中',
       // 顶部集合石入口 + 右侧栏只读角色面板
-      headerTitle: '集合石角色',
+      headerTitle: '角色',
       headerDesc: '查看当前会话角色（只读）',
       tabTitle: '集合石角色',
       paneTitle: '当前会话角色（只读）',
-      paneReadonlyNote: '当前版本只读（展示全局角色库）；会话级覆盖编辑待宿主生成式 Remote 支持',
+      paneReadonlyNote:
+        '只读：展示三层继承（全局 → 项目 → 会话）后的生效角色与来源；会话级编辑待真机验证后接入',
       openPanel: '打开集合石角色面板',
       noRoles: '当前没有可用角色',
       aliasLabel: '别名',
       channelLabel: '通道',
+      roleIdLabel: '角色 ID',
+      sourceLabel: '来源',
+      sourceGlobal: '全局',
+      sourceProject: '项目',
+      sourceSession: '会话',
+      sourceDefault: '默认',
+      sourceUnknown: '未知',
+      overrideYes: '有覆盖',
+      overrideNo: '无覆盖',
+      overrideFieldsLabel: '覆盖字段',
+      renderFailed: '面板渲染失败，详情见宿主日志',
       remoteUnavailableHint: '远程不可用',
     }
     const en = {
@@ -518,16 +751,27 @@ window.__ModuleLoader__.load({
       hostName: 'DeepSeek Harness',
       hostRunning: 'Running',
       // 顶部集合石入口 + 右侧栏只读角色面板
-      headerTitle: 'MeetingStone Roles',
+      headerTitle: 'Roles',
       headerDesc: 'View session roles (read-only)',
       tabTitle: 'MeetingStone Roles',
       paneTitle: 'Session roles (read-only)',
       paneReadonlyNote:
-        'Read-only in this version (global role library); session-level overrides await host-generated Remote support',
+        'Read-only: shows effective roles after global → project → session inheritance, with sources; session editing lands after live verification',
       openPanel: 'Open MeetingStone role panel',
       noRoles: 'No roles available',
       aliasLabel: 'Aliases',
       channelLabel: 'Channel',
+      roleIdLabel: 'Role ID',
+      sourceLabel: 'Source',
+      sourceGlobal: 'Global',
+      sourceProject: 'Project',
+      sourceSession: 'Session',
+      sourceDefault: 'Default',
+      sourceUnknown: 'Unknown',
+      overrideYes: 'Overridden',
+      overrideNo: 'No override',
+      overrideFieldsLabel: 'Override fields',
+      renderFailed: 'Failed to render this panel; see host logs',
       remoteUnavailableHint: 'Remote unavailable',
     }
 
@@ -895,25 +1139,32 @@ window.__ModuleLoader__.load({
       const snapshot = state.snapshot
       const unavailable = snapshot.unavailable
       // 加载成功但 remote 未就绪：仍渲染三区骨架，让页面可见并解释原因。
-      return jsxs('div', {
-        style: root,
-        children: [
-          unavailable
-            ? jsxs('p', {
-                style: { ...note, color: 'var(--dsw-alias-state-error-primary)' },
-                role: 'status',
-                children: [`${t('unavailable')} · ${unavailable.message || unavailable.code}`],
-              })
-            : null,
-          renderSection(t, snapshot, {
-            advancedOpen,
-            errorOpen,
-            openRoles,
-            onToggleAdvanced: () => setAdvancedOpen(!advancedOpen),
-            onToggleError: () => setErrorOpen(!errorOpen),
+      // 渲染异常由 safeRender 记统一日志并渲染一行回退提示（宿主 boundary 之外自救）。
+      return safeRender(
+        'section',
+        'render',
+        () =>
+          jsxs('div', {
+            style: root,
+            children: [
+              unavailable
+                ? jsxs('p', {
+                    style: { ...note, color: 'var(--dsw-alias-state-error-primary)' },
+                    role: 'status',
+                    children: [`${t('unavailable')} · ${unavailable.message || unavailable.code}`],
+                  })
+                : null,
+              renderSection(t, snapshot, {
+                advancedOpen,
+                errorOpen,
+                openRoles,
+                onToggleAdvanced: () => setAdvancedOpen(!advancedOpen),
+                onToggleError: () => setErrorOpen(!errorOpen),
+              }),
+            ],
           }),
-        ],
-      })
+        () => renderFailureNote(t),
+      )
     }
 
     /** 打开右侧栏角色面板：官方入口是 ctx.sidebarRight.openTab(kind, { params })。 */
@@ -1022,30 +1273,50 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 右侧栏只读面板。会话级覆盖编辑（原 get/set/clearSessionOverride）
-     * **暂不接入**：手写带参 Remote 被宿主 Gateway strict codec 拒绝（真机证据见
-     * 文件头与 docs/gui-0.2.0.md §6）。这里只消费无参 `list()` 快照。
+     * 右侧栏只读面板（P0-S0 恢复 strict Remote 后）。
+     *
+     * 会话级写入 `setSessionOverride` / `clearSessionOverride` 已具备 strict 契约，
+     * 但本版**不接写 UI**（先过真机门禁）。面板只调用 strict
+     * `getSessionConfig(sessionId)`，展示 `{effective, overrides, sources}` 的只读
+     * 投影（每个角色的来源层 + 是否有会话覆盖）；调用失败只显示一行错误摘要。
      */
     function channelTextOf(role, t) {
       const parts = [role.channelId, role.provider, role.model].filter(Boolean)
       return parts.length > 0 ? parts.join(' · ') : t('notSet')
     }
 
-    /** 单个角色的只读卡片：名称 / 别名 / 可用性 / 通道。 */
+    /** 来源层 → i18n key + 宿主 Tag tone（固定枚举，不猜）。 */
+    function sourceMeta(layer) {
+      if (layer === 'global') return { key: 'sourceGlobal', tone: 'neutral' }
+      if (layer === 'project') return { key: 'sourceProject', tone: 'info' }
+      if (layer === 'session') return { key: 'sourceSession', tone: 'warning' }
+      return { key: 'sourceUnknown', tone: 'quiet' }
+    }
+
+    /** 单个角色的只读卡片：名称 / ID / 来源（全局/项目/会话）/ 是否有覆盖 / 通道。 */
     function RoleReadonlyCard({ t, role }) {
-      const badge = availabilityBadge(t, role.availability)
       const aliases = asArray(role.aliases).filter(Boolean)
+      const overrideFields = asArray(role.overrideFields).filter(Boolean)
+      const overridden = overrideFields.length > 0
+      const src = sourceMeta(role.sourceLayer)
       return jsxs('div', {
         style: { ...card, gap: 4 },
         children: [
           jsxs('div', {
-            style: { ...row, alignItems: 'flex-start' },
+            style: { ...row, alignItems: 'flex-start', flexWrap: 'wrap' },
             children: [
               jsx('strong', { children: role.name || role.roleId || t('unknown') }),
               jsx('span', { style: grow }),
-              jsx(Tag, { tone: badge.tone, children: badge.label }),
+              jsx(Tag, { tone: src.tone, children: `${t('sourceLabel')}: ${t(src.key)}` }),
+              jsx(Tag, {
+                tone: overridden ? 'warning' : 'quiet',
+                children: overridden ? t('overrideYes') : t('overrideNo'),
+              }),
             ],
           }),
+          role.roleId
+            ? jsxs('div', { style: meta, children: [`${t('roleIdLabel')}: `, role.roleId] })
+            : null,
           jsxs('div', {
             style: meta,
             children: [`${t('aliasLabel')}: `, aliases.length > 0 ? aliases.join(', ') : t('none')],
@@ -1054,80 +1325,165 @@ window.__ModuleLoader__.load({
             style: meta,
             children: [`${t('channelLabel')}: `, channelTextOf(role, t)],
           }),
+          overridden
+            ? jsxs('div', {
+                style: meta,
+                children: [`${t('overrideFieldsLabel')}: `, overrideFields.join(', ')],
+              })
+            : null,
         ],
       })
     }
 
     /** 纯函数渲染只读面板，便于 stub harness 断言结构。 */
-    function renderRolePane(t, snapshot) {
-      const roles = asArray(snapshot?.roles)
-      const unavailable = snapshot?.unavailable
+    function renderRolePane(t, view) {
+      const roles = asArray(view?.roles)
       return jsxs('div', {
         style: root,
         children: [
           jsx('h3', { style: heading, children: t('paneTitle') }),
           jsx('p', { style: note, role: 'status', children: t('paneReadonlyNote') }),
-          unavailable
-            ? jsx('p', {
-                style: { ...note, color: 'var(--dsw-alias-state-error-primary)' },
-                role: 'status',
-                children: `${t('unavailable')} · ${unavailable.message || unavailable.code}`,
-              })
-            : null,
           roles.length === 0
             ? jsx('p', { style: note, children: t('noRoles') })
             : jsxs('div', {
                 style: list,
-                children: roles.map((role) => jsx(RoleReadonlyCard, { t, role }, role.roleId || role.name)),
+                children: roles.map((role) =>
+                  jsx(RoleReadonlyCard, { t, role }, role.roleId || role.name),
+                ),
               }),
         ],
       })
     }
 
-    /**
-     * 标题右侧入口：图标按钮（宿主 Icon，回退文字）；点击打开右侧栏 tab。
-     * `$mount` 失败时入口仍然存在：标题/点击提示「远程不可用」，不擅自消失。
-     */
-    function HeaderEntry({ t, openRolePanel, remoteReady }) {
-      const label = t('headerTitle')
-      const remoteOk = remoteReady !== false
-      const desc = remoteOk ? t('headerDesc') : t('remoteUnavailableHint')
-      const [notice, setNotice] = react.useState(null)
-      const icon =
-        typeof primitives.Icon === 'function'
-          ? jsx(primitives.Icon, { name: 'users', 'aria-label': label, title: desc })
-          : jsx('span', { children: label })
-      return jsxs('span', {
-        style: { display: 'inline-flex', alignItems: 'center', gap: 6 },
+    /** 面板加载中：标题 + 说明 + 加载提示（不空白）。 */
+    function renderPaneLoading(t) {
+      return jsxs('div', {
+        style: root,
         children: [
-          jsx('button', {
-            type: 'button',
-            className: 'dsh-meetingstone-header-entry',
-            'aria-label': label,
-            title: desc,
-            onClick: () => {
-              if (!remoteOk) {
-                // 入口保留，点击给出可读提示（不弹宿主 modal、不写凭证）。
-                setNotice(t('remoteUnavailableHint'))
-                return
-              }
-              try {
-                if (openRolePanel) openRolePanel()
-              } catch {
-                /* 宿主未提供 sidebarRightTabs.open 时静默 */
-              }
-            },
-            children: icon,
-          }),
-          notice
-            ? jsx('span', {
-                role: 'status',
-                style: { ...meta, color: 'var(--dsw-alias-state-error-primary)', whiteSpace: 'nowrap' },
-                children: notice,
-              })
-            : null,
+          jsx('h3', { style: heading, children: t('paneTitle') }),
+          jsx('p', { style: note, role: 'status', 'aria-live': 'polite', children: t('loading') }),
         ],
       })
+    }
+
+    /** 面板失败：标题 + 只读说明 + **一行**错误摘要（title 里保留全文）。 */
+    function renderPaneError(t, error) {
+      const code = asString(error?.code) || 'REMOTE_CALL_FAILED'
+      const message = asString(error?.message) || t('loadFailed')
+      return jsxs('div', {
+        style: root,
+        role: 'alert',
+        children: [
+          jsx('h3', { style: heading, children: t('paneTitle') }),
+          jsx('p', { style: note, children: t('paneReadonlyNote') }),
+          jsx('p', {
+            style: {
+              ...note,
+              color: 'var(--dsw-alias-state-error-primary)',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            },
+            title: `[${code}] ${message}`,
+            children: `[${code}] ${message}`,
+          }),
+        ],
+      })
+    }
+
+    /**
+     * 顶部入口按钮样式：自绘（不 require primitives），token 与官方 sm toolbar
+     * Button 一致（28px / 12px 字号 / radius-sm），但把原生 button 的默认粗边框
+     * 换成 0.5px 宿主 border token。hover/focus 也用宿主 token 显式实现。
+     */
+    const HEADER_BUTTON_BASE = {
+      boxSizing: 'border-box',
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      height: 28,
+      padding: '0 10px',
+      border: '0.5px solid var(--dsw-alias-border-l3)',
+      borderRadius: 'var(--dsw-radius-sm)',
+      background: 'var(--dsw-alias-button-tool-bar-fill)',
+      color: 'var(--dsw-alias-label-secondary)',
+      fontFamily: 'inherit',
+      fontSize: 12,
+      lineHeight: '18px',
+      cursor: 'pointer',
+      flexShrink: 0,
+    }
+
+    /**
+     * 标题右侧入口：内联 SVG + 文案「角色」；点击打开右侧栏 tab。
+     * `$mount` 失败时入口仍然存在：标题/点击提示「远程不可用」，不擅自消失。
+     * 可访问名在外层 button（aria-label/title）；SVG 自身 aria-hidden。
+     */
+    function HeaderEntry({ t, openRolePanel, remoteReady }) {
+      const [notice, setNotice] = react.useState(null)
+      const [hovered, setHovered] = react.useState(false)
+      const [focused, setFocused] = react.useState(false)
+      return safeRender(
+        'header',
+        'render',
+        () => {
+          const label = t('headerTitle')
+          const remoteOk = remoteReady !== false
+          const desc = remoteOk ? t('headerDesc') : t('remoteUnavailableHint')
+          const buttonStyle = {
+            ...HEADER_BUTTON_BASE,
+            background: hovered
+              ? 'var(--dsw-alias-button-tool-bar-hover)'
+              : 'var(--dsw-alias-button-tool-bar-fill)',
+            outline: focused
+              ? 'var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary))'
+              : 'none',
+            outlineOffset: 1,
+          }
+          return jsxs('span', {
+            style: { display: 'inline-flex', alignItems: 'center', gap: 6 },
+            children: [
+              jsxs('button', {
+                type: 'button',
+                className: 'dsh-meetingstone-header-entry',
+                'aria-label': label,
+                title: desc,
+                style: buttonStyle,
+                onMouseEnter: () => setHovered(true),
+                onMouseLeave: () => setHovered(false),
+                onFocus: () => setFocused(true),
+                onBlur: () => setFocused(false),
+                onClick: () => {
+                  if (!remoteOk) {
+                    // 入口保留，点击给出可读提示（不弹宿主 modal、不写凭证）。
+                    setNotice(t('remoteUnavailableHint'))
+                    return
+                  }
+                  try {
+                    if (openRolePanel) openRolePanel()
+                  } catch {
+                    /* 宿主未提供 sidebarRightTabs.open 时静默 */
+                  }
+                },
+                children: [jsx(IconUsers, { size: 16 }), jsx('span', { children: label })],
+              }),
+              notice
+                ? jsx('span', {
+                    role: 'status',
+                    style: {
+                      ...meta,
+                      color: 'var(--dsw-alias-state-error-primary)',
+                      whiteSpace: 'nowrap',
+                    },
+                    children: notice,
+                  })
+                : null,
+            ],
+          })
+        },
+        () => renderFailureNote(t),
+      )
     }
 
     /** 右侧栏 tab 标题。 */
@@ -1135,43 +1491,57 @@ window.__ModuleLoader__.load({
       return jsx('span', { children: t('tabTitle') })
     }
 
-    /** 右侧栏只读面板：拉取 `list()` 快照 → 渲染角色名/别名/可用性/通道。 */
-    function SidebarRolePane({ t, list: load }) {
+    /**
+     * 右侧栏只读面板：strict `getSessionConfig(sessionId)` → 来源/覆盖投影。
+     * loader 不抛；失败时渲染一行错误摘要（不空白）。
+     */
+    function SidebarRolePane({ t, loadSession }) {
       const [state, setState] = react.useState({ status: 'loading' })
       react.useEffect(() => {
         let current = true
         Promise.resolve()
-          .then(() => (typeof load === 'function' ? load() : null))
+          .then(() =>
+            typeof loadSession === 'function'
+              ? loadSession()
+              : { ok: false, error: { code: 'CAPABILITY_MISSING', message: 'loadSession 不可用' } },
+          )
           .then(
-            (snapshot) => {
-              if (current) setState({ status: 'ready', snapshot })
-            },
-            (error) => {
-              if (current)
+            (result) => {
+              if (!current) return
+              if (result && result.ok === true) {
+                setState({ status: 'ready', view: result.view })
+              } else {
                 setState({
                   status: 'error',
-                  message: error instanceof Error ? error.message : String(error),
+                  error: (result && result.error) || { code: 'REMOTE_CALL_FAILED', message: '' },
                 })
+              }
+            },
+            (error) => {
+              if (current) {
+                setState({
+                  status: 'error',
+                  error: {
+                    code: 'REMOTE_CALL_FAILED',
+                    message: error instanceof Error ? error.message : String(error),
+                  },
+                })
+              }
             },
           )
         return () => {
           current = false
         }
-      }, [load])
+      }, [loadSession])
 
-      if (state.status === 'loading') {
-        return jsx('div', { style: note, children: t('loading') })
-      }
-      if (state.status === 'error') {
-        return jsxs('div', {
-          role: 'alert',
-          children: [
-            jsx('p', { style: note, children: t('loadFailed') }),
-            jsx('p', { style: note, children: state.message }),
-          ],
-        })
-      }
-      return renderRolePane(t, state.snapshot)
+      if (state.status === 'loading') return renderPaneLoading(t)
+      if (state.status === 'error') return renderPaneError(t, state.error)
+      return safeRender(
+        'sidebar',
+        'render',
+        () => renderRolePane(t, state.view),
+        () => renderPaneError(t, { code: 'RENDER_FAILED', message: t('renderFailed') }),
+      )
     }
 
     /**
@@ -1222,7 +1592,9 @@ window.__ModuleLoader__.load({
 
     /**
      * 两步式注册右侧栏 tab：先 `sidebarRightTabs.register` 注册 tab，再注册两个
-     * keyed seat（内容 + 标题，scope session）。面板只读，数据来自无参 `list()`。
+     * keyed seat（内容 + 标题，scope session）。面板只读，数据来自 strict
+     * `getSessionConfig(sessionId)`（不是无参 list：来源/覆盖必须按会话解析）。
+     * `priority` 是官方档位字符串 `extension|builtin|fallback`，不是数字。
      * @param {any} slotCtx
      * @param {{ getService: () => any | null, mountError: string | null }} deps
      * @param {(key: string) => string} t
@@ -1240,15 +1612,12 @@ window.__ModuleLoader__.load({
       if (tabs && typeof tabs.register === 'function') {
         tabs.register({
           id: TAB_ID,
-          kind: 'meetingstone-roles',
-          priority: 50,
+          kind: TAB_KIND,
+          priority: 'extension',
           title: () => t('tabTitle'),
         })
       }
-      const loader = makeLoader(
-        deps.getService,
-        deps.mountError ? { code: 'REMOTE_MOUNT_FAILED', message: deps.mountError } : undefined,
-      )
+      const loadSession = makeSessionConfigLoader(deps.getService, deps.mountError)
       // 2) keyed seats（scope session）
       slotCtx.slots.inject('sidebar.right.pane.tab', () =>
         slotCtx.slots.register(
@@ -1256,7 +1625,11 @@ window.__ModuleLoader__.load({
             name: 'sidebar.right.pane.tab',
             key: TAB_ID,
             locale: NS,
-            inject: (/** @type {string} */ sessionId) => ({ sessionId, list: loader, t }),
+            inject: (/** @type {string} */ sessionId) => ({
+              sessionId,
+              loadSession: () => loadSession(sessionId),
+              t,
+            }),
           },
           SidebarRolePane,
         ),
@@ -1306,6 +1679,8 @@ window.__ModuleLoader__.load({
           /* logger 不可用 */
         }
       }
+      // 渲染期 guard 与注册 guard 共用同一格式（同一 ctx.logger）。
+      guiLog = log
 
       const guard = (/** @type {string} */ module, /** @type {string} */ phase, /** @type {() => void} */ fn) => {
         try {
@@ -1372,20 +1747,28 @@ window.__ModuleLoader__.load({
       normalizeSnapshot,
       normalizeGlobal,
       unavailableSnapshot,
+      normalizeSessionConfigView,
       renderSection,
       renderRolePane,
+      renderPaneError,
+      renderPaneLoading,
       RoleReadonlyCard,
       CliList,
       CliPaths,
       ChannelModels,
+      Tag,
+      IconUsers,
+      safeRender,
       REMOTE_CONTRIBUTION,
       SESSION_DESCRIPTORS,
       SESSION_TYPES,
       REMOTE_INJECT,
       TAB_ID,
+      TAB_KIND,
       HEADER_ACTION_ID,
       PLUGIN_VERSION,
       makeLoader,
+      makeSessionConfigLoader,
     }
     return module.exports
   },

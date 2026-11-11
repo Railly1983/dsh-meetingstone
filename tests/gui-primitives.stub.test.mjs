@@ -1,19 +1,22 @@
 // @ts-check
 /**
- * 宿主 GUI primitives / slots 契约 stub 测试（P0-U0）。
+ * 宿主 GUI 契约 stub 测试（P0-U0 + U1a 合规化）。
  *
  * 真实 primitives 不是本机 node_modules 里的包，而是 Web bundle 的共享模块
  * （`window.__ModuleLoader__` 的 require 表把 `@deepseek-ai/dsh-client-ui-primitives`
  * 映射到 bundle 内对象），Node 侧无法直接 import。本测试用
  * `tests/fixtures/gui-primitives-contract.json`（从本机 0.2.2-rc.1 只读取证）
- * 作为契约，构造同形状 stub，验证三件事：
+ * 作为契约，验证四件事：
  *
  * 1. 契约事实：Button/Switch/Tooltip/Toast/Modal 的 props、图标名、缺失导出
  *    （Icon/Select/Popover/Dropdown/IconButton/users-round）与源码一致；
  * 2. stub 组件按契约接受最小 props（Button variant/size/icon/aria、Switch 受控、
  *    Tooltip 单子元素、Toast text/onDone、Icon size/className）；
- * 3. `src/client/index.js` 能在“没有 Icon 导出”的 primitives stub 下 require 并完成
- *    header/section/sidebar 注册，HeaderEntry 回退为文字而不崩。
+ * 3. `src/client/index.js` **不再 require primitives**：用“require 即抛错”的 loader
+ *    执行浏览器 half，header/section/sidebar 仍完成注册；header 用内联 SVG，
+ *    Tag 是本地实现；侧栏只读调 strict `getSessionConfig`；
+ * 4. 源码审计：无 `require('@deepseek-ai/dsh-client-ui-primitives')`、无
+ *    `primitives.*`、priority 是字符串档位。
  *
  * 不覆盖：真实 Host 渲染、真实 CSS token 计算、真机点击。
  */
@@ -22,6 +25,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { z } from 'zod'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const contract = JSON.parse(
@@ -34,7 +38,7 @@ const SIZES = contract.button.sizes
 
 /**
  * 按契约构造 primitives stub；每个组件记录调用并断言收到的 props 在契约内。
- * 这不是宿主实现，只是“props 形状”的可执行契约。
+ * 这不是宿主实现，只是“props 形状”的可执行契约（本插件自身不再使用该包）。
  */
 function createPrimitivesStub() {
   const calls = { Button: [], Switch: [], Tooltip: [], Toast: [], Icon: [] }
@@ -192,18 +196,21 @@ function fakeReact() {
   }
 }
 
-/** 用假 loader/require/ctx 执行浏览器 half；primitives stub 故意不含 Icon。 */
-async function loadClientWithStub() {
+/** 用假 loader/require/ctx 执行浏览器 half；primitives 一律“require 即抛错”。 */
+async function loadClientWithoutPrimitives() {
   const registrations = []
   const mounted = []
   const logs = []
-  const stub = createPrimitivesStub()
+  const sessionCalls = []
   const fakeRequire = (name) => {
     if (name === 'react/jsx-runtime') {
       return { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) }
     }
     if (name === 'react') return fakeReact()
-    if (name === '@deepseek-ai/dsh-client-ui-primitives') return stub
+    if (name === '@deepseek-ai/dsh-client-ui-primitives') {
+      throw new Error('U1a: client must not require primitives')
+    }
+    if (name === 'zod') return { z }
     throw new Error(`stub require: unexpected module ${name}`)
   }
 
@@ -229,6 +236,27 @@ async function loadClientWithStub() {
         return {
           async list() {
             return { ok: true, value: { roles: [], channels: [], lastError: null } }
+          },
+          async getSessionConfig(sessionId) {
+            sessionCalls.push(sessionId)
+            return {
+              ok: true,
+              value: {
+                effective: {
+                  roles: [
+                    {
+                      roleId: 'role-sashi',
+                      name: '沙僧',
+                      aliases: ['SS'],
+                      channel: { channelId: 'ch-acp-flash', provider: 'acp', model: 'flash-1' },
+                    },
+                  ],
+                  defaultRoleId: 'role-sashi',
+                },
+                overrides: {},
+                sources: { roles: { 'role-sashi': { layer: 'global' } }, defaultRoleId: 'global' },
+              },
+            }
           },
         }
       }
@@ -263,12 +291,29 @@ async function loadClientWithStub() {
   }
 
   await exports.apply(ctx)
-  return { exports, registrations, mounted, logs, stub }
+  return { exports, registrations, mounted, logs, sessionCalls }
 }
 
-test('Browser half：无 Icon 导出时仍可 require primitives，header/section/sidebar 均注册', async () => {
-  const { registrations, mounted, logs, stub } = await loadClientWithStub()
+/** 在 stub JSX 树里找 svg（stub 不执行函数组件，展开一次）。 */
+function findSvg(node) {
+  if (!node || typeof node !== 'object') return null
+  if (node.type === 'svg') return node
+  if (typeof node.type === 'function' && node.props?.children === undefined) {
+    return findSvg(node.type(node.props))
+  }
+  const children = node.props?.children
+  const list = Array.isArray(children) ? children : children ? [children] : []
+  for (const child of list) {
+    const found = findSvg(child)
+    if (found) return found
+  }
+  return null
+}
+
+test('Browser half：不 require primitives 也能完成注册，header 用内联 SVG', async () => {
+  const { registrations, mounted, logs, sessionCalls } = await loadClientWithoutPrimitives()
   assert.equal(mounted.length, 1, 'Remote contribution 仍应挂载')
+  assert.equal(mounted[0].descriptors.length, 4, 'list + 三个 strict 会话方法')
 
   const names = registrations.map((entry) => entry.options.name)
   assert.deepEqual(names, [
@@ -284,32 +329,34 @@ test('Browser half：无 Icon 导出时仍可 require primitives，header/sectio
   const tree = header.Component(props)
   const button = tree.props.children.find((child) => child && child.type === 'button')
   assert.ok(button, 'HeaderEntry 仍渲染 button')
+  assert.equal(button.props.type, 'button')
   assert.equal(button.props['aria-label'], 'headerTitle')
-  // 因为没有 primitives.Icon，图标回退为文字；不允许抛错。
-  const fallbackText = Array.isArray(button.props.children)
-    ? button.props.children.find((child) => child && child.type === 'span')
-    : button.props.children
-  assert.ok(fallbackText && fallbackText.type === 'span', '缺少 Icon 时必须回退文字')
-  assert.equal(fallbackText.props.children, 'headerTitle')
+  assert.equal(button.props.title, 'headerDesc')
+  const svg = findSvg(button)
+  assert.ok(svg, 'header 必须使用内联 SVG')
+  assert.equal(svg.props['aria-hidden'], 'true')
+  assert.equal(svg.props.focusable, 'false')
+
+  // 侧栏 seat 只读调 strict getSessionConfig（不是无参 list）。
+  const pane = registrations.find((entry) => entry.options.name === 'sidebar.right.pane.tab')
+  const result = await pane.options.inject('sess-2').loadSession()
+  assert.deepEqual(sessionCalls, ['sess-2'])
+  assert.equal(result.ok, true)
+  assert.equal(result.view.roles[0].sourceLayer, 'global')
+
   assert.ok(logs.some(([level]) => level === 'info'), '注册成功应有 info 日志')
-  assert.equal(typeof stub.Button, 'function')
 })
 
-test('源码审计：primitives.* 只允许命中已核验导出（Icon 记为已知缺失）', async () => {
+test('源码审计：无 primitives 依赖，priority 字符串，侧栏接 strict getSessionConfig', async () => {
   const source = await readFile(join(ROOT, 'src/client/index.js'), 'utf8')
-  const used = [...new Set([...source.matchAll(/primitives\.([A-Za-z_$][\w$]*)/g)].map((match) => match[1]))]
-  assert.ok(used.length > 0, '应能解析出 primitives 使用面')
-  const knownMissing = new Set(contract.absent)
-  for (const name of used) {
-    assert.ok(
-      contract.exports.includes(name) || knownMissing.has(name),
-      `src/client/index.js 使用了未核验的 primitives.${name}`,
-    )
-  }
-  assert.ok(used.includes('Tag'), '当前只读页使用 Tag')
-  assert.ok(used.includes('Icon'), '当前 HeaderEntry 仍引用不存在的 Icon（已 guard）')
-  assert.match(source, /typeof primitives\.Icon === 'function'/, 'Icon 缺失必须有能力检测/回退')
-  assert.equal(contract.absent.includes('Icon'), true)
+  assert.doesNotMatch(source, /require\('@deepseek-ai\/dsh-client-ui-primitives'\)/, '不得 require primitives')
+  assert.doesNotMatch(source, /\bprimitives\./, '不得使用 primitives.* 导出面')
+  assert.match(source, /function Tag\(/, '本地最小 Tag')
+  assert.match(source, /function IconUsers\(/, '内联 SVG')
+  assert.match(source, /priority: 'extension'/, 'priority 必须是官方档位字符串')
+  assert.doesNotMatch(source, /priority:\s*\d/, 'priority 不能是数字')
+  assert.match(source, /service\.getSessionConfig\(sessionId\)/, '侧栏调用 strict getSessionConfig')
+  assert.match(source, /headerTitle: '角色'/, '顶部入口文案「角色」')
 })
 
 test('slots 契约：settings.section/header/sidebar 的 scope 与 sessionId/params 形状', () => {

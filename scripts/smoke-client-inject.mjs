@@ -139,6 +139,30 @@ class Namespace extends Service {
       },
     }
   }
+  /** U1a：strict 会话读取（侧栏只读面板的数据源）。 */
+  async getSessionConfig(sessionId) {
+    return {
+      ok: true,
+      value: {
+        effective: {
+          roles: [
+            {
+              roleId: 'role-sashi',
+              name: '沙僧',
+              aliases: ['SS'],
+              channel: { channelId: 'ch-acp-flash', provider: 'acp', model: 'flash-1' },
+            },
+          ],
+          defaultRoleId: 'role-sashi',
+        },
+        overrides: {},
+        sources: {
+          roles: { 'role-sashi': { layer: 'global' } },
+          defaultRoleId: 'global',
+        },
+      },
+    }
+  }
 }
 
 class Remote extends Service {
@@ -170,7 +194,10 @@ const fakeRequire = (name) => {
     return { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) }
   }
   if (name === 'react') return fakeReact
-  if (name === '@deepseek-ai/dsh-client-ui-primitives') return { Tag: function Tag() {} }
+  // U1a：不得 require primitives（不在 asar node_modules，官方禁止第三方插件 require）。
+  if (name === '@deepseek-ai/dsh-client-ui-primitives') {
+    throw new Error('U1a: client must not require primitives')
+  }
   if (name === 'zod') return { z }
   throw new Error(`unexpected module ${name}`)
 }
@@ -185,6 +212,22 @@ const client = entry.factory(fakeRequire)
 /** 等待 Cordis 子 fiber 完成激活。 */
 async function settle(ms = 30) {
   await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** stub JSX 树里找 svg（函数组件需手动展开一次）。 */
+function findSvg(node) {
+  if (!node || typeof node !== 'object') return null
+  if (node.type === 'svg') return node
+  if (typeof node.type === 'function' && node.props?.children === undefined) {
+    return findSvg(node.type(node.props))
+  }
+  const children = node.props?.children
+  const list = Array.isArray(children) ? children : children ? [children] : []
+  for (const child of list) {
+    const found = findSvg(child)
+    if (found) return found
+  }
+  return null
 }
 
 // A. 复现原错误：父 fiber 只声明 remote，直接读 remote.meetingstone 必抛。
@@ -254,8 +297,16 @@ async function settle(ms = 30) {
   assert.equal(props.remoteReady, true)
   const element = header.Component(props)
   const button = element.props.children.find((c) => c && c.type === 'button')
-  assert.ok(button, 'header 渲染图标按钮')
-  console.log('PASS B: 真实 Cordis 下 mount → getService → header/section/sidebar 注册 → list 成功')
+  assert.ok(button, 'header 渲染按钮')
+  assert.equal(button.props['aria-label'], 'headerTitle')
+  assert.equal(findSvg(button)?.props?.['aria-hidden'], 'true', 'header 使用内联 SVG')
+
+  // 右侧栏只读面板：strict getSessionConfig → 来源层。
+  const pane = registrations.find((r) => r.options.name === 'sidebar.right.pane.tab')
+  const paneResult = await pane.options.inject('sess-smoke').loadSession()
+  assert.equal(paneResult.ok, true, '侧栏读取 strict getSessionConfig')
+  assert.equal(paneResult.view.roles[0].sourceLayer, 'global')
+  console.log('PASS B: 真实 Cordis 下 mount → getService → header/section/sidebar 注册 → list/getSessionConfig 成功')
 }
 
 // C. $mount 失败：header / section / sidebar 仍注册，入口不消失。
