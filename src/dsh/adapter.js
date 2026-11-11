@@ -106,6 +106,12 @@ export const ADAPTER_ERRORS = Object.freeze({
 /** 等待宿主 `activation.dispose()` 的默认上限（毫秒）。 */
 export const DEFAULT_DISPOSE_TIMEOUT_MS = 5000
 
+/** `waitForSettled` 的默认等待上限（毫秒，`meetingstone_wait` 默认值）。 */
+export const DEFAULT_WAIT_TIMEOUT_MS = 300000
+
+/** `waitForSettled` 允许的最大等待上限（毫秒）；更大的请求按此值截断。 */
+export const MAX_WAIT_TIMEOUT_MS = 600000
+
 /**
  * 宿主子 Agent 容量耗尽的错误码。
  *
@@ -517,7 +523,9 @@ function jobOutcomeFor(settled) {
  * @returns {{ canStart: (role: object) => { ok: boolean, reason?: string },
  *            start: (input: object) => Promise<{ taskRef: MeetingstoneTaskRef }>,
  *            cancel: (taskRef: object) => Promise<{ stopConfirmed: boolean, code?: string, message?: string, reason?: string }>,
- *            getTask: (ref: string | object) => Promise<object> }}
+ *            getTask: (ref: string | object) => Promise<object>,
+ *            waitForSettled: (childIds: string[], timeoutMs?: number) => Promise<object>,
+ *            waitStats: () => { pendingWaiters: number, registrations: number } }}
  */
 export function createDshAdapter(ctx, options = {}) {
   const getParent = options.getParent ?? null
@@ -586,6 +594,63 @@ export function createDshAdapter(ctx, options = {}) {
    * @type {Map<string, any>}
    */
   const finished = new Map()
+
+  /**
+   * 终态等待信号表（childId → 一次性 deferred）。
+   *
+   * `meetingstone_wait` 的全部语义都在这里：**不轮询**，只在任务结算时 resolve。
+   * 同一 childId 只建一个 deferred —— 多个 wait 调用复用它（按 refs 计数），
+   * 不重复注册监听；某个 wait 超时只释放自己的引用，最后一个引用离开才删除；
+   * 卸载时统一清空。
+   * @type {Map<string, { promise: Promise<void>, resolve: () => void, settled: boolean, refs: number }>}
+   */
+  const settleWaiters = new Map()
+  /** 新建 deferred 的累计次数（仅用于测试/诊断证明「不重复监听」）。 */
+  let waiterRegistrations = 0
+
+  /** @param {string} childId */
+  function waiterFor(childId) {
+    let waiter = settleWaiters.get(childId)
+    if (waiter) return waiter
+    /** @type {() => void} */
+    let resolve = () => {}
+    const promise = new Promise((/** @type {() => void} */ r) => {
+      resolve = r
+    })
+    waiter = { promise, resolve, settled: false, refs: 0 }
+    settleWaiters.set(childId, waiter)
+    waiterRegistrations += 1
+    return waiter
+  }
+
+  /** 登记一个等待者引用（复用同一 deferred，不重复注册）。 @param {string} childId */
+  function acquireWaiter(childId) {
+    const waiter = waiterFor(childId)
+    waiter.refs += 1
+    return waiter
+  }
+
+  /** 释放一个等待者引用；最后一个引用离开时删除监听。 @param {string} childId */
+  function releaseWaiter(childId) {
+    const waiter = settleWaiters.get(childId)
+    if (!waiter) return
+    waiter.refs -= 1
+    if (waiter.refs <= 0) settleWaiters.delete(childId)
+  }
+
+  /** 通知并移除一个等待者；重复调用无副作用。 @param {string} childId */
+  function notifySettled(childId) {
+    const waiter = settleWaiters.get(childId)
+    if (!waiter) return
+    settleWaiters.delete(childId)
+    waiter.settled = true
+    try {
+      waiter.resolve()
+    } catch {
+      /* resolve 不应失败 */
+    }
+  }
+
   /** @param {string} childId @param {any} value */
   function rememberFinished(childId, value) {
     finished.set(childId, value)
@@ -594,6 +659,9 @@ export function createDshAdapter(ctx, options = {}) {
       if (oldest === undefined) break
       finished.delete(oldest)
     }
+    // 终态（完成/失败/取消/卸载）统一从这一处唤醒等待者：
+    // 所有终态路径都会调用 rememberFinished，不需要在每个分支重复挂监听。
+    notifySettled(childId)
   }
 
   // ─── 宿主原生 Jobs（可选） ──────────────────────────────────────────────────
@@ -1313,6 +1381,116 @@ export function createDshAdapter(ctx, options = {}) {
   }
 
   /**
+   * 内存终态 → `meetingstone_wait` 的单任务结果。
+   * 文本只取内存快照的 `output`（磁盘记录用 `result`，本进程未读过盘就不编造）。
+   * @param {string} childId
+   * @returns {{ childId: string, status: string, stopReason: string | null,
+   *             resultBytes: number, summary?: string, timedOut: boolean } | null}
+   */
+  function terminalResult(childId) {
+    const record = finished.get(childId)
+    if (!record) return null
+    const text =
+      typeof record.output === 'string'
+        ? record.output
+        : typeof record.result === 'string'
+          ? record.result
+          : ''
+    // 只回结构化 summary；纯文本的 summary 就是全文，重复返回会把 wait 输出撑大。
+    const summary =
+      record.structuredResult === true && typeof record.summary === 'string'
+        ? record.summary.trim()
+        : ''
+    return {
+      childId,
+      status: typeof record.status === 'string' && record.status ? record.status : 'unknown',
+      stopReason: typeof record.stopReason === 'string' ? record.stopReason : null,
+      resultBytes: Buffer.byteLength(text, 'utf8'),
+      ...(summary ? { summary } : {}),
+      timedOut: false,
+    }
+  }
+
+  /**
+   * 仍在跑 → `running` + `timedOut:true`（只有超时路径会产出这个形状）。
+   * @param {string} childId
+   */
+  function runningResult(childId) {
+    return {
+      childId,
+      status: 'running',
+      stopReason: null,
+      resultBytes: 0,
+      timedOut: true,
+    }
+  }
+
+  /**
+   * 等待一组任务**全部到达终态**或超时。不轮询、不忙等：
+   * 已结算的任务直接读内存终态；未结算的只等 `rememberFinished` 的通知。
+   *
+   * - 未知 childId（内存既无终态也无存活句柄）→ `UNKNOWN_CHILD`，**不等待**；
+   * - 超时后仍未完成 → `status:'running', timedOut:true`，调用方可稍后再 wait 或查 get_task；
+   * - 同一 childId 的多次 wait 复用同一个 deferred，不重复注册监听。
+   *
+   * @param {string[]} childIds
+   * @param {number} [timeoutMs]
+   */
+  async function waitForSettled(childIds, timeoutMs = DEFAULT_WAIT_TIMEOUT_MS) {
+    /** @type {string[]} */
+    const ids = []
+    for (const raw of Array.isArray(childIds) ? childIds : []) {
+      const id = typeof raw === 'string' ? raw.trim() : ''
+      if (id && !ids.includes(id)) ids.push(id)
+    }
+    if (ids.length === 0) {
+      return { ok: false, code: 'INVALID_CHILD_IDS', message: 'childIds 必须是非空字符串数组' }
+    }
+
+    const unknown = ids.filter((id) => !finished.has(id) && !handles.has(id))
+    if (unknown.length > 0) {
+      return {
+        ok: false,
+        code: 'UNKNOWN_CHILD',
+        message: `未知 childId（本进程没有该任务的记录）：${unknown.join(', ')}`,
+        unknownChildIds: unknown,
+      }
+    }
+
+    const requested =
+      typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? Math.floor(timeoutMs)
+        : DEFAULT_WAIT_TIMEOUT_MS
+    const effective = Math.min(requested, MAX_WAIT_TIMEOUT_MS)
+
+    /** @returns {Array<object>} */
+    const collect = () =>
+      ids.map((id) => terminalResult(id) ?? runningResult(id))
+
+    const pending = ids.filter((id) => !finished.has(id))
+    if (pending.length > 0) {
+      const waiters = pending.map((id) => acquireWaiter(id).promise)
+      /** @type {ReturnType<typeof setTimeout> | null} */
+      let timer = null
+      try {
+        await Promise.race([
+          Promise.all(waiters),
+          new Promise((resolve) => {
+            timer = setTimeout(resolve, effective)
+          }),
+        ])
+      } finally {
+        if (timer) clearTimeout(timer)
+        // 超时路径：只释放本次 wait 的引用；还有别的 wait 在等同一条任务时保留监听。
+        for (const id of pending) releaseWaiter(id)
+      }
+    }
+
+    const timedOut = ids.some((id) => !finished.has(id))
+    return { ok: true, timedOut, timeoutMs: effective, results: collect() }
+  }
+
+  /**
    * 取消的适配器内部实现：先 abort，再让宿主 dispose 这个 activation。
    *
    * 顺序是**先 dispose、后 cleanup**：只有拿到 `stopConfirmed:true`（dispose 成功，
@@ -1541,11 +1719,20 @@ export function createDshAdapter(ctx, options = {}) {
             }
           }),
         )
+        // 4) 等待者收尾：已写入终态的由 rememberFinished 唤醒；这里清掉剩余监听，
+        //    避免卸载后留下悬挂的 wait promise（没有任务会再来结算它们）。
+        for (const id of [...settleWaiters.keys()]) notifySettled(id)
+        settleWaiters.clear()
       }
     }, 'meetingstone: activation-cleanup')
   }
 
-  return { canStart, start, cancel, getTask }
+  /** 等待原语的自检快照（仅测试/诊断用，不进入工具返回）。 */
+  function waitStats() {
+    return { pendingWaiters: settleWaiters.size, registrations: waiterRegistrations }
+  }
+
+  return { canStart, start, cancel, getTask, waitForSettled, waitStats }
 }
 
 /**

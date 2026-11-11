@@ -57,7 +57,7 @@
  *   故 list_roles 的 `source` 标 'unknown'；若 registry 日后补来源标注再透传，不编造。
  */
 
-import { providerNameFor } from './adapter.js'
+import { DEFAULT_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS, providerNameFor } from './adapter.js'
 import { normalizeProjectKey } from '../dispatch/dispatcher.js'
 import {
   collectProtectedFields,
@@ -83,6 +83,7 @@ export const TOOL_NAMES = Object.freeze({
   LIST_ROLES: 'meetingstone_list_roles',
   DISPATCH: 'meetingstone_dispatch',
   GET_TASK: 'meetingstone_get_task',
+  WAIT: 'meetingstone_wait',
   LIST_RUNS: 'meetingstone_list_runs',
   CANCEL_TASK: 'meetingstone_cancel_task',
   GET_RUN_ARTIFACT: 'meetingstone_get_run_artifact',
@@ -351,7 +352,7 @@ function taskResultView(record, full) {
 }
 
 /**
- * 注册七个工具。
+ * 注册八个工具。
  *
  * @param {object} ctx 宿主 Context（需 `ctx.tools.register`）
  * @param {object} deps
@@ -755,6 +756,67 @@ export function registerTools(ctx, deps) {
           }
         }
         return taskResultView(withRecordPath(live, exec, id), full)
+      },
+    },
+    {
+      name: TOOL_NAMES.WAIT,
+      description:
+        '等待一组已派发任务全部到达终态后返回，用于收口（子任务派出去后一次性等结果）。' +
+        '不要高频调用、不要用它轮询：已完成的立即返回；仍在跑的只等宿主结算通知（不忙等）。' +
+        `默认最多等 ${DEFAULT_WAIT_TIMEOUT_MS}ms、上限 ${MAX_WAIT_TIMEOUT_MS}ms；超时未完成的任务返回 status:"running", timedOut:true，` +
+        '可稍后再次 wait 或用 meetingstone_get_task 查。' +
+        '任一 childId 未知 → 立即返回 UNKNOWN_CHILD（不阻塞）。只认本进程内存记录，DSH 重启前的任务视为未知。',
+      parameters: {
+        childIds: {
+          type: 'array',
+          items: { type: 'string' },
+          required: true,
+          description: '要等待的 taskRef.childId 列表（至少 1 个；重复项自动去重）',
+        },
+        timeoutMs: {
+          type: 'number',
+          default: DEFAULT_WAIT_TIMEOUT_MS,
+          description: `最长等待毫秒数（默认 ${DEFAULT_WAIT_TIMEOUT_MS}，上限 ${MAX_WAIT_TIMEOUT_MS}，超出按上限计）`,
+        },
+      },
+      output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
+      async execute(args) {
+        const raw = args?.childIds
+        if (!Array.isArray(raw) || raw.length === 0) {
+          return { ok: false, code: 'INVALID_CHILD_IDS', message: 'childIds 必须是非空字符串数组' }
+        }
+        /** @type {string[]} */
+        const childIds = []
+        for (const value of raw) {
+          if (typeof value !== 'string' || !value.trim()) {
+            return {
+              ok: false,
+              code: 'INVALID_CHILD_IDS',
+              message: 'childIds 必须是非空字符串数组',
+            }
+          }
+          const id = value.trim()
+          if (!childIds.includes(id)) childIds.push(id)
+        }
+        let timeoutMs = DEFAULT_WAIT_TIMEOUT_MS
+        if (args?.timeoutMs !== undefined && args?.timeoutMs !== null) {
+          if (
+            typeof args.timeoutMs !== 'number' ||
+            !Number.isFinite(args.timeoutMs) ||
+            args.timeoutMs <= 0
+          ) {
+            return {
+              ok: false,
+              code: 'INVALID_TIMEOUT',
+              message: 'timeoutMs 必须是正数（毫秒）',
+            }
+          }
+          timeoutMs = Math.min(Math.floor(args.timeoutMs), MAX_WAIT_TIMEOUT_MS)
+        }
+        if (typeof dispatcher.waitForSettled !== 'function') {
+          return { ok: false, code: 'WAIT_UNAVAILABLE', message: '当前派单器不支持等待任务终态' }
+        }
+        return dispatcher.waitForSettled(childIds, timeoutMs)
       },
     },
     {
