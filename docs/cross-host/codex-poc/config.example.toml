@@ -1,9 +1,10 @@
 # 仅示例；后续合并到可信测试项目 .codex/config.toml，替换绝对路径。
+# 角色文件复制到该项目 .codex/agents/；不写 ~/.codex。
 [agents]
 enabled = true
 max_concurrent_threads_per_session = 1
 [mcp_servers.meetingstone_poc]
 command = "node"
 args = ["D:/ABS/REPO/docs/cross-host/codex-poc/server.mjs"]
-enabled_tools = ["meetingstone_list_roles"]
+enabled_tools = ["meetingstone_list_roles", "meetingstone_get_task"]
 required = true
