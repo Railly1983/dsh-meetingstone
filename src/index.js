@@ -98,12 +98,26 @@ export function apply(ctx, config = {}) {
   /** @type {import('./roles/registry.js').RoleRegistry} */
   const globalRegistry = createRegistry({ globalRoles: cfg.roles ?? [] })
 
-  // GUI 只读数据（Host half）：与工具共用同一份 registry / channels，不另建数据源。
+  // 本机 CLI 探测：多源解析（PATH → Appx → npm 全局 → 常见目录）。
+  // 设置在 GUI 之前创建：设置页「CLI 连接」直接复用同一探测器与 5 分钟缓存。
+  const probe = createProbe({
+    resolvers: createDefaultResolvers({ run: runCommand }),
+    runner: runCommand,
+  })
+
+  // GUI 只读数据（Host half）：与工具共用同一份 registry / channels / cfg，不另建数据源。
   // 最近错误由注册表错误初始化，随后由项目配置加载、派单失败、落盘失败更新。
   const gui = createGuiState({
     ctx,
     registry: globalRegistry,
     channels: cfg.channels ?? [],
+    config: {
+      defaultRoleId: cfg.defaultRoleId,
+      dispatchNotes: cfg.dispatchNotes,
+      projectConfigFile: cfg.projectConfigFile,
+      limits: cfg.limits,
+    },
+    probe,
   })
 
   /**
@@ -121,12 +135,6 @@ export function apply(ctx, config = {}) {
     for (const error of projectErrors) gui.recordError(error, 'project-config')
     return { registry, projectErrors }
   }
-
-  // 本机 CLI 探测：多源解析（PATH → Appx → npm 全局 → 常见目录）
-  const probe = createProbe({
-    resolvers: createDefaultResolvers({ run: runCommand }),
-    runner: runCommand,
-  })
 
   // parent 由每次工具执行的 context.agent 传入（不再用全局 holder）
   // 通道实例表承载模型/强度：宿主的启动 spec 不接收这两个字段（DD7 方案 B）
@@ -328,7 +336,7 @@ export function apply(ctx, config = {}) {
     // GUI 只读 Remote：宿主注册 `meetingstone/list`（SRC marker），浏览器 half 用
     // ctx.remote.meetingstone.list() 取快照。宿主没有 Typert 协议时静默跳过，
     // 不影响工具与派单（设置页会显示“读取失败”，不会假装有数据）。
-    const guiRemote = registerGuiRemote(ctx, { snapshot: () => gui.snapshot() })
+    const guiRemote = registerGuiRemote(ctx, { snapshot: () => gui.fullSnapshot() })
     if (guiRemote.registered !== true) {
       const detail = `[${name}] GUI remote unavailable: ${guiRemote.reason}${
         guiRemote.error ? ` (${guiRemote.error})` : ''
