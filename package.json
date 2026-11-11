@@ -26,6 +26,7 @@
     "check:manifest": "node scripts/verify-manifest.mjs",
     "check:package": "node scripts/verify-package.mjs",
     "release:check": "node scripts/release-check.mjs",
+    "acceptance": "node scripts/acceptance-windows.mjs",
     "verify": "node scripts/run-tests.mjs && node scripts/verify-host-schema.mjs && node scripts/verify-manifest.mjs && node scripts/verify-package.mjs"
   },
   "dsh": {
