@@ -47,7 +47,10 @@ window.__ModuleLoader__.load({
     const NS = 'settings.meetingstone'
     const inject = ['slots', 'locale', 'remote']
 
-    /** 右侧栏 tab 的 id（header 点击时用它打开面板）。 */
+    /** 右侧栏 tab 的 kind（`sidebarRight.openTab(kind)` 用它打开）。 */
+    const TAB_KIND = 'meetingstone-roles'
+
+    /** 右侧栏 tab 的 id（keyed seat 的 key）。 */
     const TAB_ID = 'meetingstone-roles'
     /** 标题右侧入口（conversation.session.header.actions）的 id。 */
     const HEADER_ACTION_ID = 'meetingstone-role'
@@ -741,6 +744,16 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /** 打开右侧栏角色面板：官方入口是 ctx.sidebarRight.openTab(kind, { params })。 */
+    function openRolePanelOf(slotCtx) {
+      try {
+        const right = typeof slotCtx.get === 'function' ? slotCtx.get('sidebarRight') : undefined
+        right?.openTab?.(TAB_KIND, { params: {} })
+      } catch {
+        /* 宿主未提供 openTab 时静默 */
+      }
+    }
+
     /** Cordis 服务访问必须走 ctx.get（直接读属性会抛 without inject）。 */
     function sidebarRightTabsOf(slotCtx) {
       try {
@@ -809,7 +822,7 @@ window.__ModuleLoader__.load({
               // 区 2「管理角色」入口：打开右侧栏会话角色面板（复用既有 TAB_ID）。
               openRoles: () => {
                 try {
-                  sidebarRightTabsOf(slotCtx)?.open?.(TAB_ID)
+                  openRolePanelOf(slotCtx)
                 } catch {
                   /* 宿主未提供 open 时静默 */
                 }
@@ -1089,7 +1102,7 @@ window.__ModuleLoader__.load({
     function registerHeaderAction(slotCtx, service, t) {
       const openPanel = () => {
         try {
-          sidebarRightTabsOf(slotCtx)?.open?.(TAB_ID)
+          openRolePanelOf(slotCtx)
         } catch {
           /* 宿主未提供 open 时静默 */
         }
@@ -1130,7 +1143,7 @@ window.__ModuleLoader__.load({
         slotCtx.slots.register(
           {
             name: 'sidebar.right.pane.tab',
-            id: TAB_ID,
+            key: TAB_ID,
             locale: NS,
             inject: (/** @type {string} */ sessionId) => ({
               sessionId,
@@ -1145,7 +1158,7 @@ window.__ModuleLoader__.load({
         slotCtx.slots.register(
           {
             name: 'sidebar.right.pane.tab.title',
-            id: TAB_ID,
+            key: TAB_ID,
             locale: NS,
             inject: () => ({ t }),
           },

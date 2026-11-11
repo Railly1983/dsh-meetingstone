@@ -365,6 +365,12 @@ async function loadClientHarness(values = {}) {
         return () => {}
       },
     },
+    sidebarRight: {
+      openTab(kind, options) {
+        sidebarOpenCalls.push(kind, options)
+        return {}
+      },
+    },
     sidebarRightTabs: {
       register(options) {
         sidebarTabRegisters.push(options)
@@ -379,6 +385,7 @@ async function loadClientHarness(values = {}) {
     get(key) {
       if (key === 'remote.meetingstone') return remote.meetingstone
       if (key === 'sidebarRightTabs') return ctx.sidebarRightTabs
+      if (key === 'sidebarRight') return ctx.sidebarRight
       return undefined
     },
     remote,
@@ -576,7 +583,7 @@ test('Browser half：顶部集合石入口（conversation.session.header.actions
   assert.equal(element.type, 'button', '入口是图标按钮')
   assert.equal(typeof element.props.onClick, 'function')
   element.props.onClick()
-  assert.deepEqual(sidebarOpenCalls, [TAB_ID], '点击应打开右侧栏 tab')
+  assert.deepEqual(sidebarOpenCalls, ['meetingstone-roles', { params: {} }], '点击应打开右侧栏 tab（openTab(kind, {params})）')
 })
 
 test('Browser half：右侧栏两步式注册（sidebarRightTabs + 两个 keyed seat）', async () => {
@@ -596,8 +603,8 @@ test('Browser half：右侧栏两步式注册（sidebarRightTabs + 两个 keyed 
   const title = registrations.filter((r) => r.options.name === 'sidebar.right.pane.tab.title')
   assert.equal(pane.length, 1)
   assert.equal(title.length, 1)
-  assert.equal(pane[0].options.id, TAB_ID, 'seat 用 tab id 对齐到右侧栏')
-  assert.equal(title[0].options.id, TAB_ID)
+  assert.equal(pane[0].options.key, TAB_ID, 'seat 用 key（不是 id）对齐到右侧栏')
+  assert.equal(title[0].options.key, TAB_ID)
   assert.equal(pane[0].options.locale, 'settings.meetingstone')
   assert.equal(typeof pane[0].Component, 'function')
 })
