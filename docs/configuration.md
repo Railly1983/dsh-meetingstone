@@ -256,6 +256,57 @@
 
 返回 `content`（文本）、`bytes`（本次返回字节）、`resultBytes`（原始字节）、`truncated`、`range`、`recordPath`。
 
+### 7.5 进行中重复任务去重（P0-D）
+
+`meetingstone_dispatch` 只对**完全相同、且仍在进行中**（`queued` / `running`）的任务去重：
+命中时返回**既有**任务的 `taskRef`（原 `childId` / `jobId`）与当前状态，回执在 §7 成功回执
+基础上附 `deduplicated: true`、`status`、可选 `deduplicatedFrom`；**不**创建第二个子任务、不占
+新额度、不建新工作树。依据 `docs/reference/efficiency-v1.0.md` §3.5 / §5 表 8 / §8。
+
+#### 指纹组成（必须确认「完全相同」，绝不仅 hash Prompt）
+
+判定用 `src/dispatch/dispatcher.js` 的 `fingerprintParts` / `computeFingerprint`：对规范化对象做
+稳定序列化（键排序）后取 sha256。参与判定的信息：
+
+| 组成 | 字段 | 变化后 |
+| --- | --- | --- |
+| 项目 / 工作区身份 | realpath 归一化后的 `projectKey` | 不同项目不合并 |
+| 角色 ID 与 provider / CLI | `roleId`、`channel.kind/provider/channelId/model/reasoning`、`prompt/description/timeoutMs` | 执行能力不同不合并 |
+| 规范化任务内容 | `task.trim()`；有 TaskSpec 时用结构化字段（title/objective/scope/acceptance/evidence/contextRefs/outputBudget/permissionPreset），含 ContextPack | 目标或范围不同不合并 |
+| 版本指纹 | `git rev-parse HEAD`（worktree 隔离下等同 `baseSha`） | 代码变化后允许重新执行 |
+| 状态 | 固定状态桶 `in-progress`；索引只存进行中条目 | 终态即移出索引 |
+| 关键参数 | `isolation`、权限档位、输出预算、`continuesFrom` 重放 | 执行条件不同不合并 |
+
+命中时的回执示例：
+
+```json
+{
+  "ok": true,
+  "taskRef": { "childId": "child-1", "jobId": "job-1", "provider": "acp" },
+  "roleId": "role-sashi",
+  "roleName": "沙僧",
+  "isolation": "worktree",
+  "deduplicated": true,
+  "status": "running",
+  "deduplicatedFrom": "child-1"
+}
+```
+
+#### 误判边界（宁可重复也不误合）
+
+- **只对进行中任务去重**：任务终态（`onFinish` / `cancel` 确认停止 / 启动失败）即从内存索引
+  移除；**不复用已完成 / 失败 / 取消任务的旧结果**。完成后再次派相同任务会正常创建新任务。
+- **版本指纹取不到标 `unknown` 且不参与判定**：非 git 项目、无项目根、`git` 不在 PATH 或超时
+  时，该请求既不进索引也不命中索引，一律正常创建（不因无法确认版本而误合）。
+- **信息不足以证明完全相同**：任何参与字段缺失或无法确认时按「不相同」处理，创建新任务。
+- **索引仅内存**：`Map`，插件 / DSH 重启即失效；不建库、不落盘、不跨进程共享。
+- **并发安全**：相同请求同时到达时**先占位再启动**——占额度与写去重索引在同一同步块内完成，
+  第二个请求命中占位后等待首个任务拿到 `taskRef`（受控 pending promise），只创建一个任务。
+- **权限 / 模型 / 隔离档位差异都参与指纹**：本项目不提供逐任务权限档位，但 `isolation` 与
+  `channel` 配置不同一律不合并；去重不会擅自提升权限、切换模型或改隔离方式。
+- **不做**：不复用过期结果、不建任务队列 / 数据库 / 全量任务历史、不对「疑似相同」做模糊
+  合并（不做语义相似度、不调用额外 AI 判定）。
+
 ## 8. 宿主原生 Jobs（任务列表）
 
 本插件不自造任务列表 UI。派单成功后，如果宿主提供 `ctx.jobs`，适配器会注册一个原生 Job：

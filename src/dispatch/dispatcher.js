@@ -6,6 +6,8 @@
  * - 只做「角色 → 通道 → 一次委派」的路由、隔离与并发纪律
  * - 不建任务队列、不存会话、不做重试策略、不渲染 UI
  * - 工作树管理由注入的 `worktrees`（src/worktree.js）负责
+ * - 进行中重复任务去重（P0-D）：仅内存 Map 索引，终态即清理；不建库、不复用已完成结果
+ *   （不是任务队列 / 数据库，见 §P0-D 注释）
  *
  * 并发纪律（2026-11-11 用户决策后的并行版）：
  * - **先占槽、再启动**：本插件的全局额度在**首次异步操作前**预占，包括建工作树；
@@ -32,8 +34,10 @@
  * - docs/audit/08-sandbox.md（权限不能靠 Prompt，必须显式封装）
  */
 
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { promises as fs } from 'node:fs'
+import { sanitizedGitEnv } from '../worktree.js'
 
 /** 派单错误码。 */
 export const DISPATCH_ERRORS = Object.freeze({
@@ -87,6 +91,156 @@ export const DEFAULT_PROJECT_KEY = 'default'
 
 /** 隔离方式闭集。 */
 export const ISOLATION_MODES = Object.freeze(['none', 'worktree'])
+
+// ─── P0-D：进行中重复任务去重（指纹 / 版本） ──────────────────────────────────
+//
+// 依据 docs/reference/efficiency-v1.0.md §3.5 / §5 表 8 / §8：
+// - 只对「进行中」（reserved→started，即 queued/running）任务去重；完成的条目在
+//   release() 时从索引移除，绝不复用已完成任务结果。
+// - 绝不只 hash Prompt：指纹 = 项目身份 + 角色 ID/provider + 规范化任务内容 +
+//   版本指纹 + 状态桶 + 关键参数。
+// - 版本指纹取 `git rev-parse HEAD`（worktree 隔离下等同 baseSha）。取不到标
+//   `unknown`：此时无法证明完全相同，该请求既不进索引也不命中索引（宁可重复也不误合）。
+// - 索引仅内存（Map），重启失效；不建库、不落盘。
+
+/** 版本指纹取不到时的标记；它不是任何真实 SHA，且**不参与**去重判定。 */
+export const VERSION_UNKNOWN = 'unknown'
+
+/** 指纹结构版本：组成规则变更时改它，让旧指纹自然失效。 */
+export const FINGERPRINT_VERSION = 1
+
+/** `git rev-parse HEAD` 的超时（毫秒）：不能让一次派单被 git 卡死。 */
+export const DEFAULT_VERSION_TIMEOUT_MS = 2000
+
+/**
+ * 默认版本指纹：在项目根同步跑一次 `git rev-parse HEAD`。
+ *
+ * 为什么同步：去重判定必须与「占额度 / 建树 / 启动」之间保持原子；一旦这里异步，
+ * 两个并发相同请求可能都通过判定。execFileSync 只做一次轻量查询，带超时与输出上限。
+ * 失败（非 git 仓库 / 没有项目根 / git 不在 PATH / 超时）一律返回 VERSION_UNKNOWN，
+ * 交由上层走「信息不足 → 正常创建新任务」。
+ *
+ * @param {unknown} projectRoot
+ * @returns {string} 40 位小写 SHA 或 VERSION_UNKNOWN
+ */
+export function defaultVersionFingerprint(projectRoot) {
+  if (typeof projectRoot !== 'string' || !projectRoot.trim()) return VERSION_UNKNOWN
+  try {
+    const out = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: projectRoot,
+      env: sanitizedGitEnv(),
+      timeout: DEFAULT_VERSION_TIMEOUT_MS,
+      maxBuffer: 64 * 1024,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    const sha = typeof out === 'string' ? out.trim() : ''
+    return /^[0-9a-f]{40}$/i.test(sha) ? sha.toLowerCase() : VERSION_UNKNOWN
+  } catch {
+    return VERSION_UNKNOWN
+  }
+}
+
+/**
+ * 稳定序列化：对象键排序、数组保序、undefined/函数/符号统一当 null。
+ * 保证「字段插入顺序不同但内容相同」的两个请求得到同一指纹。
+ * @param {unknown} value
+ * @returns {string}
+ */
+export function stableStringify(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === 'function' ||
+    typeof value === 'symbol'
+  ) {
+    return 'null'
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return Number.isFinite(value) ? JSON.stringify(value) : 'null'
+  }
+  if (typeof value === 'string') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
+  if (typeof value === 'object') {
+    const keys = Object.keys(value)
+      .filter((key) => value[key] !== undefined)
+      .sort()
+    return `{${keys
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
+      .join(',')}}`
+  }
+  return 'null'
+}
+
+/** @param {unknown} value */
+function normalizePrompt(value) {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+/**
+ * 构造指纹的规范化组成（导出供单测核对「哪些字段参与判定」）。
+ * 返回 null 表示信息不足以证明完全相同（版本未知）→ 不参与去重。
+ *
+ * @param {{ req: any, role: any, projectKey: string,
+ *           isolation: 'none' | 'worktree', version: string }} input
+ * @returns {Record<string, unknown> | null}
+ */
+export function fingerprintParts({ req, role, projectKey, isolation, version }) {
+  if (!version || version === VERSION_UNKNOWN) return null
+  const channel =
+    role && typeof role === 'object' && role.channel && typeof role.channel === 'object'
+      ? role.channel
+      : {}
+  const taskSpec = req.taskSpec && typeof req.taskSpec === 'object' ? req.taskSpec : null
+  const contextPack = req.contextPack && typeof req.contextPack === 'object' ? req.contextPack : null
+  return {
+    v: FINGERPRINT_VERSION,
+    // 项目 / 工作区身份
+    project: projectKey,
+    // 角色 ID 与 provider / 关键执行参数（任一差异即视为不同任务）
+    role: {
+      roleId: String(role?.roleId ?? ''),
+      provider: channel.provider ?? null,
+      kind: channel.kind ?? null,
+      channelId: channel.channelId ?? null,
+      model: channel.model ?? null,
+      reasoning: channel.reasoning ?? null,
+      prompt: typeof role?.prompt === 'string' ? role.prompt : null,
+      description: typeof role?.description === 'string' ? role.description : null,
+      timeoutMs: role?.timeoutMs ?? null,
+    },
+    // 规范化任务内容：有 TaskSpec 时用结构化字段，绝不只是 hash Prompt
+    content: {
+      prompt: normalizePrompt(req.task),
+      ...(taskSpec ? { taskSpec } : {}),
+      ...(contextPack ? { contextPack } : {}),
+    },
+    // 版本指纹（当前 HEAD commit / baseSha）
+    version: String(version),
+    // 状态：只对进行中（queued/running）去重；完成的条目已从索引移除
+    status: 'in-progress',
+    // 关键参数：隔离 / 权限档位 / 输出预算 / 上下文重放
+    params: {
+      isolation,
+      ...(taskSpec?.permissionPreset != null ? { permissionPreset: taskSpec.permissionPreset } : {}),
+      ...(taskSpec?.outputBudget != null ? { outputBudget: taskSpec.outputBudget } : {}),
+      ...(req.continuation ? { continuation: true } : {}),
+    },
+  }
+}
+
+/**
+ * 计算任务指纹（sha256 hex）。版本未知时返回 null（不去重）。
+ * @param {{ req: any, role: any, projectKey: string,
+ *           isolation: 'none' | 'worktree', version: string }} input
+ * @returns {string | null}
+ */
+export function computeFingerprint(input) {
+  const parts = fingerprintParts(input)
+  if (parts === null) return null
+  return createHash('sha256').update(stableStringify(parts)).digest('hex')
+}
 
 /**
  * 从适配器错误里取出可透传的错误码；取不到就归为 ADAPTER_FAILED。
@@ -262,9 +416,10 @@ function positiveInteger(value, fallback) {
  *           limits?: { serializeWrites?: boolean, maxParallelWritesTotal?: number,
  *                      defaultIsolation?: 'none' | 'worktree' },
  *           worktrees?: { create: (input: { projectRoot: string, operationId: string }) => Promise<any> } | null,
- *           now?: () => number }} deps
+ *           now?: () => number,
+ *           versionFingerprint?: (projectRoot: unknown) => string }} deps
  */
-export function createDispatcher({ registry, adapter, limits = {}, worktrees = null, now = () => Date.now() }) {
+export function createDispatcher({ registry, adapter, limits = {}, worktrees = null, now = () => Date.now(), versionFingerprint = defaultVersionFingerprint }) {
   const serializeWrites = limits.serializeWrites !== false
   const maxParallelWritesTotal = positiveInteger(limits.maxParallelWritesTotal, 4)
   // 注意：这里缺省为 none（纯 dispatcher 单测/旧装配的兼容默认）；用户可见默认由
@@ -277,6 +432,61 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
   const active = new Map()
   /** @type {Map<object, object>} taskRef -> token */
   const refToToken = new Map()
+  /**
+   * 进行中任务去重索引（P0-D）：fingerprint -> reservation。仅内存，重启失效。
+   * 只存「进行中」条目：终态由 release() 删除，绝不复用已完成任务结果。
+   * @type {Map<string, { token: object, entry: any, fingerprint: string,
+   *   promise: Promise<any>, resolve: (v: any) => void, result: any, settled: boolean }>}
+   */
+  const inProgress = new Map()
+
+  /**
+   * 创建「已占位、等首个任务拿到 taskRef」的 reservation（受控 pending promise）。
+   * 并发相同请求命中它时 await promise，拿到首个 taskRef 后返回去重回执。
+   * @param {string} fp
+   * @param {object} token
+   * @param {any} entry
+   */
+  function makeReservation(fp, token, entry) {
+    /** @type {(v: any) => void} */
+    let resolve = () => {}
+    const promise = new Promise((r) => {
+      resolve = r
+    })
+    return { token, entry, fingerprint: fp, promise, resolve, result: null, settled: false }
+  }
+
+  /** 给等待者一个确定结果（成功或失败），只解析一次。 @param {any} reservation @param {any} result */
+  function settleReservation(reservation, result) {
+    if (!reservation || reservation.result !== null) return
+    reservation.result = result
+    reservation.resolve(result)
+  }
+
+  /** 从去重索引移除该 reservation（终态清理，幂等）。 @param {any} reservation */
+  function dropFromIndex(reservation) {
+    if (!reservation) return
+    reservation.settled = true
+    if (inProgress.get(reservation.fingerprint) === reservation) {
+      inProgress.delete(reservation.fingerprint)
+    }
+  }
+
+  /** 命中相同进行中任务的回执：原 taskRef / 当前状态 / deduplicated 标记。 */
+  function deduplicatedResult(reservation, first, fingerprint) {
+    const entry = reservation.entry
+    const ref = first.taskRef && typeof first.taskRef === 'object' ? first.taskRef : {}
+    return {
+      ok: true,
+      deduplicated: true,
+      taskRef: first.taskRef, // 原值：原 childId / jobId
+      role: entry.role,
+      isolation: entry.isolation,
+      status: entry.phase === 'started' ? 'running' : 'queued',
+      startedAt: entry.startedAt,
+      deduplicatedFrom: ref.childId ?? ref.id ?? ref.sessionId ?? ref.jobId ?? fingerprint,
+    }
+  }
 
   /**
    * @param {string} projectKey
@@ -344,9 +554,12 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
 
   /**
    * 释放一个槽位。按 token / taskRef / childId 都可以，重复调用幂等。
+   * `failureResult` 仅供「启动阶段失败」时给去重等待者一个确定结果，避免它们挂在
+   * pending promise 上；正常终态（onFinish / cancel）不传，reservation 已带成功结果。
    * @param {object | string | null | undefined} key
+   * @param {any} [failureResult]
    */
-  function release(key) {
+  function release(key, failureResult) {
     if (!key) return false
     // 允许传 taskRef
     let token = refToToken.get(key) ?? key
@@ -367,7 +580,31 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
     if (!entry) return false
     active.delete(token)
     if (entry.ref) refToToken.delete(entry.ref)
+    // P0-D：终态清理去重索引。完成的条目不再对相同请求去重（不复用旧结果）。
+    const reservation = entry.reservation
+    if (reservation) {
+      if (reservation.result === null) {
+        settleReservation(
+          reservation,
+          failureResult ?? fail(DISPATCH_ERRORS.ADAPTER_FAILED, '派发失败：任务未启动'),
+        )
+      }
+      dropFromIndex(reservation)
+    }
     return true
+  }
+
+  /**
+   * 失败并回滚：释放额度 + 清理去重索引 + 给等待者失败结果，再返回失败结果。
+   * @param {object} token
+   * @param {string} code
+   * @param {string} message
+   * @param {object} [extra]
+   */
+  function releaseOnFailure(token, code, message, extra) {
+    const result = fail(code, message, extra)
+    release(token, result)
+    return result
   }
 
   /**
@@ -449,6 +686,33 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       normalizeProjectKey(req.projectRoot) ??
       DEFAULT_PROJECT_KEY
     const isolation = req.isolation ?? defaultIsolation
+
+    // 3.5 P0-D 去重判定：**在占额度 / 建树 / 启动之前**。版本指纹同步取当前 HEAD；
+    //     取不到（unknown）→ 信息不足，不进索引也不命中索引，正常创建新任务（不误合）。
+    const version = versionFingerprint(
+      typeof req.projectRoot === 'string' && req.projectRoot
+        ? req.projectRoot
+        : typeof req.context?.projectRoot === 'string'
+          ? req.context.projectRoot
+          : null,
+    )
+    const fingerprint = computeFingerprint({ req, role, projectKey, isolation, version })
+
+    if (fingerprint !== null) {
+      // 命中相同「进行中」占位：等首个任务拿到 taskRef 后返回既有引用（受控 pending promise）。
+      // 有限重试覆盖「首个其实没启动成功 / 已完成（占位已被清理）」的边界：重新判定并创建。
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const existing = inProgress.get(fingerprint)
+        if (!existing) break
+        const first = await existing.promise
+        if (first?.ok === true && active.has(existing.token)) {
+          // 首个任务仍在进行中：不占额度、不建树、不创建第二个子任务。
+          return deduplicatedResult(existing, first, fingerprint)
+        }
+        // 首个失败或已结束：占位已由 release() 清理，再查一次；无占位就走创建。
+      }
+    }
+
     const blocked = admissionFailure(projectKey, isolation)
     if (blocked) return fail(blocked.code, blocked.message)
 
@@ -464,9 +728,18 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       operationId: null,
       worktree: null,
       phase: 'reserved',
+      fingerprint,
+      reservation: null,
     }
-    // 同步占槽：这一行之前没有任何 await，两个并发请求不可能同时通过额度检查。
+    // 同步占位：active（额度）与 inProgress（去重索引）之间没有任何 await，
+    // 两个并发相同请求不可能都通过判定（先占位再启动）。
     active.set(token, entry)
+    let reservation = null
+    if (fingerprint !== null) {
+      reservation = makeReservation(fingerprint, token, entry)
+      entry.reservation = reservation
+      inProgress.set(fingerprint, reservation)
+    }
     /** @type {() => void} */
     const onFinish = () => {
       release(token)
@@ -478,8 +751,8 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
     let taskCwd = req.cwd
     if (isolation === 'worktree') {
       if (!worktrees || typeof worktrees.create !== 'function') {
-        release(token)
-        return fail(
+        return releaseOnFailure(
+          token,
           DISPATCH_ERRORS.WORKTREE_UNAVAILABLE,
           '请求了工作树隔离，但工作树服务不可用；拒绝派单（不会退回主工作区）',
         )
@@ -491,8 +764,8 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
             ? req.context.projectRoot
             : null
       if (!projectRoot) {
-        release(token)
-        return fail(
+        return releaseOnFailure(
+          token,
           DISPATCH_ERRORS.PROJECT_ROOT_UNKNOWN,
           '请求了工作树隔离，但无法确定项目根；拒绝派单（不会退回主工作区）',
         )
@@ -503,21 +776,20 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       try {
         worktree = await worktrees.create({ projectRoot, operationId })
       } catch (err) {
-        release(token)
         const rawCode = /** @type {any} */ (err)?.code
         const code =
           typeof rawCode === 'string' && rawCode.startsWith(WORKTREE_CODE_PREFIX)
             ? rawCode
             : DISPATCH_ERRORS.WORKTREE_GIT_FAILED
-        return fail(code, `创建工作树失败：${errorMessage(err)}`, {
+        return releaseOnFailure(token, code, `创建工作树失败：${errorMessage(err)}`, {
           operationId,
           // path/branch/phase/residualPath 全部透传：三阶段异常都靠它们定位（F5）
           ...errorContext(err),
         })
       }
       if (!worktree || typeof worktree.path !== 'string' || !worktree.path) {
-        release(token)
-        return fail(
+        return releaseOnFailure(
+          token,
           DISPATCH_ERRORS.WORKTREE_GIT_FAILED,
           '创建工作树失败：工作树服务没有返回有效 path',
           { operationId },
@@ -563,21 +835,32 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       // 适配器明确要求保留槽位（例如卸载后迟到 activation 的 dispose 未确认）时不得释放：
       // 停止状态未确认，释放槽位会让仍可能存活的进程绕过并发纪律（F1）。
       const slotPreserved = /** @type {any} */ (err)?.slotPreserved === true
-      if (!slotPreserved) release(token)
       const raw = err instanceof Error ? err.message : String(err)
-      return fail(adapterErrorCode(raw, err), `派发失败：${raw}`, {
+      const result = fail(adapterErrorCode(raw, err), `派发失败：${raw}`, {
         ...(operationId ? { operationId } : {}),
         ...(worktree ? { worktree } : {}),
         ...errorContext(err, worktree),
       })
+      if (slotPreserved) {
+        // 槽位保留：仍解析占位并清理去重索引，避免相同请求一直挂在 pending promise 上。
+        settleReservation(reservation, result)
+        dropFromIndex(reservation)
+      } else {
+        release(token, result)
+      }
+      return result
     }
     if (!started || !started.taskRef) {
-      release(token)
-      return fail(DISPATCH_ERRORS.ADAPTER_FAILED, '派发失败：适配器没有返回任务引用', {
-        ...(operationId ? { operationId } : {}),
-        ...(worktree ? { worktree } : {}),
-        ...errorContext(null, worktree),
-      })
+      return releaseOnFailure(
+        token,
+        DISPATCH_ERRORS.ADAPTER_FAILED,
+        '派发失败：适配器没有返回任务引用',
+        {
+          ...(operationId ? { operationId } : {}),
+          ...(worktree ? { worktree } : {}),
+          ...errorContext(null, worktree),
+        },
+      )
     }
 
     const current = active.get(token)
@@ -587,7 +870,7 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
     }
     refToToken.set(started.taskRef, token)
 
-    return {
+    const success = {
       ok: true,
       taskRef: started.taskRef,
       role,
@@ -596,6 +879,9 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       ...(operationId ? { operationId } : {}),
       ...(worktree ? { worktree } : {}),
     }
+    // 首个任务已拿到 taskRef：解析占位 promise，后续相同请求即可命中去重。
+    settleReservation(reservation, success)
+    return success
   }
 
   /**
@@ -643,6 +929,8 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
     release,
     cancel,
     getTask,
+    // P0-D：进行中索引规模（仅用于测试/诊断，不暴露索引内容）。
+    dedupIndexSize: () => inProgress.size,
     stats: (projectKey) => {
       if (typeof projectKey === 'string') {
         const key = normalizeProjectKey(projectKey) ?? DEFAULT_PROJECT_KEY
