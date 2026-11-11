@@ -62,6 +62,9 @@
 - **工作树隔离（手动流程）**：`docs/worktree-isolation.md` + `examples/worktree-dispatch.jsonc`，说明用宿主
   `create_worktree` 建隔离工作树、派单 `cwd` 指向它、人工 merge / cherry-pick / patch 合并与
   `git worktree remove` / `prune` 清理。
+- **协作效率规范文档**：新增 `docs/efficiency.md`，落地派单简报 / 输出 / 收口 / 失败标注
+  四条协作约定（纯提示词 / 文档，0 代码、不进配置、不做门禁）；明确不做重复任务去重、
+  角色自动路由、冷却 / 自动换模型。中文 README 加链接，`docs/architecture.md` 补「协作效率机制」小节
 
 ### Changed
 - **并发模型改为「宿主 8 共享 + 插件全局 4」**（2026-11-11 用户决策）：宿主池满直接抛
