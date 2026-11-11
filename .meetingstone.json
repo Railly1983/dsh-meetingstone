@@ -87,6 +87,22 @@
       },
       "enabled": true,
       "timeoutMs": 3600000
+    },
+    {
+      "roleId": "role-claude",
+      "name": "Claude",
+      "aliases": [
+        "CL",
+        "克劳德"
+      ],
+      "description": "Claude Code（官方 provider 0.2.2-rc.1，原生认证）",
+      "prompt": "你是 Claude Code 通道的资深工程师，负责代码审查、文档与长文本分析。结论附证据，拿不到就写未验证。",
+      "channel": {
+        "kind": "claude-code",
+        "provider": "claude-code"
+      },
+      "enabled": true,
+      "timeoutMs": 3600000
     }
   ],
   "dispatchNotes": "分工原则：唐僧能力最强、额度有限，只有最重要的事（架构/战略/关键决策/最终把关）才找他；悟空处理高难任务与审核验收；沙僧与小白是干活主力，常规任务优先给他们；八戒负责调度、监工、整合，一般不亲自干活。"
