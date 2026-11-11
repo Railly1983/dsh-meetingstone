@@ -52,6 +52,12 @@
 任务该收口时，一次性 `list_runs` / `get_task` 把这一批的终态取齐，然后**批量汇报**一次。
 "等"交给宿主和任务本身，主导者不靠反复查询来推进。
 
+优先用 `meetingstone_wait` **一次等齐**：`childIds` 传本批全部任务，`timeoutMs` 给一个上限
+（默认 300000、最大 600000），一次调用等到全部完成或超时。超时的任务回 `status:'running'` +
+`timedOut:true`，未知 `childId` 回 `UNKNOWN_CHILD` 并立即返回；已完成的立即返回，未完成的只等
+宿主结算通知，不忙等。**不要在高频循环里反复 wait 或拿它当轮询**，字段见
+[配置参考](configuration.md) §7，错误码见 §5。
+
 ## 4. 失败：先分类，再决定
 
 失败不是"再试一次"就完了。插件会把失败归入下表的**白名单**，落盘 `failureClass` 并给出一句
@@ -135,6 +141,20 @@ node scripts/token-ledger.mjs --dir <path>  # 指定 runs 目录（默认自动�
 
 首份基线（样本、数字、局限）见
 [`docs/plan/2026-11-11-ledger-baseline.md`](plan/2026-11-11-ledger-baseline.md)。
+
+## 6. Token 数字的可信边界
+
+Subagents 面板显示的 `tok` 是 `uncachedInput + output + cacheRead + cacheWrite` 四桶之和，
+按**整条持久日志累计**；fork 会话包含父会话历史（`154M tok / 4 秒` 即此：token 继承父前缀，
+耗时只算子会话自身）。**不可用于成本、额度或子 Agent 归属核算**。
+
+- 为什么：cache 命中与未命中按 1:1 相加、跨调用重复累计、四桶未乘单价；fork 会把父会话的
+  同一批 token 在父子面板各显示一次。
+- 可用于：展示“累计处理量 / 吞吐”，但必须标注“累计、含 cache 重读”。
+- 替代口径：账本字节（§5 的 `resultBytes`，字节不是 token）、`ownEvents` 截断后的 usage、
+  四桶分价、Provider 账单。
+
+完整推导、三例对账与未验证项见 [`docs/audit/token-stats.md`](audit/token-stats.md)。
 
 ## 不在本规范范围（明确不做）
 

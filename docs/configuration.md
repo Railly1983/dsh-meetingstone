@@ -308,6 +308,8 @@ routingRules:
 
 会话上下文是有限预算，以下默认值按审计结论收紧；需要完整内容时必须显式索取。
 
+> **Token 口径**：Subagents 面板的 `tok` = `uncachedInput + output + cacheRead + cacheWrite`，按整条持久日志累计；fork 会话包含父会话历史（`154M / 4 秒` 即此），耗时只算子会话自身。**不可用于成本、额度或子 Agent 归属核算**；替代口径（账本字节、`ownEvents` 截断、四桶分价、Provider 账单）见 [`docs/audit/token-stats.md`](audit/token-stats.md)。
+
 | 工具 | 默认返回 | 完整/详细模式 |
 | --- | --- | --- |
 | `meetingstone_get_task` | `status` / `stopReason` / `resultBytes` / `jobId` / `recordPath`；有结构化 `summary` 时只回 summary/resultStatus/openIssues/handoff（`resultOmitted:true`），否则回结果首 1KiB + 末 512B | `full:true` 返回完整 `result`；`output` 与 `result` 相同时只回一份（字段名统一为 `result`） |
@@ -472,6 +474,9 @@ routingRules:
 - 任务终态（完成/失败/取消/插件卸载）会 resolve Job 的 `done`；`meetingstone_cancel_task` 优先走
   `ctx.jobs.kill()` → Job 的 `cancel`，再回落到适配器原路径，保证面板与工具停止的是同一个任务。
 - 插件本身**不拥有** Jobs 面板；面板由宿主 `@deepseek-ai/dsh-tool-jobs` 提供。
+- **三个原生面板各管一摊**：Todo = 项目级工作包与里程碑，Background Tasks = 本插件派的宿主 Job，
+  Subagents = Agent 执行会话；**派单不建 Todo**。职责边界、命名规则与宿主 API 证据见
+  [`docs/gui-0.2.0.md`](gui-0.2.0.md) §6，本文件不重复。
 
 ## 9. 示例
 
