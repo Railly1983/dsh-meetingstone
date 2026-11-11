@@ -88,15 +88,33 @@ window.__ModuleLoader__.load({
           invocation: { kind: 'direct' },
           result: { mode: 'src-json' },
         },
-        ...['getSessionConfig', 'setSessionOverride', 'clearSessionOverride'].map((method) => ({
-          id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/${method}`,
+        {
+          id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/getSessionConfig`,
           service: REMOTE_SERVICE,
           namespace: REMOTE_SERVICE,
-          method,
-          parameters: [],
+          method: 'getSessionConfig',
+          parameters: [{ name: 'sessionId', wire: 'sessionId', source: 'json', codec: { mode: 'src-json' } }],
           invocation: { kind: 'direct' },
           result: { mode: 'src-json' },
-        })),
+        },
+        {
+          id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/setSessionOverride`,
+          service: REMOTE_SERVICE,
+          namespace: REMOTE_SERVICE,
+          method: 'setSessionOverride',
+          parameters: [{ name: 'sessionId', wire: 'sessionId', source: 'json', codec: { mode: 'src-json' } }, { name: 'roleId', wire: 'roleId', source: 'json', codec: { mode: 'src-json' } }, { name: 'field', wire: 'field', source: 'json', codec: { mode: 'src-json' } }, { name: 'value', wire: 'value', source: 'json', codec: { mode: 'src-json' } }],
+          invocation: { kind: 'direct' },
+          result: { mode: 'src-json' },
+        },
+        {
+          id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/clearSessionOverride`,
+          service: REMOTE_SERVICE,
+          namespace: REMOTE_SERVICE,
+          method: 'clearSessionOverride',
+          parameters: [{ name: 'sessionId', wire: 'sessionId', source: 'json', codec: { mode: 'src-json' } }, { name: 'roleId', wire: 'roleId', source: 'json', codec: { mode: 'src-json' } }, { name: 'field', wire: 'field', source: 'json', codec: { mode: 'src-json' } }],
+          invocation: { kind: 'direct' },
+          result: { mode: 'src-json' },
+        },
       ],
     }
 
