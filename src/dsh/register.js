@@ -526,7 +526,7 @@ export function registerTools(ctx, deps) {
     {
       name: TOOL_NAMES.DISPATCH,
       description:
-        '按角色把一次任务派发给宿主 provider。默认每个任务在独立 git 工作树里执行（默认并行上限 2/项目、4/全局）；' +
+        '按角色把一次任务派发给宿主 provider。默认每个任务在独立 git 工作树里执行（默认全局并行上限 4，不按项目限额）；' +
         'isolation=none 时退回主工作区串行。工作树只隔离文件布局，不是权限沙箱。' +
         '可以只传 role+task（旧用法），也可以带 title/objective/scope/acceptance/contextPack 等结构化简报；' +
         '使用任一结构化字段时 title 必填，声明 scope 时必须给 acceptance。简单查询不需要 scope/evidence。' +

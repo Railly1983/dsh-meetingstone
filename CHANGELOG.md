@@ -62,7 +62,7 @@
 - 项目级配置 `.meetingstone.json`：mtime 缓存、坏文件降级、与全局配置合并
 - 本机 CLI 探测：多源解析（PATH → Appx → npm 全局 → 常见目录），带版本试跑与缓存
 - 派单编排：同项目任务串行（`serializeWrites`）、工作树隔离、失败回滚、`onFinish` 幂等释放
-- DSH 接线层：`ctx.subagents` 适配器 + 六个工具（`meetingstone_list_roles` / `_dispatch` / `_list_runs` / `_get_task` / `_cancel_task` / `_cli_status`）
+- DSH 接线层：`ctx.subagents` 适配器 + 八个工具（`meetingstone_list_roles` / `_dispatch` / `_list_runs` / `_get_task` / `_cancel_task` / `_cli_status`）
 - 通道实例表 `channels`：模型/强度由 provider 行承载，角色声明必须一致（DD7 方案 B）
 - 发布门禁 `npm run verify`：全量测试 + 宿主/模型 API 契约校验
 - **工作树隔离（手动流程）**：`docs/worktree-isolation.md` + `examples/worktree-dispatch.jsonc`，说明用宿主
@@ -82,7 +82,7 @@
   把 `stopConfirmed` 回填为 `true`、`diagnostic` 追加 `late settlement`，`status` 保持
   `cancelled` 不被覆盖，这时才释放槽位
 - `limits` 新增 `defaultIsolation`（默认 `worktree`）；`serializeWrites` 仅在 `isolation:none` 时生效
-- 当前开发线：6 个工具；`node scripts/run-tests.mjs` 214 项全绿；`node scripts/verify-host-schema.mjs` PASS
+- 当前开发线：8 个工具；`node scripts/run-tests.mjs` 214 项全绿；`node scripts/verify-host-schema.mjs` PASS
 - `docs/configuration.md` / `docs/security.md` / `examples/worktree-dispatch.jsonc` 同步并行隔离与失败关闭语义
 - 文档校准：`permissionPreset` / `readOnly` / `READONLY_*` / `maxParallelReadonly` 等只读旧表述统一标注
   「已移除 / 不做（已移除）」；审计文档保留历史并加"已移除"声明；`docs/audit/15` 能力对照补

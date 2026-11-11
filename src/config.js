@@ -95,7 +95,7 @@ export const Config = compile(
     channels: S.array(ChannelInstanceSchema)
       .default([])
       .description('通道实例表：一行 = 一个已配置的 provider（模型/强度写在这里）'),
-    defaultRoleId: S.string().description('未指定角色时的默认角色'),
+    defaultRoleId: S.string().description('仅 autoRoute 实验路由的兜底角色；未指定 role 且未开 autoRoute 时会明确报错'),
     routingRules: S.array(RoutingRuleSchema)
       .default([])
       .description('自动路由规则表（空 = 用内置规则；仅 autoRoute:true 且未显式指定 role 时生效）'),

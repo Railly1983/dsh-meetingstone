@@ -6,9 +6,9 @@ DeepSeek Harness 多 CLI 智能体角色管理与派单插件。
 
 ---
 
-> **状态（2026-11-10）**：阶段 1（骨架）与阶段 2（角色映射 + 派单核心）已完成；插件已在本机 `desktop` profile 加载，六个工具在真实会话中可用。
+> **状态（2026-11-10）**：阶段 1（骨架）与阶段 2（角色映射 + 派单核心）已完成；插件已在本机 `desktop` profile 加载，八个工具在真实会话中可用。
 > 外部 CLI 派单需额外安装官方 provider bundle（见 [安装文档](docs/installation.md)）。
-> 第一版**无 UI**，配置改 profile 的 `cordis.patch.yml`，重启生效。
+> V1 有只读 GUI（设置页 / 对话顶部入口 / 右侧栏）；底层配置仍以 profile 的 `cordis.patch.yml` 与项目 `.meetingstone.json` 为准。
 
 ## 它要解决什么
 

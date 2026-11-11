@@ -20,7 +20,7 @@ src/index.js            装配层：读 Config → 建注册表/探测/适配器
 │   └── dispatcher.js   角色解析、并发纪律、失败回滚
 └── src/dsh/            DSH 接线层
     ├── adapter.js      ctx.subagents 适配器（provider 查询、startActivation、parent）
-    └── register.js     六个工具的注册与返回值整形
+    └── register.js     八个工具的注册与返回值整形
 ```
 
 ## 2. 一次派单的数据流
@@ -34,7 +34,7 @@ src/index.js            装配层：读 Config → 建注册表/探测/适配器
   → dispatcher.dispatch({...})
       1. 解析角色（歧义只挡名称/别名，roleId 仍可用）
       2. adapter.canStart → ctx.subagents.getProvider(name) 真实查询
-      3. **先占并发槽**（同项目派单默认串行），失败回滚
+      3. **先占并发槽**（全局上限 4，不按项目限额），失败回滚
       4. adapter.start({ role, task, cwd, context, onFinish })
   → adapter.start 前置校验（任一不满足即拒，不触达宿主）
       - parent 必须来自当次 exec.agent
