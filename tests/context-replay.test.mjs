@@ -8,6 +8,7 @@ import {
   resolveContinuation,
   REPLAY_MAX_BYTES,
 } from '../src/context-replay.js'
+import { truncateUtf8 } from '../src/run-store.js'
 import { registerTools } from '../src/dsh/register.js'
 
 function completedRun(overrides = {}) {
@@ -61,6 +62,59 @@ test('重放块：超长输出按 16 KiB 截断且保留尾部', () => {
   assert.ok(out.text.includes('头'))
   assert.ok(out.text.endsWith('尾\n[END PREVIOUS TASK OUTPUT]'))
   assert.ok(Number.isInteger(out.bytes) && out.bytes > 0, '必须记录实际注入的字节数')
+})
+
+test('重放块：超长旧输出中间的验收/权限段与结构化保护字段不被截断', () => {
+  const acceptance = ['取消后父子进程都必须退出']
+  const middle = ['验收标准：', '- 取消后父子进程都必须退出', '权限限制：只读，不得写盘'].join('\n')
+  const output = `${'头'.repeat(12000)}\n\n${middle}\n\n${'尾'.repeat(12000)}`
+  const run = {
+    childId: 'prev-protected',
+    status: 'failed',
+    stopReason: 'error',
+    output,
+    acceptance,
+    scope: { include: ['src/dsh'], exclude: ['docs/'] },
+    permissions: 'read-only',
+    safetyPolicy: '不得修改宿主 profile',
+    contextPack: { doNotRepeat: ['不要重跑全量测试'] },
+  }
+  const out = formatContinuation(run)
+  assert.equal(out.truncated, true)
+  assert.equal(out.protected, true)
+
+  // 变异证据：纯首尾截断会丢掉中间段；删掉保护逻辑时下面断言必须失败。
+  const headTail = truncateUtf8(output, REPLAY_MAX_BYTES, {
+    headBytes: Math.floor(REPLAY_MAX_BYTES * 0.75),
+  })
+  assert.equal(headTail.text.includes('验收标准'), false, '纯截断本来会丢中间验收段')
+  assert.ok(out.text.includes('验收标准'))
+  assert.ok(out.text.includes('- 取消后父子进程都必须退出'))
+  assert.ok(out.text.includes('权限限制：只读，不得写盘'))
+
+  // 结构化保护字段必须原样出现（acceptance/scope/permissions/safetyPolicy/doNotRepeat）
+  assert.ok(out.text.includes('acceptance:'))
+  assert.ok(out.text.includes('- 取消后父子进程都必须退出'))
+  assert.ok(out.text.includes('scope.include:'))
+  assert.ok(out.text.includes('- src/dsh'))
+  assert.ok(out.text.includes('permissions: read-only'))
+  assert.ok(out.text.includes('safetyPolicy: 不得修改宿主 profile'))
+  assert.ok(out.text.includes('doNotRepeat:'))
+  assert.ok(out.text.includes('- 不要重跑全量测试'))
+
+  // 变异证据：去掉保护字段后重放块不得凭空包含它（证明上面的断言依赖保护逻辑）
+  const stripped = formatContinuation({
+    childId: 'prev-stripped',
+    status: 'completed',
+    output: '短输出',
+    acceptance: undefined,
+    scope: undefined,
+    permissions: undefined,
+    safetyPolicy: undefined,
+    contextPack: undefined,
+  })
+  assert.equal(stripped.text.includes('acceptance:'), false)
+  assert.equal(stripped.protected, false)
 })
 
 test('拼接顺序固定：人设 → 重放块 → 本次任务（任务在最后）', () => {

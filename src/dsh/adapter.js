@@ -460,13 +460,17 @@ function truncateDetail(value, max = 200) {
 }
 
 /**
- * 适配器终态 → Job done 状态。Job 只接受 completed/failed/cancelled 三态：
+ * 适配器终态 → Job done 状态。
+ *
+ * **宿主原生 Job 的状态闭集是 completed / failed / killed**（本机 `isTerminal` 与面板
+ * statusLabel 只认这三个），`cancelled` 会让宿主得到 `unhandled job status: "cancelled"`、
+ * terminal=false。插件自己的 run 记录仍写 `cancelled` / `interrupted`，两者不能混用：
  * - 完成：completed（stopReason 非 completed 时如实写进 detail，例如 refusal）
  * - 失败：failed（detail 用诊断/错误码）
- * - 取消/插件卸载：cancelled
+ * - 取消/插件卸载：killed（detail 仍如实写 cancelled / stop unconfirmed / plugin-disposed）
  *
  * @param {any} settled
- * @returns {{ status: 'completed' | 'failed' | 'cancelled', detail?: string }}
+ * @returns {{ status: 'completed' | 'failed' | 'killed', detail?: string }}
  */
 function jobOutcomeFor(settled) {
   const status = String(settled?.status ?? '')
@@ -479,10 +483,10 @@ function jobOutcomeFor(settled) {
   }
   if (status === 'cancelled' || status === 'interrupted') {
     const base = truncateDetail(settled?.stopReason) || 'cancelled'
-    // dispose 未确认时进程可能仍在跑：不要用干净的 cancelled 掩盖这一点。
+    // dispose 未确认时进程可能仍在跑：不要用干净的 killed 掩盖这一点。
     const detail =
       settled?.stopConfirmed === false ? `${base} (stop unconfirmed)` : base
-    return { status: 'cancelled', detail }
+    return { status: 'killed', detail }
   }
   const stopReason =
     typeof settled?.stopReason === 'string' && settled.stopReason
@@ -604,6 +608,12 @@ export function createDshAdapter(ctx, options = {}) {
     }
   }
 
+  /**
+   * jobs 服务缺失的 warning 每个适配器实例只发一次：派单是高频路径，
+   * 每次派单都刷同一行会淹没日志。缺 Job 不影响任务本身，但必须让调用方知道
+   * 「面板里没有这个任务」不是 bug 静默。
+   */
+  let jobsUnavailableWarned = false
   /** 取原生 jobs 服务；只认有 `start` 的实现，拿不到返回 null。 */
   function jobsService() {
     const injected = options.jobs
@@ -674,7 +684,13 @@ export function createDshAdapter(ctx, options = {}) {
    */
   function createDispatchJob({ childId, role, provider, task, parent, where, cancel }) {
     const jobs = jobsService()
-    if (!jobs) return null
+    if (!jobs) {
+      if (!jobsUnavailableWarned) {
+        jobsUnavailableWarned = true
+        warn('[meetingstone] jobs unavailable, task continues without native Job')
+      }
+      return null
+    }
     const owner = jobOwnerId(parent)
     if (!owner) {
       warn('[meetingstone] jobs: 无法从 parent 取得 SessionId，跳过创建原生 Job（派单继续）')
