@@ -757,3 +757,28 @@ test('安全回归：canStart 对实例与声明不一致给出可诊断原因',
   assert.equal(res.ok, false)
   assert.match(res.reason, /CHANNEL_MISMATCH/)
 })
+
+test('refusal+空输出：补 429/限流 诊断提示（不伪造成功）', async () => {
+  const subagents = fakeSubagents({ providers: { acp: {} } })
+  subagents.startActivation = async () => ({
+    childId: 'child-refusal',
+    name: 'child-refusal',
+    result: Promise.resolve({ stopReason: 'refusal', output: [] }),
+    dispose: async () => {},
+  })
+  const finished = []
+  const adapter = createDshAdapter(
+    { subagents, effect: null },
+    { channels: [], onRunFinish: (r) => finished.push(r) },
+  )
+  await adapter.start({
+    role: role({ channel: { kind: 'acp-cli' } }),
+    task: 'x',
+    timeoutMs: 0,
+    context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
+  })
+  await new Promise((r) => setTimeout(r, 30))
+  assert.equal(finished.length, 1)
+  assert.equal(finished[0].stopReason, 'refusal')
+  assert.match(finished[0].diagnostic, /429|限流|频率/, '必须提示可能是限流，而不是空结果')
+})

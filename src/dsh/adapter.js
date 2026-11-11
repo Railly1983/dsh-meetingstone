@@ -846,13 +846,22 @@ export function createDshAdapter(ctx, options = {}) {
           return
         }
         if (!claimSettlement(current)) return
+        const settledOutput = resultText(value)
+        const settledDiagnostic =
+          value?.diagnostic !== undefined
+            ? String(value.diagnostic)
+            : // 真机教训：CodeBuddy 触发 429 时 ACP 只回 stopReason=refusal + 空输出，
+              // 不附任何原因；不补提示就会看起来像"莫名拒绝"（沙僧那次就是这样）。
+              value?.stopReason === 'refusal' && !settledOutput
+              ? 'ACP refusal without output：可能是额度/频率限制（429）或模型拒绝；请检查 provider 日志或切换模型'
+              : undefined
         const settled = {
           status: 'completed',
           stopReason: value?.stopReason ?? 'completed',
           // 子 Agent 已正常结束；宿主返回了终态，视为进程已确认停止
           stopConfirmed: true,
-          output: resultText(value),
-          ...(value?.diagnostic ? { diagnostic: String(value.diagnostic) } : {}),
+          output: settledOutput,
+          ...(settledDiagnostic !== undefined ? { diagnostic: settledDiagnostic } : {}),
           at: now(),
         }
         rememberFinished(childId, settled)
