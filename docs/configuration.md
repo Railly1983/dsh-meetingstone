@@ -1,7 +1,8 @@
 # 配置参考
 
-> 第一版没有 UI：配置写在 profile 的 `cordis.patch.yml`（全局）与项目根的 `.meetingstone.json`（项目级）。
-> 改完**重启 DSH** 生效（全局配置在插件加载时读取；项目配置按调用读取，改完下一次工具调用即生效）。
+> 第一版没有 UI：配置写在 profile 的 `cordis.patch.yml`（全局）、项目根的
+> `.meetingstone.json`（项目级）与 `.meetingstone/sessions/<sessionId>.json`（会话级）。
+> 改完**重启 DSH** 生效（全局配置在插件加载时读取；项目/会话配置按调用读取，改完下一次工具调用即生效）。
 
 ## 1. 全局配置（profile 的 `cordis.patch.yml`）
 
@@ -98,6 +99,75 @@
 
 > 项目级配置**不提供 `limits`**：同项目串行开关 `serializeWrites` 只在插件全局配置（§1）里生效，项目文件里写 `limits` 会按未知字段忽略，不报错、不阻断派单。
 > `permissionPreset` 已随只读通道移除；旧配置里写了也会被忽略，不报错、不阻断派单。
+
+### 4.1 三层继承（global → project → session）
+
+生效配置按 **全局 → 项目 → 会话** 合并，后者覆盖前者；只影响各自的作用域：
+
+| 层 | 位置 | 作用域 |
+| --- | --- | --- |
+| global | profile `cordis.patch.yml` 的 `meetingstone` 行 | 所有项目/会话 |
+| project | `<项目根>/.meetingstone.json` | 当前项目 |
+| session | `<项目根>/.meetingstone/sessions/<sessionId>.json` | **仅当前对话**（`exec.agent.session.id`） |
+
+合并规则（`src/session/config.js` 的 `resolveEffectiveConfig`）：
+
+1. 同 `roleId` 按字段覆盖；`channel` 也是字段级合并（只写 `model` 不会把 `kind` / `provider` 抹掉）。
+2. `aliases` 是**整体替换**，不是追加；`alias` 是单值/数组的简写。
+3. **只保存差异**：会话值与继承值相同 → 该键不落盘；把一个字段改回继承值 → 删除旧覆盖（恢复继承）。
+4. 未知字段**拒绝并报错**（顶层、角色、`channel` 三层都按白名单校验），不会静默生效。
+5. 会话层只改配置，不改变项目隔离：不同 `sessionId` 用不同文件，互不影响。
+6. `resolveEffectiveConfig({ global, project, session })` 返回 `{ effective, sources, errors }`；
+   `sources.roles[roleId]` 给出 `layer` 与逐字段来源（`global` / `project` / `session` / `default`），
+   `sources.defaultRoleId` / `sources.dispatchNotes` / `sources.projectRules` 同样标注，供 UI 显示"继承/覆盖"。
+7. 别名冲突不在这里判定：调用方在**最终生效角色表**上建注册表
+   （`createRegistry({ globalRoles: effective.roles })`），冲突由注册表的 `errors` 统一报告。
+
+会话覆盖文件示例（`.meetingstone/sessions/<sessionId>.json`，`.meetingstone/` 已在 `.gitignore`）：
+
+```json
+{
+  "version": 1,
+  "roleOverrides": {
+    "role-sashi": {
+      "alias": ["SSS"],
+      "description": "本对话里负责实现",
+      "prompt": "本对话的额外规则",
+      "channel": { "cli": "acp", "model": "m-2", "reasoning": "high" }
+    }
+  },
+  "roles": [{ "roleId": "role-temp", "name": "临时", "channel": { "kind": "in-process" } }],
+  "defaultRoleId": "role-sashi",
+  "dispatchNotes": "本对话优先短回复",
+  "projectRules": ["本对话只改 src/"]
+}
+```
+
+字段白名单：
+
+| 层 | 允许字段 |
+| --- | --- |
+| 顶层 | `version` / `roles` / `roleOverrides` / `defaultRoleId` / `dispatchNotes` / `projectRules` |
+| 角色 | `roleId` / `name` / `alias`（或 `aliases`）/ `description` / `prompt` / `channel` / `enabled` / `fallbackRoleId` / `timeoutMs` |
+| 通道 | `kind` / `channelId` / `provider` / `cli` / `model` / `reasoning` |
+
+新增/改字段的宿主侧 API（`src/session/store.js`，无 UI）：
+
+- `store.setOverride(projectRoot, sessionId, { roleId, patch, inherited })`：只写差异；
+  等于继承值的字段会从旧覆盖里删除。
+- `store.clearOverride(projectRoot, sessionId, { roleId, field })`：`field` 省略 = 恢复整个角色；
+  支持 `channel.model`，也接受 `model` / `reasoning` 等通道简写。
+- `store.get(projectRoot, sessionId)`：永不抛异常；文件不存在 → 空配置，坏 JSON / 版本不认识 →
+  空配置 + `SESSION_CONFIG_INVALID_JSON` / `SESSION_CONFIG_UNSUPPORTED_VERSION`。
+
+> **为什么不用宿主的 session 级存储**（2026-11-11 查 0.2.2-rc.1 实际包）：
+> `@deepseek-ai/dsh-session` 的 `SessionHeader` 是创建时深冻结的元数据（仅 `cwd` 等），
+> 没有插件可写的 per-session KV；会话日志是事件溯源，`appendPluginRecord()` 明确只允许
+> 仓库内 experimental 包调用。`@deepseek-ai/dsh-storage-domain` 需要 `defineDomain` + zod，
+> 本插件是零依赖的，且该服务不是所有 composition 都挂载。故退化为项目内文件。
+>
+> 局限：文件不随宿主会话归档/删除而清理；换项目路径后看不到旧覆盖；多进程同时写同一
+> session 文件没有跨进程锁（最后写入者胜出）。
 
 ## 5. 解析与校验
 
