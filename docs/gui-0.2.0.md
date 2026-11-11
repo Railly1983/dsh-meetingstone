@@ -4,11 +4,25 @@
 > `meetingstone-dispatch` Job（角色 · 通道 · 任务摘要）；查看/停止任务使用宿主
 > `@deepseek-ai/dsh-tool-jobs` 提供的能力与面板。本页面只负责角色/通道/错误的只读展示，不复制任务列表。
 
-范围：**只读，接真实数据**。只保留三段——角色列表（名称 + 别名 + 可用性）、通道列表
-（channelId + kind）、最近错误（无则显示「无」）。不做搜索 / 筛选 / 排序 / 操作按钮 / 编辑 /
-任务控制 / 图表 / 动画。遵循宿主设计：用宿主 UI 组件（`@deepseek-ai/dsh-client-ui-primitives`
-的 `Tag`）与主题 token（`var(--dsw-alias-label-*)`）、官方间距/字号（gap 12/10px、13px/20px、
-max-width 760px），不自带 CSS 框架、不自造色板。
+范围：**只读，接真实数据**。V1 精简为三个区，复用宿主 primitives / 主题 / i18n / a11y，
+不新增 UI 体系：
+
+1. **CLI 连接**：四平台自动检测（codex / codebuddy / claude，DSH 宿主本身不重复展示）、
+   版本、状态；完整路径移入高级。
+2. **默认协作配置**：全局角色库（只显角色数量 + 管理入口，不在此做编辑器——编辑器在对话
+   顶部入口已实现）、全局默认角色（一个设置项）、全局并发上限、同项目写任务串行、全局调度
+   补充规则（可读文本）。
+3. **高级设置（默认折叠）**：默认隔离方式、CLI 完整路径、通道模型映射、配置文件与诊断日志、
+   打开配置文件入口。
+
+删除 / 移出主页面：**默认模型区域整体删除**（模型 / 思考强度属于角色定义）；通道模型列表
+移入高级；项目配置文件路径展示删除（自动识别）；重复的默认角色配置项合并；「最近错误：无」
+不占位，有错误时显示一条可点击看详情的警告。
+
+不做搜索 / 筛选 / 排序 / 操作按钮 / 编辑 / 任务控制 / 图表 / 动画（除协作区的「管理角色」
+入口按钮，点击打开既有右侧栏会话角色面板）。遵循宿主设计：用宿主 UI 组件
+（`@deepseek-ai/dsh-client-ui-primitives` 的 `Tag`）与主题 token（`var(--dsw-alias-label-*)`）、
+官方间距/字号（gap 12/10px、13px/20px、max-width 760px），不自带 CSS 框架、不自造色板。
 
 ## 1. 调研结论（证据）
 
@@ -69,11 +83,20 @@ Settings 页面
   1. 注册 locale 字典；
   2. `await ctx.remote.$mount(contribution)` 安装 `remote.meetingstone`；
   3. 注册唯一一个 `settings.section`（`id:"meetingstone"`, `order:100`），并通过
-     slot 的 `inject` 把 `{ list }` 传给组件；
+     slot 的 `inject` 把 `{ list, openRoles }` 传给组件（`openRoles` 打开右侧栏会话角色面板）；
   4. `list()` 调 `ctx.remote.meetingstone.list()`，失败即抛错；成功后用
      `normalizeSnapshot()` 收窄形状。
-- 组件只渲染三段列表；无任何可点控件。加载中显示「加载中…」，失败显示
+- 组件渲染 V1 三区（CLI 连接 / 默认协作配置 / 高级设置），高级区默认折叠。除协作区的
+  「管理角色」入口按钮外，无任何编辑/搜索/动画控件。加载中显示「加载中…」，失败显示
   「读取宿主数据失败」+ 错误信息，**不伪造数据**。
+
+> **V1 字段核查（2026-11-11）**：设置页投影的底层字段逐一核过——
+> `maxParallelWritesTotal` / `serializeWrites` / `defaultIsolation` 真实生效（见
+> `src/dispatch/dispatcher.js:431-435,538,553,703`）；`channels` 承载模型/强度且被
+> `src/dsh/adapter.js` 消费；`defaultRoleId` 是自动路由兜底（见 `src/dispatch/routing.js`）。
+> `dispatchNotes` 仅持久化并在设置页作为「全局调度补充规则（可读文本）」展示，**未接入派单/
+> 路由逻辑**（语义上即辅助说明，不影响通道与并发）；V1 保留该字段与展示，未新增行为接线。
+> 未删除任何已生效底层配置。
 
 ## 3. 注册方式（本次落地）
 
@@ -123,8 +146,12 @@ node scripts/verify-package.mjs
 2. 确认 Loader 行 `- id: meetingstone` 处于 enabled（`cordis.patch.yml` 已提供）。
 3. 重启 DSH / 等 HMR，让 client module system 为裸包名根行 serve `./client`。
 4. 打开 Settings（外壳由 `dsh-client-ui-settings-general` 提供）→ 侧栏「集合石」section。
-5. 预期看到：角色行（名称/别名/可用性标签，可用性来自
-   `ctx.subagents.getProvider`）、通道行（channelId/kind）、最近错误（无则「无」）。
+5. 预期看到 V1 三区：
+   - **CLI 连接**：codex / codebuddy / claude 的检测状态（已安装/未安装）+ 版本，无完整路径；
+   - **默认协作配置**：角色数量 + 「管理角色」入口、全局默认角色、并行写上限、同项目串行、
+     调度补充规则（只读文本）；
+   - **高级设置（默认折叠）**：展开后见默认隔离、CLI 完整路径、通道模型映射、配置文件入口。
+   可用性标签来自 `ctx.subagents.getProvider`。有错误时顶部一条可点击警告，无错误不占位。
    控制台应出现 `[meetingstone] loaded …`；若出现
    `[meetingstone] GUI remote unavailable: TYPERT_UNAVAILABLE`，说明宿主未解析到
    `@deepseek-ai/dsh-typert-protocol`，页面会显示读取失败而不是假数据。

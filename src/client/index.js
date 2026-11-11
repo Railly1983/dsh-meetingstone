@@ -303,6 +303,19 @@ window.__ModuleLoader__.load({
       isolationNone: '主工作区（串行）',
       projectConfigFile: '项目配置文件',
       dispatchNotes: '调度提示',
+      // V1 三区精简
+      collab: '默认协作配置',
+      advanced: '高级设置',
+      manageRoles: '管理角色',
+      roleCount: '角色数量',
+      openAdvanced: '展开',
+      closeAdvanced: '收起',
+      cliPaths: 'CLI 完整路径',
+      configFile: '配置文件',
+      openConfig: '打开配置文件',
+      diagLog: '诊断日志位于 .meetingstone/runs',
+      errorWarning: '最近一次错误',
+      errorDetails: '查看详情',
       // 顶部集合石入口 + 右侧栏「当前会话角色」
       headerTitle: '集合石角色',
       headerDesc: '编辑当前会话的角色覆盖',
@@ -363,6 +376,19 @@ window.__ModuleLoader__.load({
       isolationNone: 'Main workspace (serialized)',
       projectConfigFile: 'Project config file',
       dispatchNotes: 'Dispatch notes',
+      // V1 三区精简
+      collab: 'Default collaboration',
+      advanced: 'Advanced',
+      manageRoles: 'Manage roles',
+      roleCount: 'Role count',
+      openAdvanced: 'Expand',
+      closeAdvanced: 'Collapse',
+      cliPaths: 'CLI full paths',
+      configFile: 'Config file',
+      openConfig: 'Open config file',
+      diagLog: 'Diagnostic logs are under .meetingstone/runs',
+      errorWarning: 'Most recent error',
+      errorDetails: 'View details',
       // 顶部集合石入口 + 右侧栏「当前会话角色」
       headerTitle: 'MeetingStone Roles',
       headerDesc: 'Edit role overrides for this session',
@@ -444,9 +470,6 @@ window.__ModuleLoader__.load({
                       }),
                     ],
                   }),
-                  item.installed && item.path
-                    ? jsx('div', { style: meta, children: item.path })
-                    : null,
                 ],
               },
               item.cli || label,
@@ -456,9 +479,207 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 只读 section：全局配置 + 角色/通道 + 最近错误，无任何交互。 */
-    function Section({ t, list: load }) {
+    /** 高级：CLI 完整路径（仅已安装）。完整路径从区 1 移入此处，避免主页面噪声。 */
+    function CliPaths({ t, global }) {
+      const installed = (global.cli || []).filter((item) => item.installed && item.path)
+      if (installed.length === 0) return jsx('span', { style: dim, children: t('none') })
+      return jsxs('div', {
+        style: list,
+        children: installed.map((item) => {
+          const label = item.label || item.cli || t('unknown')
+          return jsxs(
+            'div',
+            {
+              style: row,
+              children: [
+                jsx('span', { children: label }),
+                jsx('span', { style: grow }),
+                jsx('span', { style: meta, children: item.path }),
+              ],
+            },
+            item.cli || label,
+          )
+        }),
+      })
+    }
+
+    /** 高级：通道模型映射（channelId → kind·provider·model·reasoning）。 */
+    function ChannelModels({ t, global }) {
+      if (global.channels.length === 0) return jsx('span', { style: dim, children: t('noChannels') })
+      return jsxs('div', {
+        style: list,
+        children: global.channels.map((channel) => {
+          const detail = [channel.kind, channel.provider].filter(Boolean).join(' · ')
+          return jsxs(
+            'div',
+            {
+              style: row,
+              children: [
+                jsx('span', { style: code, children: channel.channelId || t('unknown') }),
+                jsx('span', { style: grow }),
+                detail ? jsx('span', { style: dim, children: detail }) : null,
+                jsx('span', { style: dim, children: channel.model || t('notSet') }),
+                channel.reasoning ? jsx('span', { style: dim, children: `(${channel.reasoning})` }) : null,
+              ],
+            },
+            channel.channelId || channel.model,
+          )
+        }),
+      })
+    }
+
+    /**
+     * 纯函数渲染「已就绪」设置页（V1 三区）。抽出来便于 stub harness 断言结构，
+     * 不依赖 React 状态机。advancedOpen=false 时高级区折叠（默认）。
+     * @param {(key: string) => string} t
+     * @param {any} snapshot
+     * @param {{ advancedOpen?: boolean, openRoles?: () => void, onToggleAdvanced?: () => void }} opts
+     */
+    function renderSection(t, snapshot, opts = {}) {
+      const global = snapshot.global
+      const advancedOpen = opts.advancedOpen !== false
+      const openRoles = typeof opts.openRoles === 'function' ? opts.openRoles : () => {}
+      const onToggleAdvanced =
+        typeof opts.onToggleAdvanced === 'function' ? opts.onToggleAdvanced : () => {}
+
+      const roleCount = snapshot.roles.length
+      const defaultRole = global.defaultRoleId
+        ? snapshot.roles.find((role) => role.roleId === global.defaultRoleId)
+        : undefined
+      const defaultRoleLabel = defaultRole
+        ? `${defaultRole.name || defaultRole.roleId}（${defaultRole.roleId}）`
+        : t('notSet')
+      const limits = global.limits
+
+      // 错误：有则一条警告（可点击看详情）；无则不占位（不显示「无」）。
+      const lastError = snapshot.lastError
+      const errorCard = !lastError
+        ? null
+        : jsxs('div', {
+            role: 'alert',
+            style: { ...card, borderColor: 'var(--dsw-alias-state-error-primary)' },
+            children: [
+              jsxs('div', {
+                style: row,
+                children: [
+                  jsx(Tag, { tone: 'danger', children: t('errorWarning') }),
+                  jsx('span', { style: grow }),
+                  jsx('button', {
+                    type: 'button',
+                    style: { ...dim, background: 'none', border: 'none', cursor: 'pointer', padding: 0 },
+                    onClick: () => {},
+                    children: t('errorDetails'),
+                  }),
+                ],
+              }),
+              jsxs('div', {
+                style: grow,
+                children: [
+                  jsx('div', {
+                    children: `[${lastError.code}] ${lastError.message || t('unknown')}`,
+                  }),
+                  lastError.at ? jsx('div', { style: meta, children: lastError.at }) : null,
+                ],
+              }),
+            ],
+          })
+
+      // 高级区（默认折叠）：隔离 / CLI 完整路径 / 通道模型映射 / 配置文件入口。
+      const advancedBody = !advancedOpen
+        ? null
+        : jsxs('div', {
+            style: card,
+            children: [
+              jsxs('dl', {
+                style: kv,
+                children: [
+                  kvRow(
+                    t('isolation'),
+                    limits.defaultIsolation === 'none' ? t('isolationNone') : t('isolationWorktree'),
+                    'isolation',
+                  ),
+                ],
+              }),
+              jsx('div', { style: subheading, children: t('cliPaths') }),
+              jsx(CliPaths, { t, global }),
+              jsx('div', { style: subheading, children: t('channelModels') }),
+              jsx(ChannelModels, { t, global }),
+              jsx('div', { style: subheading, children: t('configFile') }),
+              jsxs('div', {
+                style: row,
+                children: [
+                  jsx('span', { style: code, children: 'cordis.patch.yml' }),
+                  jsx('span', { style: grow }),
+                  jsx('button', {
+                    type: 'button',
+                    style: { ...dim, background: 'none', border: 'none', cursor: 'pointer', padding: 0 },
+                    onClick: () => {},
+                    children: t('openConfig'),
+                  }),
+                ],
+              }),
+              jsx('p', { style: note, children: t('diagLog') }),
+            ],
+          })
+
+      return jsxs('div', {
+        style: root,
+        children: [
+          errorCard,
+          // 区 1：CLI 连接（四平台自动检测 / 版本 / 状态；完整路径已移入高级）。
+          jsx('h3', { style: heading, children: t('cli') }),
+          jsx('div', { style: card, children: jsx(CliList, { t, global }) }),
+          // 区 2：默认协作配置（角色数量 + 管理入口；不在此做编辑器）。
+          jsx('h3', { style: heading, children: t('collab') }),
+          jsx('div', {
+            style: card,
+            children: jsxs('div', {
+              style: list,
+              children: [
+                jsxs('div', {
+                  style: row,
+                  children: [
+                    jsx('span', { children: t('roleCount') }),
+                    jsx('span', { children: String(roleCount) }),
+                    jsx('span', { style: grow }),
+                    jsx('button', {
+                      type: 'button',
+                      style: { ...dim, background: 'none', border: 'none', cursor: 'pointer', padding: 0 },
+                      onClick: openRoles,
+                      children: t('manageRoles'),
+                    }),
+                  ],
+                }),
+                kvRow(t('defaultRole'), defaultRoleLabel, 'defaultRole'),
+                kvRow(t('parallelLimit'), String(limits.maxParallelWritesTotal), 'max'),
+                kvRow(t('serializeWrites'), limits.serializeWrites ? t('on') : t('off'), 'serialize'),
+                kvRow(t('dispatchNotes'), global.dispatchNotes || t('none'), 'dispatchNotes'),
+              ],
+            }),
+          }),
+          // 区 3：高级设置（默认折叠）。
+          jsxs('div', {
+            style: { display: 'flex', alignItems: 'center', gap: 10 },
+            children: [
+              jsx('h3', { style: { ...heading, flex: 1 }, children: t('advanced') }),
+              jsx('button', {
+                type: 'button',
+                style: { ...dim, background: 'none', border: 'none', cursor: 'pointer', padding: 0 },
+                'aria-expanded': advancedOpen,
+                onClick: onToggleAdvanced,
+                children: advancedOpen ? t('closeAdvanced') : t('openAdvanced'),
+              }),
+            ],
+          }),
+          advancedBody,
+        ],
+      })
+    }
+
+    /** 只读 section：V1 三区结构 + 最近错误（条件显示）；无任何搜索/编辑/动画。 */
+    function Section({ t, list: load, openRoles }) {
       const [state, setState] = react.useState({ status: 'loading' })
+      const [advancedOpen, setAdvancedOpen] = react.useState(false)
       react.useEffect(() => {
         let current = true
         Promise.resolve()
@@ -499,103 +720,8 @@ window.__ModuleLoader__.load({
       }
 
       const snapshot = state.snapshot
-      const global = snapshot.global
       const unavailable = snapshot.unavailable
-
-      const roleRows =
-        snapshot.roles.length === 0
-          ? jsx('span', { style: dim, children: t('none') })
-          : snapshot.roles.map((role) => {
-              const badge = availabilityBadge(t, role.availability)
-              return jsxs(
-                'div',
-                {
-                  style: row,
-                  children: [
-                    jsx('span', { children: role.name || role.roleId }),
-                    jsx('span', { style: dim, children: role.aliases.join(' / ') }),
-                    jsx('span', { style: grow }),
-                    jsx(Tag, { tone: badge.tone, children: badge.label }),
-                  ],
-                },
-                role.roleId || role.name,
-              )
-            })
-
-      const defaultRole = global.defaultRoleId
-        ? snapshot.roles.find((role) => role.roleId === global.defaultRoleId)
-        : undefined
-      const defaultModel = defaultRole
-        ? defaultRole.model ||
-          (global.channels.find((channel) => channel.channelId === defaultRole.channelId)?.model ?? '')
-        : ''
-      const defaultRoleLabel = defaultRole
-        ? `${defaultRole.name || defaultRole.roleId}（${defaultRole.roleId}）`
-        : t('notSet')
-
-      const modelRows =
-        global.channels.length === 0
-          ? jsx('span', { style: dim, children: t('noChannels') })
-          : global.channels.map((channel) => {
-              const detail = [channel.kind, channel.provider].filter(Boolean).join(' · ')
-              return jsxs(
-                'div',
-                {
-                  style: row,
-                  children: [
-                    jsx('span', { style: code, children: channel.channelId || t('unknown') }),
-                    jsx('span', { style: grow }),
-                    detail ? jsx('span', { style: dim, children: detail }) : null,
-                    jsx('span', { style: dim, children: channel.model || t('notSet') }),
-                    channel.reasoning ? jsx('span', { style: dim, children: `(${channel.reasoning})` }) : null,
-                  ],
-                },
-                channel.channelId || channel.model,
-              )
-            })
-
-      const limits = global.limits
-      const limitsBody = jsxs('dl', {
-        style: kv,
-        children: [
-          kvRow(t('parallelLimit'), String(limits.maxParallelWritesTotal), 'max'),
-          kvRow(t('serializeWrites'), limits.serializeWrites ? t('on') : t('off'), 'serialize'),
-          kvRow(
-            t('isolation'),
-            limits.defaultIsolation === 'none' ? t('isolationNone') : t('isolationWorktree'),
-            'isolation',
-          ),
-        ],
-      })
-
-      const rulesBody = jsxs('dl', {
-        style: kv,
-        children: [
-          kvRow(t('defaultRole'), defaultRoleLabel, 'defaultRole'),
-          kvRow(t('projectConfigFile'), global.projectConfigFile, 'projectConfigFile'),
-          kvRow(t('dispatchNotes'), global.dispatchNotes || t('none'), 'dispatchNotes'),
-        ],
-      })
-
-      const lastError = snapshot.lastError
-      const errorBody = !lastError
-        ? jsx('span', { style: dim, children: t('none') })
-        : jsxs('div', {
-            style: { ...row, alignItems: 'flex-start' },
-            children: [
-              jsx('span', { children: `[${lastError.code}]` }),
-              jsxs('div', {
-                style: grow,
-                children: [
-                  jsx('div', { children: lastError.message || t('unknown') }),
-                  lastError.at
-                    ? jsx('div', { style: meta, children: lastError.at })
-                    : null,
-                ],
-              }),
-            ],
-          })
-
+      // 加载成功但 remote 未就绪：仍渲染三区骨架，让页面可见并解释原因。
       return jsxs('div', {
         style: root,
         children: [
@@ -606,31 +732,11 @@ window.__ModuleLoader__.load({
                 children: [`${t('unavailable')} · ${unavailable.message || unavailable.code}`],
               })
             : null,
-          jsx('h3', { style: heading, children: t('cli') }),
-          jsx('div', { style: card, children: jsx(CliList, { t, global }) }),
-          jsx('h3', { style: heading, children: t('roles') }),
-          jsx('div', { style: card, children: jsxs('div', { style: list, children: roleRows }) }),
-          jsx('h3', { style: heading, children: t('models') }),
-          jsxs('div', {
-            style: card,
-            children: [
-              jsxs('dl', {
-                style: kv,
-                children: [
-                  kvRow(t('defaultRole'), defaultRoleLabel, 'defaultRole'),
-                  kvRow(t('model'), defaultModel || t('notSet'), 'defaultModel'),
-                ],
-              }),
-              jsx('div', { style: subheading, children: t('channelModels') }),
-              jsx('div', { style: list, children: modelRows }),
-            ],
+          renderSection(t, snapshot, {
+            advancedOpen,
+            openRoles,
+            onToggleAdvanced: () => setAdvancedOpen(!advancedOpen),
           }),
-          jsx('h3', { style: heading, children: t('limits') }),
-          jsx('div', { style: card, children: limitsBody }),
-          jsx('h3', { style: heading, children: t('rules') }),
-          jsx('div', { style: card, children: rulesBody }),
-          jsx('h3', { style: heading, children: t('errors') }),
-          jsx('div', { style: card, children: errorBody }),
         ],
       })
     }
@@ -669,7 +775,17 @@ window.__ModuleLoader__.load({
             order: 100,
             label: () => t('nav'),
             locale: NS,
-            inject: () => ({ list: loader }),
+            inject: () => ({
+              list: loader,
+              // 区 2「管理角色」入口：打开右侧栏会话角色面板（复用既有 TAB_ID）。
+              openRoles: () => {
+                try {
+                  slotCtx.sidebarRightTabs?.open?.(TAB_ID)
+                } catch {
+                  /* 宿主未提供 open 时静默 */
+                }
+              },
+            }),
           },
           Section,
         ),
@@ -1028,6 +1144,10 @@ window.__ModuleLoader__.load({
       normalizeSnapshot,
       normalizeGlobal,
       unavailableSnapshot,
+      renderSection,
+      CliList,
+      CliPaths,
+      ChannelModels,
       REMOTE_CONTRIBUTION,
       REMOTE_INJECT,
       TAB_ID,

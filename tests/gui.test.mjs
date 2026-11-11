@@ -640,3 +640,134 @@ test('client 源文件：无占位数据，且命名空间读取走动态注入'
   assert.match(source, /ctx\.inject\(\[REMOTE_INJECT\]/, '必须在 mount 后动态注入命名空间服务')
   assert.match(source, /service\.list\(\)/, '数据读取应发生在就绪子 ctx 捕获的服务上')
 })
+
+// 递归收集 JSX 树中的文本节点。
+function collectStrings(node, acc) {
+  if (node === null || node === undefined) return
+  if (typeof node === 'string' || typeof node === 'number') {
+    acc.push(String(node))
+    return
+  }
+  if (Array.isArray(node)) {
+    node.forEach((c) => collectStrings(c, acc))
+    return
+  }
+  if (node && typeof node === 'object') {
+    const props = node.props || {}
+    if (props.children !== undefined) collectStrings(props.children, acc)
+  }
+}
+
+// 在 JSX 树中查找满足条件的元素（按 props/type 匹配）。
+function findNode(node, pred) {
+  if (!node || typeof node !== 'object') return false
+  if (pred(node)) return true
+  const props = node.props || {}
+  if (Array.isArray(props.children)) return props.children.some((c) => findNode(c, pred))
+  if (props.children && typeof props.children === 'object') return findNode(props.children, pred)
+  return false
+}
+
+test('Browser half：V1 三区结构 + 删除区块不再渲染 + 错误条件 + 高级默认折叠', async () => {
+  const { exports } = await loadClientHarness()
+  const t = (k) => k
+  const noop = () => {}
+
+  // 模拟一个真实的 ready 快照（含角色/通道/CLI/全局配置/无错误）。
+  const snapshot = {
+    roles: [
+      { roleId: 'role-sashi', name: '沙僧', aliases: ['SS'], enabled: true, availability: 'available', channelId: '', provider: '', model: '', reasoning: '' },
+      { roleId: 'role-bajie', name: '八戒', aliases: [], enabled: false, availability: 'disabled', channelId: '', provider: '', model: '', reasoning: '' },
+    ],
+    channels: [{ channelId: 'ch-1', kind: 'acp-cli', provider: 'acp', model: 'm1', reasoning: 'low', description: '' }],
+    lastError: null,
+    global: {
+      defaultRoleId: 'role-sashi',
+      dispatchNotes: '补充说明',
+      projectConfigFile: '.meetingstone.json',
+      limits: { serializeWrites: true, maxParallelWritesTotal: 4, defaultIsolation: 'worktree' },
+      channels: [{ channelId: 'ch-1', kind: 'acp-cli', provider: 'acp', model: 'm1', reasoning: 'low', description: '' }],
+      cli: [
+        { cli: 'codex', label: 'Codex CLI', installed: true, path: 'C:\\codex.exe', version: '1.2.3', source: 'appx', notes: [], checkedAt: null },
+        { cli: 'claude', label: 'Claude Code CLI', installed: false, path: '', version: '', source: null, notes: ['nf'], checkedAt: null },
+      ],
+      cliError: null,
+    },
+  }
+
+  // —— 默认（高级折叠） ——
+  const collapsed = exports.__test.renderSection(t, snapshot, { advancedOpen: false, openRoles: noop })
+  const collapsedStrings = []
+  collectStrings(collapsed, collapsedStrings)
+
+  // 三区标题存在
+  assert.ok(collapsedStrings.includes('cli'), '区1 CLI 连接标题存在')
+  assert.ok(collapsedStrings.includes('collab'), '区2 默认协作配置标题存在')
+  assert.ok(collapsedStrings.includes('advanced'), '区3 高级设置标题存在')
+
+  // 删除的区块不再渲染
+  assert.ok(!collapsedStrings.includes('models'), '默认模型区域整体删除（标题不再渲染）')
+  assert.ok(!collapsedStrings.includes('projectConfigFile'), '项目配置文件路径展示删除')
+  assert.ok(!collapsedStrings.includes('limits'), '旧的「额度与并发策略」独立区删除')
+  assert.ok(!collapsedStrings.includes('rules'), '旧的「全局调度规则」独立区删除')
+  assert.ok(!collapsedStrings.includes('errors'), '旧的「最近错误」独立区删除')
+
+  // 默认角色不重复：只在协作区出现一次
+  assert.equal(
+    collapsedStrings.filter((s) => s === 'defaultRole').length,
+    1,
+    '默认角色只在协作区出现一次（不重复）',
+  )
+
+  // 通道模型列表移入高级：折叠时不可见
+  assert.ok(!collapsedStrings.includes('channelModels'), '通道模型列表移入高级（折叠时不可见）')
+
+  // 高级默认折叠：展开后可见
+  const expanded = exports.__test.renderSection(t, snapshot, { advancedOpen: true, openRoles: noop })
+  const expandedStrings = []
+  collectStrings(expanded, expandedStrings)
+  assert.ok(expandedStrings.includes('channelModels'), '高级展开后通道模型映射可见')
+  assert.ok(expandedStrings.includes('cliPaths'), '高级展开后 CLI 完整路径可见')
+  assert.ok(expandedStrings.includes('configFile'), '高级展开后配置文件入口可见')
+  assert.ok(expandedStrings.includes('isolation'), '高级展开后默认隔离可见')
+  assert.ok(!collapsedStrings.includes('cliPaths'), '高级折叠时 CLI 完整路径不可见')
+  assert.ok(!collapsedStrings.includes('configFile'), '高级折叠时配置文件入口不可见')
+  assert.ok(!collapsedStrings.includes('isolation'), '高级折叠时默认隔离不可见')
+
+  // 折叠切换按钮存在且 aria-expanded=false（默认折叠）
+  assert.ok(
+    findNode(collapsed, (n) => n.props && n.type === 'button' && (n.props.children === 'openAdvanced' || n.props.children === 'closeAdvanced')),
+    '高级区有展开/收起按钮',
+  )
+  assert.ok(
+    findNode(collapsed, (n) => n.props && n.props['aria-expanded'] === false),
+    '折叠时 aria-expanded=false',
+  )
+
+  // 协作区「管理角色」入口按钮存在
+  assert.ok(
+    findNode(collapsed, (n) => {
+      if (!n.props || n.type !== 'button') return false
+      const tmp = []
+      collectStrings(n, tmp)
+      return tmp.includes('manageRoles')
+    }),
+    '协作区有「管理角色」入口按钮',
+  )
+
+  // 错误条件显示：有错误 → 一条 alert 警告 + 查看详情；无错误 → 不占位、不渲染 alert
+  const withError = {
+    ...snapshot,
+    lastError: { code: 'ROLE_NOT_FOUND', message: '没有这个角色', at: '2026-11-11T00:00:00.000Z', source: 'dispatch' },
+  }
+  const errTree = exports.__test.renderSection(t, withError, { advancedOpen: true, openRoles: noop })
+  const errStrings = []
+  collectStrings(errTree, errStrings)
+  assert.ok(findNode(errTree, (n) => n.props && n.props.role === 'alert'), '有错误时渲染 alert 警告')
+  assert.ok(errStrings.join(' ').includes('ROLE_NOT_FOUND'), '错误码可见')
+  assert.ok(errStrings.includes('errorDetails'), '查看详情入口存在')
+  assert.ok(
+    !findNode(collapsed, (n) => n.props && n.props.role === 'alert'),
+    '无错误时不渲染 alert（不占位、不显示「无」）',
+  )
+})
