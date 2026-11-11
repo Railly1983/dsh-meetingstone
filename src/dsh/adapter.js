@@ -5,6 +5,7 @@ import { composePromptWithContinuation } from '../context-replay.js'
 import { classifyFailure } from '../dispatch/failure.js'
 import { renderTaskBrief, summarizeContextPack, summarizeTaskSpec } from '../taskspec.js'
 import { parseStructuredResult, renderOutputContract, resultRecordFields } from '../result-contract.js'
+import { buildTaskLabel } from '../naming.js'
 /**
  * DSH 接线层 · 适配器（阶段 2）。
  *
@@ -411,40 +412,12 @@ function optionalService(ctx, name) {
   }
 }
 
-/** 原生 Job 的任务摘要上限（字符数，不是字节）。 */
-const JOB_TASK_SUMMARY_MAX = 40
-
 /**
- * 压成一行并截到 40 字（用码点切，避免把 emoji/汉字切坏）。
- * 超长时保留 39 字 + 省略号，总长仍 ≤ 40。
- * @param {unknown} task
+ * Job 终态 detail 的展示上限（字符数，不是字节）。
+ * detail 是 Background Tasks 面板第二行，不是完整结果；完整输出仍写在
+ * `.meetingstone/runs/<childId>.json` 里。
  */
-function summarizeJobTask(task, maxChars = JOB_TASK_SUMMARY_MAX) {
-  const text = String(task ?? '')
-    .replace(/\s+/g, ' ')
-    .trim()
-  if (!text) return '未命名任务'
-  const chars = Array.from(text)
-  if (chars.length <= maxChars) return text
-  return `${chars.slice(0, Math.max(1, maxChars - 1)).join('')}…`
-}
-
-/**
- * Job 面板里的一行标签：`角色名 · 任务摘要（≤14 字）`。
- *
- * 面板一行空间有限：provider 已经由 kind 徽标/详情行表达，
- * 标签只保留"谁 + 在干什么"，避免长标题撑满一行（用户反馈不够简洁）。
- *
- * @param {any} role
- * @param {string} provider
- * @param {unknown} task
- */
-function jobLabelFor(role, provider, task) {
-  const roleName =
-    typeof role?.name === 'string' && role.name.trim() ? role.name.trim() : '未知角色'
-  void provider
-  return `${roleName} · ${summarizeJobTask(task, 14)}`
-}
+const JOB_DETAIL_MAX = 80
 
 /**
  * Job 的 owner 是宿主 SessionId，不是 Agent 对象。
@@ -460,11 +433,12 @@ function jobOwnerId(parent) {
 }
 
 /**
- * Job 的 detail 是给面板看的一行摘要，不是完整结果。
+ * Job 的 detail / progress 是给面板看的一行摘要，不是完整结果。
+ * 默认截到 {@link JOB_DETAIL_MAX} 字；完整内容仍在 run 记录与 Job output ring 里。
  * @param {unknown} value
  * @param {number} [max]
  */
-function truncateDetail(value, max = 200) {
+function truncateDetail(value, max = JOB_DETAIL_MAX) {
   const text = String(value ?? '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -731,9 +705,9 @@ export function createDshAdapter(ctx, options = {}) {
     updateJobProgress(
       childId,
       outcome.status === 'completed'
-        ? `已完成${outcome.detail ? ` · ${truncateDetail(outcome.detail, 80)}` : ''}`
+        ? '已完成'
         : outcome.status === 'failed'
-          ? `失败 · ${truncateDetail(outcome.detail, 80)}`
+          ? '失败'
           : '已取消',
     )
     jobDeferreds.delete(childId)
@@ -755,14 +729,13 @@ export function createDshAdapter(ctx, options = {}) {
    * @param {object} args
    * @param {string} args.childId
    * @param {any} args.role
-   * @param {string} args.provider
    * @param {unknown} args.task
+   * @param {any} [args.taskSpec] 结构化简报（有 title 时优先作为短目标）
    * @param {any} args.parent
-   * @param {string} args.where 启动位置（工作树路径或主工作区）
    * @param {() => Promise<any>} args.cancel
    * @returns {string | null}
    */
-  function createDispatchJob({ childId, role, provider, task, parent, where, cancel }) {
+  function createDispatchJob({ childId, role, task, taskSpec, parent, cancel }) {
     const jobs = jobsService()
     if (!jobs) {
       if (!jobsUnavailableWarned) {
@@ -785,13 +758,14 @@ export function createDshAdapter(ctx, options = {}) {
     try {
       const started = jobs.start({
         kind: 'meetingstone-dispatch',
-        label: jobLabelFor(role, provider, task),
+        label: buildTaskLabel(role, task, taskSpec),
         owner,
         run(/** @type {any} */ jobHandle) {
           if (jobHandle && typeof jobHandle === 'object') {
             jobHandles.set(childId, jobHandle)
             try {
-              jobHandle.updateProgress?.(`已启动 · ${where}`)
+              // 进度行只描述状态；工作树绝对路径不进面板（避免重复信息撑满一行）
+              jobHandle.updateProgress?.('已启动')
             } catch {
               /* 进度只是展示 */
             }
@@ -1046,7 +1020,10 @@ export function createDshAdapter(ctx, options = {}) {
     //    因为 `spec.request` 是 undefined。这里按**实现**的嵌套形状组装。
     const spec = {
       provider,
-      label: `meetingstone:${role?.roleId ?? 'unknown'}`,
+      // 官方字段：`SubagentActivationSpec.label` 会写进 `subagent/descriptor` 与
+      // `subagent/catalog`，Subagents 面板行标题读的就是这个值（证据见
+      // docs/gui-0.2.0.md §6）。命名统一为 `角色简称 · 简短目标（≤14 字）`。
+      label: buildTaskLabel(role, task, input?.taskSpec),
       delivery: 'caller',
       signal: controller.signal,
       request: {
@@ -1194,17 +1171,12 @@ export function createDshAdapter(ctx, options = {}) {
     })
 
     // 5.1 原生 Jobs：失败只告警，绝不回滚已启动的 activation。
-    const jobWhere =
-      input?.isolation === 'worktree' && typeof input?.worktree?.path === 'string'
-        ? `工作树 ${input.worktree.path}`
-        : '主工作区'
     const jobId = createDispatchJob({
       childId,
       role,
-      provider,
       task,
+      taskSpec: input?.taskSpec,
       parent,
-      where: jobWhere,
       cancel: () => cancelActivation({ childId }),
     })
     if (jobId) {

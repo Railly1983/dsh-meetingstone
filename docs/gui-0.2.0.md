@@ -1,7 +1,7 @@
 # GUI 只读配置页（0.2.0）
 
 > **任务列表由原生 Jobs 提供，插件不自造 UI。** 派单成功后，宿主 `ctx.jobs` 可用时本插件会注册
-> `meetingstone-dispatch` Job（角色 · 通道 · 任务摘要）；查看/停止任务使用宿主
+> `meetingstone-dispatch` Job（`角色简称 · 简短目标`，见 §6）；查看/停止任务使用宿主
 > `@deepseek-ai/dsh-tool-jobs` 提供的能力与面板。本页面只负责角色/通道/错误的只读展示，不复制任务列表。
 
 范围：**只读，接真实数据**。只保留三段——角色列表（名称 + 别名 + 可用性）、通道列表
@@ -241,3 +241,53 @@ get/set/clear 的继承语义、只写差异、恢复继承、session 隔离、�
   就打开面板，host 找不到项目根，返回 `SESSION_GUI_SESSION_ROOT_UNKNOWN`；真机需确认该映射时机。
 - **面板为只读渲染 + 覆盖写入**：字段编辑走 `setSessionOverride`/`clearSessionOverride` 的
   差异写盘，未做乐观更新与写入失败重试（store 写失败会在 `errors` 中返回，面板保持原值）。
+
+
+## 6. 三个面板的职责与命名规则（P0-1）
+
+### 6.1 职责边界（不互相顶替）
+
+| 面板 | 负责什么 | 谁写入 | 本插件做什么 |
+| --- | --- | --- | --- |
+| **Todo** | **项目级工作包与里程碑**（跨派单的进度视图） | 主控 / 用户通过 `todo_write` | **派单不建 Todo**；本插件不写 Todo |
+| **Background Tasks** | **真实外部 CLI / 子 Agent 的宿主 Job**（后台长跑、可停止） | 插件 `ctx.jobs.start({ kind, label, owner, run })` | 每次派单建一条 `kind=meetingstone-dispatch` Job；没有 `ctx.jobs` 时不建、不伪造 |
+| **Subagents** | **Agent 执行会话目录**（父子关系、运行状态、结果） | 宿主 `subagent/descriptor` + `subagent/catalog` | 只通过官方 `startActivation({ label })` 提供行标题，不自造列表 |
+
+一句话：**Todo 看项目进度，Background Tasks 看真实后台任务，Subagents 看 Agent 会话**。
+三者不是同一份数据的三种皮肤，不能把派单塞进 Todo，也不能自建 Subagents 列表。
+
+### 6.2 命名规则
+
+统一格式：`角色简称 · 简短目标（≤14 字）`，例如 `沙僧 · 修复 F1–F8`。
+
+- **角色简称**：优先 `role.name`；没有名字时退回 `roleId`（去掉 `role-` 前缀）。
+- **简短目标**：优先 `taskSpec.title`（结构化简报的短任务名），否则取任务首个有效行。
+- **清洗**：去掉 Markdown 符号（`*` `_` `#` `` ` `` `[` `]` `(` `)` `{` `}` `<` `>` `|` `~` `\`）、
+  `meetingstone:` 内部前缀、`任务：` / `Task:` 正文标签与控制字符；英文 / 数字保留。
+- **回退**：空任务 → `未命名任务`；空角色 → `未知角色`。
+- **长度**：目标按码点截到 ≤14 字（含省略号），不会切坏 emoji / 汉字。
+- **一处实现**：`src/naming.js` 的 `buildTaskLabel()` 同时用于 Subagents 的
+  `startActivation({ label })` 与 Background Tasks 的 Job `label`，避免两处漂移。
+- **进度与详情**：Job 运行中进度只写 `已启动`；终态只写 `已完成` / `失败` / `已取消`；
+  工作树绝对路径不进面板。`JobView.detail`（终态）截到 ≤80 字，完整内容仍在
+  `.meetingstone/runs/<childId>.json` 与 Job output ring。
+
+### 6.3 宿主 API 证据（app.asar / 已安装 provider）
+
+| 问题 | 结论 | 证据 |
+| --- | --- | --- |
+| `startActivation` 有没有能决定 Subagents 标题的字段 | **有 `label`**（可选字符串）；README 契约是 `startActivation({ provider, label, request, signal, delivery })`。没有 `title` 字段 | `dsh-subagent/README.md:61`；`dsh-subagent/lib/index.js:3051`（startActivation） |
+| `label` 如何进入 Subagents 面板 | 本地 provider 把 `label` 写进 `subagent/descriptor`，并 `establishCatalogChild(parent.session, …, descriptor)`；客户端目录行读 `entry.label ?? entry.id` | `dsh-subagent/lib/index.js:1410-1417,1471`；`dsh-client-ui-subagent/lib/client.js:202` |
+| 外部 provider 是否透传 | 宿主把 `label` 传给 provider（`...spec.request, label: spec.label`），但仅 `delivery:'parent'` 才写 external catalog；本插件用 `delivery:'caller'`，且已安装的 acp / codex / claude-code 实现里没有读取 `label`。**外部通道的 label 不影响面板** | `dsh-subagent/lib/index.js:1504-1514`；`dsh-subagent-acp` / `-codex` / `-claude-code` 的 `lib/index.js`（grep 无 label 使用） |
+| 会话标题（sidebar / 第二行） | 由宿主 `dsh-session-title` 从首条用户消息自动生成，**不能**通过 `startActivation` 设置；我们控制的是目录行 `label` | `dsh-session-title/lib/index.js:386-415,630-650`；`dsh-client-ui-subagent/lib/client.js:207` |
+| Jobs 有没有可控 `detail` | `JobSpec` 只有 `kind/label/owner/run`；`progress` 由 `handle.updateProgress(line)` 控制；`JobView.detail` 来自终态 `hooks.done` 的 `detail`。宿主不自动截断，插件自己截到 80 字 | `dsh-jobs-local/lib/index.js:416,448,589-590,750-760,769-773`；`dsh-client-ui-jobs/lib/client.js:205-210` |
+
+### 6.4 未验证 / 限制
+
+- **Subagents 行标题真机渲染未截图验证**：`label` 的数据链路已按源码核对；真实桌面端目录行的
+  显示仍需一次人工确认（本任务不改宿主、不做 DOM 注入）。
+- **外部 provider 的 Subagents 可见性**：`delivery:'caller'` 下宿主不写 external catalog，
+  因此 acp / codex / claude-code 是否出现在 Subagents 面板取决于宿主会话列表，而不是我们的
+  `label`；不要承诺"外部 CLI 任务一定出现在 Subagents 面板"。
+- **会话标题仍是宿主生成**：若宿主把首条 Prompt 当作 sidebar 标题，标题可能仍含任务正文；
+  本插件只负责目录行 `label`，不伪造/覆盖宿主会话标题。
