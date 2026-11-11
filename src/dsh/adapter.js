@@ -407,19 +407,21 @@ const JOB_TASK_SUMMARY_MAX = 40
  * 超长时保留 39 字 + 省略号，总长仍 ≤ 40。
  * @param {unknown} task
  */
-function summarizeJobTask(task) {
+function summarizeJobTask(task, maxChars = JOB_TASK_SUMMARY_MAX) {
   const text = String(task ?? '')
     .replace(/\s+/g, ' ')
     .trim()
   if (!text) return '未命名任务'
   const chars = Array.from(text)
-  if (chars.length <= JOB_TASK_SUMMARY_MAX) return text
-  return `${chars.slice(0, JOB_TASK_SUMMARY_MAX - 1).join('')}…`
+  if (chars.length <= maxChars) return text
+  return `${chars.slice(0, Math.max(1, maxChars - 1)).join('')}…`
 }
 
 /**
- * Job 面板里的一行标签：`角色名 · 通道 · 任务摘要（≤40 字）`。
- * 通道用实际执行的 provider 名（与任务真正跑在哪个通道一致）。
+ * Job 面板里的一行标签：`角色名 · 任务摘要（≤14 字）`。
+ *
+ * 面板一行空间有限：provider 已经由 kind 徽标/详情行表达，
+ * 标签只保留"谁 + 在干什么"，避免长标题撑满一行（用户反馈不够简洁）。
  *
  * @param {any} role
  * @param {string} provider
@@ -428,8 +430,8 @@ function summarizeJobTask(task) {
 function jobLabelFor(role, provider, task) {
   const roleName =
     typeof role?.name === 'string' && role.name.trim() ? role.name.trim() : '未知角色'
-  const channel = provider || role?.channel?.kind || 'unknown'
-  return `${roleName} · ${channel} · ${summarizeJobTask(task)}`
+  void provider
+  return `${roleName} · ${summarizeJobTask(task, 14)}`
 }
 
 /**

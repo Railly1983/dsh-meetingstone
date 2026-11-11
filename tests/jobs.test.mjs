@@ -196,7 +196,7 @@ test('派单成功后创建原生 Job：kind/label/owner 正确，taskRef 与 ru
   assert.equal(jobs.jobs.length, 1, '必须创建一个 Job')
   const job = jobs.jobs[0]
   assert.equal(job.spec.kind, 'meetingstone-dispatch')
-  assert.equal(job.spec.label, '悟空 · codex · 审核登录模块')
+  assert.equal(job.spec.label, '悟空 · 审核登录模块')
   assert.equal(job.spec.owner, PARENT.id, 'owner 是宿主 SessionId（parent.id）')
   assert.equal(res.taskRef.jobId, job.id, 'taskRef 必须带 jobId')
   assert.equal(started.length, 1)
