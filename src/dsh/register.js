@@ -59,7 +59,13 @@
 
 import { providerNameFor } from './adapter.js'
 import { normalizeProjectKey } from '../dispatch/dispatcher.js'
-import { resolveContinuation } from '../context-replay.js'
+import {
+  collectProtectedFields,
+  extractProtectedSections,
+  renderProtectedFieldsBlock,
+  renderProtectedSections,
+  resolveContinuation,
+} from '../context-replay.js'
 import { truncateUtf8 } from '../run-store.js'
 import { validateTaskSpec } from '../taskspec.js'
 
@@ -262,6 +268,9 @@ export const TASK_RESULT_TAIL_BYTES = 512
  * - 有结构化 `summary` 时，默认**只回 summary/status/openIssues 等字段**，不再回原始正文
  *   （正文用 full:true 或 meetingstone_get_run_artifact 按需取）；
  * - 没有 summary 时退回首 1KiB + 末 512B 摘要，并附 `resultBytes`；
+ * - **结构化字段优先（文档 §8）**：status/title/objective/acceptance/scope/permissions/
+ *   safetyPolicy/doNotRepeat 若存在，原样放进 `protected`，不参与首尾截断；
+ *   自由文本中间被截掉的验收/权限段也会原样追加，避免摘要删掉安全与验收约束；
  * - `full:true` 才返回完整正文；
  * - 记录里 `output`/`result` 可能同时存在（内存终态用 output、磁盘用 result），
  *   这里统一压成**一个** `result` 字段，绝不重复返回两份正文。
@@ -280,6 +289,10 @@ function taskResultView(record, full) {
   const summary = typeof source.summary === 'string' ? source.summary.trim() : ''
   const out = { ...source }
   delete out.output
+  // 结构化保护字段：不截断、不省略（即便走 summary 分支也要能取到验收/权限/边界）
+  const protectedFields = collectProtectedFields(source)
+  const hasProtectedFields = Object.keys(protectedFields).length > 0
+  const protectedBlock = renderProtectedFieldsBlock(source, { omit: ['status'] })
   if (full) {
     out.result = text
     out.resultBytes = bytes
@@ -296,10 +309,23 @@ function taskResultView(record, full) {
       headBytes: TASK_RESULT_HEAD_BYTES,
       tailBytes: TASK_RESULT_TAIL_BYTES,
     })
-    out.result = preview.text
+    let previewText = preview.text
+    if (preview.truncated) {
+      // 中间被截掉的验收/权限段：原样找回，附在摘要之后（不参与截断）
+      const sections = extractProtectedSections(text).filter(
+        (block) => !previewText.includes(block),
+      )
+      const extras = [
+        renderProtectedSections(sections),
+        protectedBlock,
+      ].filter(Boolean)
+      if (extras.length > 0) previewText = `${previewText}\n\n${extras.join('\n\n')}`
+    }
+    out.result = previewText
     out.resultBytes = bytes
     out.resultTruncated = preview.truncated
   }
+  if (hasProtectedFields) out.protected = protectedFields
   if (source.resultTruncated === true) out.recordResultTruncated = true
   return out
 }

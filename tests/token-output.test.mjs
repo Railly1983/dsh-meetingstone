@@ -15,7 +15,7 @@ import { join } from 'node:path'
 
 import { registerTools, TOOL_NAMES, TASK_RESULT_HEAD_BYTES, TASK_RESULT_TAIL_BYTES } from '../src/dsh/register.js'
 import { createDshAdapter } from '../src/dsh/adapter.js'
-import { createRunStore } from '../src/run-store.js'
+import { createRunStore, truncateUtf8 } from '../src/run-store.js'
 
 /** @param {Record<string, object>} tools */
 function makeTools(depsOver = {}) {
@@ -114,6 +114,82 @@ test('get_task 小结果：默认摘要就是全文，不额外截断', async ()
   assert.equal(out.result, 'PONG')
   assert.equal(out.resultTruncated, false)
   assert.equal(out.resultBytes, 4)
+})
+
+test('get_task 摘要：结构化 acceptance/permissions/safetyPolicy 原样保留，不参与截断', async () => {
+  const acceptance = ['取消后父子进程都必须退出', 'run 记录状态必须仍是 cancelled']
+  const permissions = 'read-only：不得写入工作区'
+  const safetyPolicy = '不得修改宿主 DSH profile'
+  const scope = { include: ['src/dsh'], exclude: ['docs/'] }
+  const fullText = `${'开头'.repeat(2000)}${'中间填充'.repeat(2000)}${'结尾'.repeat(2000)}`
+  const tools = makeTools({
+    dispatcher: {
+      dispatch: async () => ({}),
+      getTask: async () => ({
+        childId: 'c-protected',
+        status: 'cancelled',
+        output: fullText,
+        acceptance,
+        scope,
+        permissions,
+        safetyPolicy,
+      }),
+    },
+  })
+  const out = await tools.get(TOOL_NAMES.GET_TASK).execute({ childId: 'c-protected' })
+  assert.equal(out.resultTruncated, true)
+  assert.deepEqual(out.protected.acceptance, acceptance, 'acceptance 必须原样、完整')
+  assert.equal(out.protected.permissions, permissions)
+  assert.equal(out.protected.safetyPolicy, safetyPolicy)
+  assert.deepEqual(out.protected.scope, scope)
+  // 文本视图里也必须能看到（来自不截断的保护块，而不是首尾窗口的偶然残片）
+  assert.ok(out.result.includes('- 取消后父子进程都必须退出'))
+  assert.ok(out.result.includes(permissions))
+  assert.ok(out.result.includes(safetyPolicy))
+})
+
+test('get_task 有 summary 时：正文可省略，但 acceptance 仍完整返回', async () => {
+  const acceptance = ['必须说明进程是否真正退出', '必须给出可复现的测试命令']
+  const tools = makeTools({
+    dispatcher: {
+      dispatch: async () => ({}),
+      getTask: async () => ({
+        childId: 'c-summary-protected',
+        status: 'completed',
+        summary: '结论摘要：已完成',
+        output: 'x'.repeat(20000),
+        acceptance,
+      }),
+    },
+  })
+  const out = await tools.get(TOOL_NAMES.GET_TASK).execute({ childId: 'c-summary-protected' })
+  assert.equal(out.resultOmitted, true)
+  assert.equal(Object.hasOwn(out, 'result'), false, '默认仍不回原始正文')
+  assert.deepEqual(out.protected.acceptance, acceptance, '有 summary 也不得丢验收标准')
+  assert.ok(JSON.stringify(out).includes('必须给出可复现的测试命令'))
+})
+
+test('get_task 摘要：自由文本中间的验收/权限段被截断时必须原样找回', async () => {
+  const middle = ['验收标准：', '- 取消后父子进程都必须退出', '权限限制：只读，不得写盘'].join('\n')
+  const text = `${'头'.repeat(3000)}\n\n${middle}\n\n${'尾'.repeat(3000)}`
+  const tools = makeTools({
+    dispatcher: {
+      dispatch: async () => ({}),
+      getTask: async () => ({ childId: 'c-middle', status: 'completed', output: text }),
+    },
+  })
+  const out = await tools.get(TOOL_NAMES.GET_TASK).execute({ childId: 'c-middle' })
+  assert.equal(out.resultTruncated, true)
+
+  // 变异证据：修复前的纯首尾截断必然丢掉中间段；若保护逻辑被删，下面的断言会失败。
+  const headTail = truncateUtf8(text, TASK_RESULT_HEAD_BYTES + TASK_RESULT_TAIL_BYTES, {
+    headBytes: TASK_RESULT_HEAD_BYTES,
+    tailBytes: TASK_RESULT_TAIL_BYTES,
+  })
+  assert.equal(headTail.text.includes('验收标准'), false, '纯首尾截断本来会丢中间验收段')
+  assert.ok(out.result.includes('验收标准'))
+  assert.ok(out.result.includes('- 取消后父子进程都必须退出'))
+  assert.ok(out.result.includes('权限限制：只读，不得写盘'))
 })
 
 test('dispatch 成功回执瘦身：只回 ok/taskRef/roleId/roleName/isolation', async () => {
