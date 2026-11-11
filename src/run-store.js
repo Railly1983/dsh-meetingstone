@@ -16,6 +16,7 @@
  */
 import { promises as fs } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { summarizeContextPack, summarizeTaskSpec } from './taskspec.js'
 
 /** 相对项目根的默认目录。 */
 export const RUNS_RELATIVE_DIR = '.meetingstone/runs'
@@ -49,6 +50,19 @@ const MAX_OVERLAP_BACKFILL_RECORDS = 20
 /** 默认保留条数 / 时长。 */
 export const DEFAULT_MAX_RUNS = 100
 export const DEFAULT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
+/**
+ * 结构化结果 summary 的落盘上限（UTF-8 字节）。
+ * 目标 300–500 token（≈2–4KiB）；8KiB 留出复杂任务的余量，超出按首尾截断。
+ */
+export const MAX_SUMMARY_BYTES = 8 * 1024
+/** handoff 里单条结论/列表项的上限。 */
+export const MAX_HANDOFF_ITEM_CHARS = 500
+/** 记录里结构化数组字段的条数上限。 */
+export const MAX_RECORD_ITEMS = 50
+/** 记录里结构化数组单条的上限（字符）。 */
+export const MAX_RECORD_ITEM_CHARS = 1000
+/** 子 Agent 允许自报的状态闭集（与记录 status 分开）。 */
+const RESULT_STATUS_VALUES = ['completed', 'partial', 'blocked', 'failed']
 /**
  * 读取时允许的最大文件体积（防止被塞进巨型文件）。
  * 与写入约束对齐：结果 256KB + changedFiles 预算 2MB + 其他字段余量 ≈ 2.75MB。
@@ -173,6 +187,92 @@ function sliceUtf8(buffer, start, end) {
   // 尾部：若 e 落在字符中间则回退到该字符起点
   while (e > s && (buffer[e] & 0b1100_0000) === 0b1000_0000) e -= 1
   return buffer.subarray(s, e).toString('utf8')
+}
+
+/**
+ * 单行文本字段归一化：空值 → null，超长按 UTF-8 首尾截断。
+ * @param {unknown} value
+ * @param {number} maxBytes
+ * @returns {string | null}
+ */
+function recordText(value, maxBytes) {
+  if (typeof value !== 'string' || !value) return null
+  return truncateUtf8(value, maxBytes).text
+}
+
+/**
+ * 字符串数组归一化（白名单 + 条数/长度上限）。
+ * @param {unknown} value
+ * @param {number} [maxItems]
+ * @returns {string[]}
+ */
+function recordStringList(value, maxItems = MAX_RECORD_ITEMS) {
+  if (!Array.isArray(value)) return []
+  /** @type {string[]} */
+  const out = []
+  for (const item of value) {
+    if (out.length >= maxItems) break
+    if (typeof item !== 'string' || !item) continue
+    // 按码点切，避免把 emoji/汉字切坏
+    const chars = Array.from(item)
+    out.push(chars.length <= MAX_RECORD_ITEM_CHARS ? item : chars.slice(0, MAX_RECORD_ITEM_CHARS).join(''))
+  }
+  return out
+}
+
+/**
+ * evidence：`{ file?, line?, finding? }` 白名单，不落调用方的任意字段。
+ * @param {unknown} value
+ * @returns {Array<{ file?: string, line?: number, finding?: string }>}
+ */
+function recordEvidence(value) {
+  if (!Array.isArray(value)) return []
+  /** @type {Array<{ file?: string, line?: number, finding?: string }>} */
+  const out = []
+  for (const item of value) {
+    if (out.length >= MAX_RECORD_ITEMS) break
+    if (!item || typeof item !== 'object') continue
+    const source = /** @type {Record<string, unknown>} */ (item)
+    /** @type {{ file?: string, line?: number, finding?: string }} */
+    const entry = {}
+    if (typeof source.file === 'string' && source.file) {
+      entry.file = Array.from(source.file).slice(0, 500).join('')
+    }
+    if (Number.isInteger(source.line)) entry.line = Number(source.line)
+    if (typeof source.finding === 'string' && source.finding) {
+      entry.finding = Array.from(source.finding)
+        .slice(0, MAX_RECORD_ITEM_CHARS)
+        .join('')
+    }
+    if (entry.file || entry.line !== undefined || entry.finding) out.push(entry)
+  }
+  return out
+}
+
+/**
+ * handoff：结论 / 证据 / 产物 / 未决 / 下一步（有界）。
+ * @param {unknown} value
+ * @returns {{ conclusion: string, evidence: Array<object>, artifacts: string[],
+ *   openIssues: string[], nextAction: string | null } | null}
+ */
+function recordHandoff(value) {
+  if (!value || typeof value !== 'object') return null
+  const source = /** @type {Record<string, unknown>} */ (value)
+  const conclusion = recordText(source.conclusion, 2 * 1024)
+  const evidence = recordEvidence(source.evidence).slice(0, 10)
+  const artifacts = recordStringList(source.artifacts, 10)
+  const openIssues = recordStringList(source.openIssues, 10)
+  const nextAction = recordText(source.nextAction, 2 * 1024)
+  if (!conclusion && evidence.length === 0 && artifacts.length === 0 && openIssues.length === 0 && !nextAction) {
+    return null
+  }
+  return {
+    conclusion: conclusion ?? '',
+    evidence,
+    artifacts,
+    openIssues,
+    nextAction,
+  }
 }
 
 /**
@@ -451,6 +551,30 @@ export function createRunStore(options) {
       resultBytes: result.bytes,
       resultTruncated: result.truncated,
       error: err,
+      // P0-C：结构化结果（子 Agent 自报；不覆盖宿主终态 status 与 git changedFiles）
+      structuredResult: record.structuredResult === true,
+      resultStatus: RESULT_STATUS_VALUES.includes(record.resultStatus) ? record.resultStatus : null,
+      summary: recordText(record.summary, MAX_SUMMARY_BYTES),
+      summaryBytes: Number.isInteger(record.summaryBytes)
+        ? record.summaryBytes
+        : typeof record.summary === 'string'
+          ? Buffer.byteLength(record.summary, 'utf8')
+          : null,
+      summaryTruncated:
+        record.summaryTruncated === true ||
+        (typeof record.summary === 'string' &&
+          Buffer.byteLength(record.summary, 'utf8') > MAX_SUMMARY_BYTES),
+      evidence: recordEvidence(record.evidence),
+      artifacts: recordStringList(record.artifacts),
+      reportedChangedFiles: recordStringList(record.reportedChangedFiles),
+      resultTests: recordStringList(record.resultTests),
+      openIssues: recordStringList(record.openIssues),
+      nextAction: recordText(record.nextAction, 2 * 1024),
+      handoff: recordHandoff(record.handoff),
+      // P0-B：TaskSpec / ContextPack 摘要（已经是截断后的形状，这里再白名单一次）
+      taskSpec: summarizeTaskSpec(record.taskSpec),
+      contextPack: summarizeContextPack(record.contextPack),
+      title: recordText(record.title, 1024),
       continuation: record.continuation ?? null,
       // 上下文重放实际注入的字节数：只在本次派单带 continuation 时写入，
       // 没有就省略该字段（不写 null，避免把"没重放"伪装成"重放了 0 字节"）。
@@ -758,6 +882,11 @@ export function createRunStore(options) {
         model: parsed.model ?? null,
         status: parsed.status ?? 'unknown',
         ...(parsed.interrupted === true ? { interrupted: true } : {}),
+        // P0-B/P0-C：列表里展示任务名与结构化结果摘要（不返回长文）
+        title: typeof parsed.title === 'string' && parsed.title ? parsed.title : null,
+        structuredResult: parsed.structuredResult === true,
+        resultStatus: typeof parsed.resultStatus === 'string' ? parsed.resultStatus : null,
+        summaryPreview: typeof parsed.summary === 'string' ? parsed.summary.slice(0, 200) : '',
         // 原生 Job id（无 Job 时省略）：列表里能直接看到面板中的任务
         ...(typeof parsed.jobId === 'string' && parsed.jobId ? { jobId: parsed.jobId } : {}),
         stopReason: parsed.stopReason ?? null,

@@ -330,13 +330,13 @@ function makeDeps(over = {}) {
   return { deps, dispatchCalls }
 }
 
-test('registerTools：恰好注册六个工具，名字正确、描述非空', () => {
+test('registerTools：恰好注册七个工具，名字正确、描述非空', () => {
   const { ctx, registered } = fakeCtx()
   const { deps } = makeDeps()
   const tools = registerTools(ctx, deps)
 
-  assert.equal(registered.length, 6, '当前注册六个工具')
-  assert.equal(tools.length, 6)
+  assert.equal(registered.length, 7, '当前注册七个工具')
+  assert.equal(tools.length, 7)
   assert.deepEqual(
     registered.map((t) => t.name),
     [
@@ -344,6 +344,7 @@ test('registerTools：恰好注册六个工具，名字正确、描述非空', (
       TOOL_NAMES.DISPATCH,
       TOOL_NAMES.LIST_RUNS,
       TOOL_NAMES.GET_TASK,
+      TOOL_NAMES.GET_RUN_ARTIFACT,
       TOOL_NAMES.CANCEL_TASK,
       TOOL_NAMES.CLI_STATUS,
     ],
@@ -378,6 +379,7 @@ test('registerTools：defineTool 可注入（生产注入真实实现，测试�
     TOOL_NAMES.DISPATCH,
     TOOL_NAMES.LIST_RUNS,
     TOOL_NAMES.GET_TASK,
+    TOOL_NAMES.GET_RUN_ARTIFACT,
     TOOL_NAMES.CANCEL_TASK,
     TOOL_NAMES.CLI_STATUS,
   ])
@@ -434,7 +436,7 @@ test('meetingstone_cli_status：只透传探测字段，不返回余额、不编
   const { deps } = makeDeps()
   registerTools(ctx, deps)
 
-  const all = await registered[5].execute({})
+  const all = await registered.find((t) => t.name === TOOL_NAMES.CLI_STATUS).execute({})
   assert.equal(all.clis.length, 3)
   for (const item of all.clis) {
     for (const key of ['installed', 'path', 'version', 'source', 'checkedAt', 'notes']) {
@@ -445,12 +447,12 @@ test('meetingstone_cli_status：只透传探测字段，不返回余额、不编
     }
   }
 
-  const one = await registered[5].execute({ cli: 'codex' })
+  const one = await registered.find((t) => t.name === TOOL_NAMES.CLI_STATUS).execute({ cli: 'codex' })
   assert.equal(one.clis.length, 1)
   assert.equal(one.clis[0].cli, 'codex')
   assert.equal(one.clis[0].installed, true)
 
-  const bad = await registered[5].execute({ cli: 'nope' })
+  const bad = await registered.find((t) => t.name === TOOL_NAMES.CLI_STATUS).execute({ cli: 'nope' })
   assert.equal(bad.error, 'UNKNOWN_CLI')
 })
 
@@ -458,7 +460,7 @@ test('meetingstone_cli_status：探测器未注入时失败关闭，不编造状
   const { ctx, registered } = fakeCtx()
   const { deps } = makeDeps()
   registerTools(ctx, { ...deps, probe: null })
-  const out = await registered[5].execute({})
+  const out = await registered.find((t) => t.name === TOOL_NAMES.CLI_STATUS).execute({})
   assert.equal(out.error, 'PROBE_UNAVAILABLE')
 })
 
@@ -674,7 +676,9 @@ test('没有 prompt 时回退用 description；两者都没有则只发任务', 
     context: { projectRoot: 'D:/MeetingStone', agent: { session: { header: { cwd: 'D:/MeetingStone' } } } },
   })
   const spec2 = subagents.calls.filter((c) => c.method === 'startActivation')[1].spec
-  assert.equal(spec2.request.prompt[0].text, '裸任务')
+  // P0-C：所有派单都带输出契约；裸任务仍保持在最前，不被前置内容包住
+  assert.ok(spec2.request.prompt[0].text.startsWith('裸任务'), '无人物设定时任务正文仍在最前')
+  assert.match(spec2.request.prompt[0].text, /\[OUTPUT CONTRACT — 必须遵守\]/)
 })
 
 test('落盘钩子：终态记录的 result 字段必须有值（不能只传 output）', async () => {

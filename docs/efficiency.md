@@ -24,6 +24,12 @@
 **不硬拒绝**：这四件是规范，不是校验。派单缺了某一项，系统照样执行，不会拦你、不会报错。
 只是缺得越多，对方越可能跑偏或来回追问——省下的字，最后都会以返工还回来。
 
+> 现在可以把这四件写成**结构化字段**（`title` / `objective` / `scope` / `acceptance` / `evidence` /
+> `contextRefs` / `contextPack`），由插件渲染进子 Agent 提示词。仍不是表单：只有缺 `title`
+> （用了任一结构化字段时）、声明了 `scope` 却没有 `acceptance`、或关键字段类型错误时才会
+> 返回 `TASKSPEC_INVALID`。字段与校验规则见
+> [配置参考 §7.1–7.2](configuration.md#71-taskspec结构化任务简报p0-b)。
+
 ## 2. 输出：只给"能用的东西"
 
 子智能体回复时，只给三样：
@@ -34,6 +40,11 @@
 
 禁止把长文、整份文件、大段原文复述回会话。上下文是共享的稀缺资源，复述一遍等于花两遍钱
 买同一段字。要查全文，按路径去 `.meetingstone/runs` 取，别在会话里再贴一遍。
+
+> 派单提示词里已经固定写入**输出契约**：子 Agent 最后返回 `status` / `summary` / `evidence` /
+> `artifacts` / `changedFiles` / `tests` / `openIssues` / `nextAction`。插件解析后默认只把
+> `summary` / `handoff` 交给主控；完整正文用 `meetingstone_get_run_artifact` 按范围读取。
+> 模板与字段见 [handoff.md](handoff.md)。
 
 ## 3. 收口：一次查，批量报
 

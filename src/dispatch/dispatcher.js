@@ -216,6 +216,8 @@ function positiveInteger(value, fallback) {
  * @typedef {object} DispatchRequest
  * @property {string} role 角色引用（roleId / name / 别名）
  * @property {string} task 任务内容
+ * @property {any} [taskSpec] 已校验的 TaskSpec（结构化模式；不传 = 旧路径）
+ * @property {any} [contextPack] 已校验的 ContextPack（可空）
  * @property {string} [cwd] 目标目录；隔离模式下会被工作树路径覆盖
  * @property {string} [projectKey] 并发计数键（通常传项目根路径）；省略视为 default
  * @property {string} [projectRoot] 原始项目根（未归一化；建工作树用）
@@ -228,6 +230,8 @@ function positiveInteger(value, fallback) {
  * @typedef {object} AdapterStartInput
  * @property {object} role 已解析的角色
  * @property {string} task
+ * @property {any} [taskSpec] TaskSpec（原样透传，由适配器渲染提示词与落盘摘要）
+ * @property {any} [contextPack] ContextPack（原样透传）
  * @property {string} [cwd]
  * @property {number} timeoutMs
  * @property {object} [context] 由调用方透传的宿主上下文
@@ -539,6 +543,11 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       started = await adapter.start({
         role,
         task: req.task,
+        // P0-B：结构化简报原样交给适配器（提示词组装与落盘摘要都在那里做）
+        ...(req.taskSpec && typeof req.taskSpec === 'object' ? { taskSpec: req.taskSpec } : {}),
+        ...(req.contextPack && typeof req.contextPack === 'object'
+          ? { contextPack: req.contextPack }
+          : {}),
         // 隔离模式下 cwd 必须是工作树；显式传入的 cwd 不能绕过隔离
         cwd: taskCwd,
         timeoutMs: role.timeoutMs,
