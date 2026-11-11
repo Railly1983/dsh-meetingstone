@@ -20,6 +20,11 @@ V1 范围冻结（docs/V1-SCOPE.md）：四个工作包 + 不做清单。
 - 上下文重放上限 16 KiB
 - 模型由角色定义决定，设置页不再展示默认模型/通道模型
 
+### Added (U2/U3)
+- 设置页最终两区：外部 CLI 开关（原生风格）+ 默认角色配置
+- 角色列表三色二态：灰=关闭/阻断、黄=额度耗尽、绿=正常/未知
+- 角色二级详情可编辑（名称/简称/描述/通道/模型/思考强度/prompt），逐字段来源与恢复继承
+
 ### Fixed
 - 设置页与对话顶部集合石入口不显示：slot 注册不再阻塞在 `ctx.inject(['remote.meetingstone'])` 回调里，改为立即注册 + `ctx.get()` 惰性取服务
 - 右侧栏无法打开：改用 `ctx.sidebarRight.openTab(kind, { params })`，keyed seat 使用 `key`
