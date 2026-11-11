@@ -50,6 +50,7 @@ npm run verify                                              # 1) 门禁，必须
 | [任务清单](docs/任务清单.md) | WBS 与验收状态 |
 | [架构](docs/architecture.md) | 分层与数据流、设计不变量 |
 | [配置参考](docs/configuration.md) | 全部字段、合并规则、错误码 |
+| [协作效率规范](docs/efficiency.md) | 派单简报、输出、收口、失败标注的协作约定（纯提示词，非配置） |
 | [安装/卸载](docs/installation.md) | 门禁、安装、provider、配置、回滚 |
 | [安全与权限](docs/security.md) | 权限边界与"不提供只读通道"的原因 |
 | [工作树隔离（自动 + 手动）](docs/worktree-isolation.md) | 默认每任务独立工作树、失败关闭、人工合并/清理；文件布局隔离≠权限沙箱 |
