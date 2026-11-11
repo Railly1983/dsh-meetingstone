@@ -197,6 +197,9 @@
 | `meetingstone_get_run_artifact` 找不到记录 | `NOT_FOUND` |
 | 记录文件不是合法 JSON | `CORRUPT` |
 | `lineFrom/lineTo` 与 `headBytes/tailBytes` 同时使用、或范围非法 | `INVALID_RANGE` |
+| `meetingstone_wait` 的 `childIds` 不是非空字符串数组 | `INVALID_CHILD_IDS` |
+| `meetingstone_wait` 的 `timeoutMs` 不是正数 | `INVALID_TIMEOUT` |
+| `meetingstone_wait` 的 childId 在本进程查不到（含 DSH 重启前的任务） | `UNKNOWN_CHILD`：立即返回，不阻塞，`unknownChildIds` 列出 |
 | 记录文件超过读取上限 | `TOO_LARGE` |
 | 取消/卸载时宿主 `dispose()` 超时 | `ADAPTER_DISPOSE_TIMEOUT`：写终态（`stopConfirmed:false`）并**保留**并发槽位/隔离互斥，等 activation.result 落定后自动释放 |
 | 取消/卸载时宿主 `dispose()` 抛错 | `ADAPTER_DISPOSE_FAILED`：写终态（`stopConfirmed:false`）并**保留**并发槽位/隔离互斥，等 activation.result 落定后自动释放 |
@@ -245,6 +248,9 @@
 | `meetingstone_dispatch` | 成功只回 `ok` / `taskRef`（`childId`、`name`、`provider`、`jobId`）/ `roleId` / `roleName` / `isolation` | 角色全量、prompt、工作树细节一律不回；需要时查 `meetingstone_list_runs` |
 | `meetingstone_list_runs` | 记录索引：`title` / `status` / `resultStatus` / `summaryPreview` / `resultBytes` 等 | 需要正文用 `meetingstone_get_task` 或 `meetingstone_get_run_artifact` |
 | `meetingstone_list_roles` | `roleId` / `name` / `aliases` / `enabled` / `availability` | `verbose:true` 追加 `description` / `channel` / `model` / `hasPrompt` / `source` |
+| `meetingstone_wait` | 每个任务的 `childId` / `status` / `stopReason` / `resultBytes` / `summary?` / `timedOut` | 超时未完成的任务标 `status:'running'`、`timedOut:true`；未知 `childId` 立即返回 `UNKNOWN_CHILD` |
+
+- `meetingstone_wait` 用于**收口**（一次等一组任务全部到达终态），不要高频调用、不要拿它轮询：默认最多等 300000ms、上限 600000ms；已完成的立即返回，未完成的只等宿主结算通知（不忙等）；同一任务被多次 wait 复用同一监听。只认本进程内存记录，DSH 重启前的任务视为未知。
 
 - `meetingstone_get_task` 的 `recordPath` 指向 `.meetingstone/runs/<childId>.json`；`resultBytes` 是原始结果字节数（不是截断后长度）。
 - 上下文重放上限从 64KiB 收紧到 **16KiB**（头 12KiB + 尾 4KiB）。带 `continuesFrom` 的派单会在落盘记录里写 `continuationBytes`（本次实际注入的重放块字节数）；没有重放则**省略该字段**。

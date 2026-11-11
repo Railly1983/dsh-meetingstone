@@ -127,7 +127,7 @@ const ctx = {
 }
 apply(ctx, {})
 
-assert.equal(tools.length, 7, '工具数量变了，门禁需要同步复核（当前应为 7）')
+assert.equal(tools.length, 8, '工具数量变了，门禁需要同步复核（当前应为 8）')
 for (const tool of tools) {
   checkParameters(tool.name, tool.parameters)
   checkOutputSchema(tool.name, tool.output?.schema)
@@ -196,6 +196,30 @@ for (const key of ['headBytes', 'tailBytes', 'lineFrom', 'lineTo']) {
     `meetingstone_get_run_artifact.${key} 必须是 number`,
   )
 }
+
+// 7) 阻塞等待工具：childIds 必须是字符串数组且必填（宿主硬性要求 array 带 items），timeoutMs 是数字
+const wait = tools.find((t) => t.name === 'meetingstone_wait')
+assert.ok(wait, '缺 meetingstone_wait 工具')
+assert.equal(wait.parameters.properties.childIds?.type, 'array', 'meetingstone_wait.childIds 必须是 array')
+assert.equal(
+  wait.parameters.properties.childIds?.items?.type,
+  'string',
+  'meetingstone_wait.childIds 的 items 必须是 string',
+)
+assert.ok(
+  Array.isArray(wait.parameters.required) && wait.parameters.required.includes('childIds'),
+  'meetingstone_wait 的 childIds 必须必填',
+)
+assert.equal(
+  wait.parameters.properties.timeoutMs?.type,
+  'number',
+  'meetingstone_wait.timeoutMs 必须是 number',
+)
+assert.equal(
+  wait.parameters.properties.timeoutMs?.default,
+  300000,
+  'meetingstone_wait.timeoutMs 默认值必须是 300000',
+)
 
 console.log(`PASS: ${tools.length} 个工具的注册产物符合宿主 / 模型 API 契约`)
 for (const tool of tools) {

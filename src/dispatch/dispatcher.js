@@ -400,6 +400,7 @@ function positiveInteger(value, fallback) {
  * @property {(input: AdapterStartInput) => Promise<{ taskRef: object }>} start
  * @property {(taskRef: object | string) => Promise<{ stopConfirmed: boolean, code?: string, message?: string, reason?: string }>} [cancel]
  * @property {(role: object) => { ok: boolean, reason?: string }} [canStart]
+ * @property {(childIds: string[], timeoutMs?: number) => Promise<object>} [waitForSettled]
  */
 
 /**
@@ -924,11 +925,24 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
     return adapter.getTask(ref)
   }
 
+  /**
+   * 等待一组任务全部到达终态（或超时）。适配器不支持时如实返回不可用，不假装已等待。
+   * @param {string[]} childIds
+   * @param {number} [timeoutMs]
+   */
+  async function waitForSettled(childIds, timeoutMs) {
+    if (typeof adapter.waitForSettled !== 'function') {
+      return { ok: false, code: 'WAIT_UNAVAILABLE', message: '当前适配器不支持等待任务终态' }
+    }
+    return adapter.waitForSettled(childIds, timeoutMs)
+  }
+
   return {
     dispatch,
     release,
     cancel,
     getTask,
+    waitForSettled,
     // P0-D：进行中索引规模（仅用于测试/诊断，不暴露索引内容）。
     dedupIndexSize: () => inProgress.size,
     stats: (projectKey) => {
