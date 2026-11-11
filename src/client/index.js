@@ -741,6 +741,9 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /** GUI 注册期错误：注册失败时页面上要能看见原因，而不是整块消失。 */
+    const guiErrors = []
+
     /**
      * 数据加载器。`serviceOrGet` 可以是服务实例，也可以是返回服务的函数。
      *
@@ -763,7 +766,16 @@ window.__ModuleLoader__.load({
             `${REMOTE_SERVICE}.list failed: ${failure.code ?? 'unknown'}: ${failure.message ?? 'unknown'}`,
           )
         }
-        return normalizeSnapshot(result.value)
+        const snapshot = normalizeSnapshot(result.value)
+        if (guiErrors.length > 0 && snapshot.lastError === null) {
+          snapshot.lastError = {
+            code: 'GUI_REGISTRATION_FAILED',
+            message: guiErrors.join(' | '),
+            at: null,
+            source: 'client',
+          }
+        }
+        return snapshot
       }
     }
 
@@ -1146,13 +1158,30 @@ window.__ModuleLoader__.load({
       const t = ctx.locale.bind(NS)
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'meetingstone: section dictionaries')
 
+      // 任何一段注册失败都不能拖垮宿主启动（0.1.0-alpha 真机事故：一个 slot 注册
+      // 抛错导致 web boot "entry did not activate"，整个应用无法打开）。
+      const guard = (/** @type {string} */ label, /** @type {() => void} */ fn) => {
+        try {
+          fn()
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          guiErrors.push(`${label}: ${message}`)
+          try {
+            console.error(`[meetingstone] GUI ${label} failed:`, error)
+          } catch {
+            /* console 不可用 */
+          }
+          if (typeof ctx.logger?.warn === 'function') ctx.logger.warn(`[meetingstone] GUI ${label} failed: ${message}`)
+        }
+      }
+
       let unmount
       try {
         unmount = await ctx.remote.$mount(REMOTE_CONTRIBUTION)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         if (typeof ctx.logger?.warn === 'function') ctx.logger.warn(error)
-        registerSection(ctx, async () => unavailableSnapshot('REMOTE_MOUNT_FAILED', message), t)
+        guard('section(mount-failed)', () => registerSection(ctx, async () => unavailableSnapshot('REMOTE_MOUNT_FAILED', message), t))
         return
       }
       // $mount 返回卸载函数；绑定到本插件 effect，卸载/重载时回收命名空间服务。
@@ -1169,9 +1198,9 @@ window.__ModuleLoader__.load({
         }
       }
 
-      registerSection(ctx, makeLoader(getService), t)
-      registerHeaderAction(ctx, getService, t)
-      registerSidebarTab(ctx, getService, t)
+      guard('section', () => registerSection(ctx, makeLoader(getService), t))
+      guard('header', () => registerHeaderAction(ctx, getService, t))
+      guard('sidebar', () => registerSidebarTab(ctx, getService, t))
     }
 
     exports.apply = apply
