@@ -1,12 +1,17 @@
 // @ts-check
 /**
- * GUI 只读数据提供者（Host half）。
+ * GUI 数据提供者（Host half）：无参只读快照 + 三个 strict 会话方法。
  *
- * 数据链路（证据见 docs/gui-0.2.0.md §1）：
+ * 数据链路（证据见 docs/gui-0.2.0.md §1/§8）：
  *   browser `ctx.remote.meetingstone.list()`
  *     → Typert Gateway `/api`（SRC marker 反射）
  *     → 本文件创建的 `TypertRemoteService`（namespace `meetingstone`, method `list`）
  *     → `createGuiState().fullSnapshot()`（同步快照 + 全局配置 + CLI 探测）
+ *
+ *   browser `ctx.remote.meetingstone.getSessionConfig()` 等
+ *     → Typert Gateway `/api`（优先 Host strict 定义）
+ *     → 同一 service 的会话方法
+ *     → `createSessionRemoteHandlers` → `src/gui/session.js`（继承/白名单/落盘）
  *
  * 数据**不另建源**：
  *   - 角色：`registry.list()`（与 `meetingstone_list_roles` 同一份注册表）
@@ -25,6 +30,8 @@
 import { createRequire } from 'node:module'
 import { roleAvailability } from '../dsh/register.js'
 import { CLI_SPECS } from '../cli/probe.js'
+import { createSessionRemoteHandlers } from './session-remote.js'
+import { registerSessionStrictRemotes } from './typert.js'
 
 const require = createRequire(import.meta.url)
 
@@ -35,14 +42,16 @@ export const GUI_REMOTE_SERVICE = 'meetingstone'
 const REMOTE_METHOD_DESCRIPTOR_VERSION = 1
 
 /**
- * 只暴露无参 `list`。
+ * 暴露无参 `list` + 三个带参会话方法。
  *
- * 真机证据（2026-11-11）：手写带参 descriptor 会被宿主 Gateway 拒绝——
- * `generated Remote meetingstone/getSessionConfig field "sessionId" has no
- * strict codec`。strict codec 需要 zod 的 typeSymbol + create()，手写 host 没有
- * 类型符号，无法伪造；`src-json` 参数也会被 `requireStrictInputs` 拒绝。
- * 会话级编辑能力（src/gui/session.js）保留但**暂不接入客户端**，等宿主提供
- * 生成式 Remote（typert generator）后再接。
+ * 0.2.0 曾因手写带参 descriptor 被 Gateway 拒绝（`has no strict codec`）而移除
+ * 三个会话方法；本版按官方生成物的写法恢复：
+ *  - Host：真实 zod schema 构造 `{mode:"strict", typeSymbol, create}`，
+ *    经 `createTypertRemoteInfo` 生成 descriptor，再由 `ctx.typert.register()`
+ *    写入 Host 定义（`src/gui/typert.js`）；
+ *  - Client：同一 typeSymbol 的 strict 参数 codec（`src/client/index.js`）；
+ *  - 无参 `list` 继续走 SRC marker，不做改动。
+ * 宿主缺少 typert/zod 时只跳过 strict 方法，`list` 与工具/派单不受影响。
  */
 
 /**
@@ -344,17 +353,16 @@ export function markRemoteMethod(prototype, method, Remote) {
 }
 
 /**
- * 注册只读 Remote 服务。返回 `{ registered, reason?, error?, stack? }`，**永不抛**。
+ * 注册 GUI Remote 服务。返回 `{ registered, reason?, error?, stack? }`，**永不抛**。
  *
- * 宿主侧由 Gateway 的 SRC（source）模式发现：`ctx.reflect.props` 里的 service
- * 若带 `typertRemote` binding 且原型上有 Remote marker，就能被 `meetingstone/list`
- * 调用（证据：dsh-api-gateway/lib/index.js:924-938,1268-1272）。
- *
- * 只注册无参 `list`；带参会话方法在真机被 Gateway 的 strict codec 校验拒绝
- * （见文件内 REMOTE_METHOD_DESCRIPTOR_VERSION 下方说明），故不注册。
+ * 宿主侧由 Gateway 的 SRC（source）模式发现 `list`；三个带参方法额外注册
+ * strict Host 定义（`ctx.typert.register`），Gateway 会优先使用它
+ * （`dsh-api-gateway/lib/index.js:1255-1259`）。strict 注册失败/不可用时，
+ * 带参方法仍保留 SRC marker 作为降级（Host 侧可调用；客户端是否挂载由
+ * strict codec 决定），不会拖垮 `list`、工具或派单。
  *
  * @param {any} ctx Host 插件 ctx
- * @param {{ snapshot: () => any }} deps
+ * @param {{ snapshot: () => any, sessionApi?: any }} deps
  */
 export function registerGuiRemote(ctx, deps) {
   if (!ctx || typeof deps?.snapshot !== 'function') {
@@ -366,7 +374,10 @@ export function registerGuiRemote(ctx, deps) {
   }
 
   try {
-    const { TypertRemoteService, Remote } = protocol
+    const { TypertRemoteService, Remote, RemoteError } = protocol
+    const handlers = deps.sessionApi
+      ? createSessionRemoteHandlers(deps.sessionApi, { RemoteError })
+      : null
     class MeetingStoneGuiRemote extends TypertRemoteService {
       constructor(context) {
         super(context, GUI_REMOTE_SERVICE)
@@ -376,10 +387,43 @@ export function registerGuiRemote(ctx, deps) {
       async list() {
         return deps.snapshot()
       }
+
+      /** 读取当前会话的角色配置视图（strict：sessionId）。 */
+      async getSessionConfig(sessionId) {
+        if (!handlers) throw new RemoteError('MEETINGSTONE_GUI_REMOTE_UNAVAILABLE', '会话远程未装配')
+        return handlers.getSessionConfig(sessionId)
+      }
+
+      /** 写一个字段级会话覆盖（strict：sessionId/roleId/field/value）。 */
+      async setSessionOverride(sessionId, roleId, field, value) {
+        if (!handlers) throw new RemoteError('MEETINGSTONE_GUI_REMOTE_UNAVAILABLE', '会话远程未装配')
+        return handlers.setSessionOverride(sessionId, roleId, field, value)
+      }
+
+      /** 恢复一个字段/整角色的继承（strict：sessionId/roleId/可省略 field）。 */
+      async clearSessionOverride(sessionId, roleId, field) {
+        if (!handlers) throw new RemoteError('MEETINGSTONE_GUI_REMOTE_UNAVAILABLE', '会话远程未装配')
+        return handlers.clearSessionOverride(sessionId, roleId, field)
+      }
     }
-    markRemoteMethod(MeetingStoneGuiRemote.prototype, 'list', Remote)
+    for (const method of ['list', 'getSessionConfig', 'setSessionOverride', 'clearSessionOverride']) {
+      markRemoteMethod(MeetingStoneGuiRemote.prototype, method, Remote)
+    }
     const instance = new MeetingStoneGuiRemote(ctx)
-    return { registered: true, instance }
+
+    // 真实 zod strict 契约（Host 定义）。失败只记日志，不影响上面的 SRC 服务。
+    const strict = handlers
+      ? registerSessionStrictRemotes(ctx, {
+          log: (level, line) => {
+            const logger = ctx.logger
+            if (logger && typeof logger[level] === 'function') logger[level](line)
+            else if (level === 'error') console.error(line)
+            else console.log(line)
+          },
+        })
+      : { registered: false, reason: 'SESSION_API_UNAVAILABLE' }
+
+    return { registered: true, instance, strict }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     const stack =
@@ -396,7 +440,7 @@ export function registerGuiRemote(ctx, deps) {
 /** 供 stub harness 断言 marker 形状（不用于生产逻辑）。 */
 export const GUI_REMOTE_DESCRIPTOR = Object.freeze({
   version: REMOTE_METHOD_DESCRIPTOR_VERSION,
-  method: 'list',
+  methods: Object.freeze(['list', 'getSessionConfig', 'setSessionOverride', 'clearSessionOverride']),
 })
 
 export default registerGuiRemote

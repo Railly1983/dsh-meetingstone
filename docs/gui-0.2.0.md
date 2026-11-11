@@ -194,29 +194,60 @@ node scripts/verify-package.mjs
 - 顶部固定说明：**当前版本只读（展示全局角色库）；会话级覆盖编辑待宿主生成式 Remote 支持**。
 - 没有输入框 / 保存 / 恢复继承等写操作；角色为空或 remote 不可用时显示可读说明。
 
-### 5.4 Host 远程方法：只有无参 `list`
+### 5.4 Host 远程方法：`list` + 三个 strict 会话方法（P0-S0）
 
-`src/gui/host.js` 只注册 `meetingstone/list`，**三个带参会话方法已移除**。
+`src/gui/host.js` 注册四个方法：
 
-真机错误（2026-11-11）：
-`client api: generated Remote meetingstone/getSessionConfig field "sessionId" has no strict codec`。
-宿主 Gateway 要求参数使用 strict codec（zod `typeSymbol` + `create()`）；手写 host 没有类型
-符号，无法伪造；`src-json` 参数也被 `requireStrictInputs` 拒绝。**不要试图绕过。**
+| 方法 | 参数 codec | 说明 |
+| --- | --- | --- |
+| `meetingstone/list` | 无参（SRC marker） | 全局只读快照，0.2.0 既有行为不变 |
+| `meetingstone/getSessionConfig` | `sessionId` strict | 读当前会话生效角色/覆盖/来源 |
+| `meetingstone/setSessionOverride` | `sessionId/roleId/field/value` strict | 写字段级会话覆盖（只写差异） |
+| `meetingstone/clearSessionOverride` | `sessionId/roleId/field?` strict | 恢复单字段/整角色继承 |
 
-`src/gui/session.js`、`src/session/config.js`、`src/session/store.js` 的纯逻辑与单测保留
-（派单时的会话配置解析仍在用），但**暂不接入客户端**，等宿主提供生成式 Remote 后再接。
+契约实现（**不是空壳**）：
+
+- Host：`src/gui/typert-spec.js` 用真实 zod 构造 spec；`src/gui/typert.js`
+  调官方 `createTypertRemoteInfo(spec, zod)` 得到 descriptor，再经
+  `ctx.inject(['typert']) → ctx.typert.register(manifest)` 注册 Host strict 定义。
+  Gateway 会优先使用它（`dsh-api-gateway/lib/index.js:1255-1259`），并在调用边界用
+  `codec.create().parse(value)` 做真实参数校验（同文件 1796-1820）。
+- Client：`src/client/index.js` 的 `REMOTE_CONTRIBUTION` 恢复三个方法，参数 codec 为
+  `{ mode:"strict", typeSymbol, create: () => z.<schema>() }`，typeSymbol 与 Host 逐字一致。
+- zod 来源：宿主 web 模块表 `staticModules` 已包含 `zod`（`dsh-web-frontend` 的 `YZ()`），
+  官方 `dsh-api-remotes/lib/client.js:7` 也直接 `require("zod")`；Host 侧优先
+  `require('zod')`，失败时从 `dsh-typert-protocol` 的依赖解析。
+- 降级：Host 缺 zod/协议/typert 时只跳过 strict 方法并记日志；Client 缺 zod 时只挂无参
+  `list`，日志 `module=remote phase=strict error=ZOD_UNAVAILABLE`，**不伪造 strict**。
+
+`src/gui/session.js` 仍是纯业务层（继承解析、只写差异、白名单）；`src/gui/session-remote.js`
+只负责把业务错误转成宿主 `RemoteError`（稳定 code 原样回传）。
+
+#### 5.4.1 新会话定位（不依赖先派单）
+
+`src/gui/session-root.js` 按官方路径解析 sessionId → cwd：
+
+1. `ctx.sessions.get(id).header.cwd`（live Session；`dsh-session/lib/index.js:1993-2000`）；
+2. `ctx.agents.get(id).session.header.cwd`（live Agent；`dsh-agent/README.md:28-35`）；
+3. 派单时记录的 `sessionRoots` 映射（兼容兜底）。
+
+不使用 `ctx.sessionController.resolveAgent()`：它会对冷会话执行 resume（创建 Agent），
+侧栏读取不应触发写副作用。新会话在 `session.create` 时已创建 Agent
+（`dsh-api-session-controller/lib/index.js:265-355`），因此**未派单也能读**。若会话尚未
+激活且没有兜底映射，方法如实返回 `SESSION_GUI_SESSION_ROOT_UNKNOWN`，不猜路径。
 
 ### 5.5 验证
 
 ```bash
-node scripts/run-tests.mjs            # gui.test.mjs（注册顺序 / descriptor=1 / 只读面板 / 日志）
+node scripts/run-tests.mjs            # gui.test.mjs（注册顺序 / 4 个 descriptor / strict 契约 / 日志）
 node scripts/smoke-client-inject.mjs  # 真实 Cordis：mount 失败仍注册 header
 ```
 
-`tests/gui.test.mjs` 覆盖：descriptor 只剩 `list`；header 最先注册且 `$mount` 失败不消失；
-pane 只读渲染且无 input/保存控件；错误摘要默认折叠；单模块注册失败不影响其他模块；
-统一日志格式与「日志不含凭证」断言。`tests/session-gui-api.test.mjs` 仍直接测试
-`createSessionGuiApi` 的继承语义（该能力当前不接入 GUI）。
+`tests/gui.test.mjs` 覆盖：Client 4 个 descriptor（list + 三个 strict 会话方法）；Host/Client
+method、参数 wire 与 typeSymbol 完全一致；header 最先注册且 `$mount` 失败不消失；pane 只读
+渲染且无 input/保存控件；错误摘要默认折叠；单模块注册失败不影响其他模块；统一日志格式与
+「日志不含凭证」断言。`tests/session-gui-api.test.mjs` 直接测试 `createSessionGuiApi` 的继承语义；
+`tests/typert-contract.test.mjs` 覆盖 Host strict 注册与参数校验。会话写 UI 仍未接入（见 §8）。
 
 ## 6. 限制与未验证项（如实登记）
 
@@ -245,16 +276,14 @@ pane 只读渲染且无 input/保存控件；错误摘要默认折叠；单模�
   未做真机渲染确认。本次修复的「header 不消失」需在真机重启后再确认一次。
 - **`sidebarRightTabs.open` 方法名未核实**：打开右侧栏用的是 `ctx.sidebarRight.openTab(kind, …)`；
   真机若实际为其他方法名，需在 `openRolePanelOf` 内调整（入口本身仍存在，不会因此消失）。
-- **带参会话 Remote 已移除（真机硬错误）**：`meetingstone/getSessionConfig` 被 Gateway 以
-  `has no strict codec` 拒绝；strict codec 需要 zod 类型符号，手写 host 无法伪造，
-  `src-json` 参数也被 `requireStrictInputs` 拒绝。**不要试图绕过**。会话级覆盖编辑等宿主
-  生成式 Remote（typert generator）支持后再接；`src/gui/session.js` 与 `src/session/*` 的
-  纯逻辑/单测保留，但客户端不可调用。
-- **面板为纯只读**：右侧栏只渲染 `list()` 快照，不写盘、无乐观更新；会话级覆盖写入当前
-  没有 UI 入口。
-- **`sessionRoots` 仍只服务派单解析**：`index.js` 在 `resolveRegistry(exec)` 记录
-  sessionId→项目根，用于读取 `.meetingstone/sessions/<sessionId>.json`；与会话编辑 GUI 无关
-  （该 GUI 已暂不接入）。
+- **带参会话 Remote 已恢复，但真机未验证**：Host strict 定义、Client strict 参数 codec、
+  `ctx.typert.register` 时序、卸载注销目前只做了源码级对齐 + 单测（`tests/typert-contract.test.mjs`、
+  `tests/gui.test.mjs`）。必须在隔离 profile 真机确认：无 `has no strict codec`、set/clear 生效、
+  非法参数被 Host 拒绝、卸载后端点消失。真机步骤见 §8.4。
+- **面板仍为纯只读**：右侧栏只渲染 `list()` 快照；三个会话 Remote 已可用，但本版**不写 UI**
+  （P0-S0 门禁要求先通过真机验证）。
+- **`sessionRoots` 降为兜底**：`index.js` 仍在派单/工具执行时记录 sessionId→项目根；正常读取
+  优先走 `ctx.sessions`/`ctx.agents` 的 `header.cwd`（`src/gui/session-root.js`）。
 
 
 ## 7. 三个面板的职责与命名规则（P0-1）
@@ -305,3 +334,116 @@ pane 只读渲染且无 input/保存控件；错误摘要默认折叠；单模�
   `label`；不要承诺"外部 CLI 任务一定出现在 Subagents 面板"。
 - **会话标题仍是宿主生成**：若宿主把首条 Prompt 当作 sidebar 标题，标题可能仍含任务正文；
   本插件只负责目录行 `label`，不伪造/覆盖宿主会话标题。
+
+## 8. P0-S0：strict Remote + 新会话定位（0.2.0 垂直切片）
+
+本节是「角色面板可配置」的门禁实现说明。**未通过真机验证前，不得扩写会话写 UI。**
+
+### 8.1 契约形状
+
+Host（`src/gui/typert-spec.js` + `src/gui/typert.js`）：
+
+```js
+// 参数 codec（真实 zod，不是空壳）
+{ mode: 'strict', typeSymbol: 'dsh-meetingstone/types#SessionId', create: () => z.string().min(1).max(128) }
+
+// 方法定义（经 createTypertRemoteInfo 变成 descriptor）
+{
+  service: 'meetingstone',
+  invocation: { kind: 'direct' },
+  parameters: [{ name: 'sessionId', wire: 'sessionId', source: 'json', codec }],
+  result: { mode: 'strict', typeSymbol: 'dsh-meetingstone/types#SessionConfigView', create: () => z.object({...}) },
+}
+
+// 注册
+ctx.inject(['typert'], (typeCtx) => typeCtx.typert.register({
+  package: 'dsh-meetingstone', face: 'host', schemas: [],
+  invocations: createTypertRemoteInfo(spec, z).descriptors,
+  model: { services: [], events: [], objects: [] },
+}))
+```
+
+Client（`src/client/index.js` 的 `REMOTE_CONTRIBUTION`）：参数 codec 同形同 typeSymbol；
+`result` 用 `{ mode: 'src-json' }` 原样透传（Gateway 客户端只强制输入 codec）。
+
+> 调用约定：Client 的 `prepareInvocation` 按 descriptor 参数个数校验实参（`dsh-api-gateway/lib/client.browser.js:1832-1836`）。
+> `clearSessionOverride` 的 `field` 虽在 Host 侧可省略，Client 调用需显式传第三参
+> `undefined`（`clearSessionOverride(sessionId, roleId, undefined)`）表示整角色恢复继承；
+> 不能只传两个实参。
+
+typeSymbol 清单（Host/Client 必须逐字一致，`tests/gui.test.mjs` 断言）：
+
+| 键 | typeSymbol |
+| --- | --- |
+| sessionId | `dsh-meetingstone/types#SessionId` |
+| roleId | `dsh-meetingstone/types#RoleId` |
+| field | `dsh-meetingstone/types#OverrideField` |
+| value | `dsh-meetingstone/types#JsonValue` |
+| 读取结果 | `dsh-meetingstone/types#SessionConfigView` |
+| 写入结果 | `dsh-meetingstone/types#SessionOverrideResult` |
+
+### 8.2 文件
+
+| 文件 | 职责 |
+| --- | --- |
+| `src/gui/typert-spec.js` | 纯契约：真实 zod schema、typeSymbol、strict 自检 |
+| `src/gui/typert.js` | 懒加载宿主 zod/协议；`createTypertRemoteInfo` + `ctx.typert.register` |
+| `src/gui/session-remote.js` | 业务错误 → 宿主 `RemoteError`（稳定 code） |
+| `src/gui/session-root.js` | sessionId → `header.cwd` 官方解析 + 派单兜底 |
+| `src/gui/session.js` | 原有继承/白名单/落盘逻辑（未改语义） |
+| `src/gui/host.js` | 四个 Remote 方法 + SRC marker + strict 注册接线 |
+| `src/index.js` | 构造 session GUI API、注入 resolver、日志 |
+| `src/client/index.js` | 三个 strict client descriptor + zod 降级 |
+| `package.json` | 仅新增 `devDependencies`（zod / typert-protocol / typert-registry / cordis），运行时依赖仍为 0 |
+
+### 8.3 测试
+
+```bash
+npm install --no-package-lock   # 仅 devDependencies（zod / typert-protocol / typert-registry / cordis）
+npm test
+# 新增/更新：
+#   tests/typert-contract.test.mjs  strict codec、参数校验、非 strict 拒绝、真实 registry 注册/注销
+#   tests/session-root.test.mjs     新会话 header.cwd、agents 回退、派单兜底、无证据 null
+#   tests/session-remote.test.mjs   RemoteError code 透传
+#   tests/gui.test.mjs              Client 4 个 descriptor、Host/Client typeSymbol 一致、zod 降级
+npm run verify
+```
+
+覆盖点：descriptor strict + typeSymbol 非空 + 真实 zod；非法参数被 zod 拒绝；Host/Client
+typeSymbol 一致；真实 `TypertRegistry` 接受 manifest 且 `dispose()` 后端点注销；空 typeSymbol /
+空壳 create 被 registry 拒绝；注册失败只记录不抛出；缺 zod 时 Client 只挂 `list`。
+`package.json` 的 `dependencies` 仍为空（`verify-manifest` 断言），zod 仅作 devDependency；
+发布包依赖宿主 `dsh-typert-protocol` 的 zod 依赖解析（`loadHostZod` 的双路径）。
+
+### 8.4 真机验证步骤（主控在合并后执行；本任务未执行）
+
+1. 用**隔离 profile**（不要动默认 desktop）安装本仓库构建的 tarball；确认 Loader 行
+   `- id: meetingstone` enabled。
+2. 重启 DSH（或等 HMR），打开设置页与一个**新建、未派单**的会话。
+3. 浏览器 DevTools/宿主日志确认：
+   - `[meetingstone] gui module=remote phase=register … status=ok strict=ok|deferred`
+     （`deferred` 表示 typert 稍后才就绪，随后会出现 `phase=strict status=ok`）；
+   - 无 `client api: generated Remote meetingstone/... has no strict codec`；
+   - 无 `TYPERT_UNAVAILABLE` / `ZOD_UNAVAILABLE` / `phase=strict … error=`。
+4. 在侧栏/控制台调用（或用后续 UI）：
+   - `ctx.remote.meetingstone.getSessionConfig('<sessionId>')` → `{ok:true,value:{effective,overrides,sources}}`；
+   - `setSessionOverride(sessionId,'<roleId>','model','m-x')` → 写 `.meetingstone/sessions/<id>.json`，
+     且 A/B 两个 session 文件互不影响；
+   - `clearSessionOverride(sessionId,'<roleId>','model')` → 字段从文件消失；
+   - 传空 sessionId / 错误类型 → Host 返回 `gateway/input-invalid`；传非法 role/field →
+     返回 `SESSION_GUI_INVALID_ROLE_ID` / `SESSION_GUI_INVALID_FIELD`。
+5. 派单一次，确认派单读取到新值；检查 global/project 文件未被改动。
+6. 停用/卸载插件（或 HMR 重载），确认 `meetingstone/getSessionConfig` 端点消失、无重复注册报错。
+
+### 8.5 未验证 / 风险
+
+- **真机未执行**：本任务只做代码、单测与步骤；strict 注册时序、zod 在真实 web 模块表的解析、
+  `RemoteError` 回传、卸载注销均待 §8.4 确认。
+- **Host `require(ESM)`**：桌面 Node 24 支持；本地 Node 20 单测通过注入真实
+  `createTypertRemoteInfo` 覆盖。若宿主未来改为更严格 ESM 解析，`loadCreateTypertRemoteInfo`
+  需改成异步加载（当前同步注册路径不支持 TLA）。
+- **冷会话**：只有 live Session/Agent 能直接给出 cwd；未激活且无派单兜底的会话返回
+  `SESSION_GUI_SESSION_ROOT_UNKNOWN`（不触发 resume 副作用）。若要覆盖冷会话，可后续接
+  `ctx.sessionQuery.observeSession()`（异步、只读），需要把 resolver 改成 async。
+- **结果 codec**：Host 结果虽为 strict，但未提供 `encode/decode`；Gateway 原样透传，
+  Client 端 `result.mode:"src-json"`。这不影响参数校验，但结果不做结构裁剪。

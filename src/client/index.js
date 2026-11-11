@@ -26,8 +26,9 @@
  *     → Host src/gui/host.js（TypertRemoteService + Remote("list")）
  *     → registry.list() / cfg.channels / cfg.limits / cfg 调度字段 / 本机 CLI 探测
  *
- * 范围：只做**全局**设置（CLI 连接、全局角色库、默认模型、额度/并发策略、
- * 全局调度规则、最近错误）；只读，无搜索/筛选/排序/按钮/编辑/图表/动画。
+ * 范围：全局设置（CLI 连接、全局角色库、默认模型、额度/并发策略、
+ * 全局调度规则、最近错误）只读；会话 Remote（get/set/clearSessionOverride）
+ * 已恢复 strict codec，供后续会话面板写操作使用（本版不接 UI）。
  */
 
 window.__ModuleLoader__.load({
@@ -43,6 +44,20 @@ window.__ModuleLoader__.load({
     let jsx = jsxRuntime.jsx
     let jsxs = jsxRuntime.jsxs
     let Tag = primitives.Tag
+
+    /**
+     * 真实 zod：宿主 web 模块表的平台 seed 词（`staticModules`）包含 `zod`
+     * （dsh-web-frontend/dist/assets/index-*.js 的 `YZ()`：`zod: JS`），
+     * 官方 `@deepseek-ai/dsh-api-remotes/lib/client.js:7` 同样直接
+     * `require("zod")`。拿不到时只挂无参 `list`（严格降级，不伪造 strict）。
+     */
+    let zodModule = null
+    try {
+      zodModule = require('zod')
+    } catch {
+      zodModule = null
+    }
+    const z = zodModule?.z ?? zodModule?.default?.z ?? zodModule?.default ?? null
 
     const NS = 'settings.meetingstone'
     const inject = ['slots', 'locale', 'remote']
@@ -69,26 +84,105 @@ window.__ModuleLoader__.load({
     const REMOTE_INJECT = `remote.${REMOTE_SERVICE}`
 
     /**
+     * strict 契约常量：必须与 Host `src/gui/typert-spec.js` 的
+     * `SESSION_REMOTE_TYPES` 逐字一致（tests/gui.test.mjs 做双向断言）。
+     */
+    const SESSION_TYPES = {
+      sessionId: 'dsh-meetingstone/types#SessionId',
+      roleId: 'dsh-meetingstone/types#RoleId',
+      field: 'dsh-meetingstone/types#OverrideField',
+      value: 'dsh-meetingstone/types#JsonValue',
+      sessionConfigView: 'dsh-meetingstone/types#SessionConfigView',
+      overrideResult: 'dsh-meetingstone/types#SessionOverrideResult',
+    }
+
+    /** 构造 client 侧 strict codec；zod 不可用时返回 null（调用方跳过该方法）。 */
+    const strictCodec = (typeSymbol, build) =>
+      z ? { mode: 'strict', typeSymbol, create: build } : null
+
+    const sessionIdCodec = () =>
+      strictCodec(SESSION_TYPES.sessionId, () => z.string().min(1).max(128))
+    const roleIdCodec = () =>
+      strictCodec(SESSION_TYPES.roleId, () => z.string().min(1).max(128))
+    const fieldCodec = () =>
+      strictCodec(SESSION_TYPES.field, () => z.string().min(1).max(128))
+    const jsonValueCodec = () => strictCodec(SESSION_TYPES.value, () => z.unknown())
+
+    /**
+     * 三个带参会话方法的 client descriptor。参数 codec 全部 strict（真实 zod），
+     * 与 Host 使用同一 typeSymbol；`result` 用 src-json 原样透传
+     * （Gateway 客户端只强制输入 codec，见 dsh-api-gateway/lib/client.browser.js:2101-2109）。
+     *
+     * 不能退回 `src-json` 参数：`ctx.remote.$mount` 的 `requireStrictInputs`
+     * 会直接拒绝并报 `has no strict codec`——0.2.0 的回退原因。
+     */
+    const SESSION_DESCRIPTORS = z
+      ? [
+          {
+            id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/getSessionConfig`,
+            service: REMOTE_SERVICE,
+            namespace: REMOTE_SERVICE,
+            method: 'getSessionConfig',
+            parameters: [
+              {
+                name: 'sessionId',
+                wire: 'sessionId',
+                source: 'json',
+                codec: sessionIdCodec(),
+              },
+            ],
+            invocation: { kind: 'direct' },
+            result: { mode: 'src-json' },
+          },
+          {
+            id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/setSessionOverride`,
+            service: REMOTE_SERVICE,
+            namespace: REMOTE_SERVICE,
+            method: 'setSessionOverride',
+            parameters: [
+              { name: 'sessionId', wire: 'sessionId', source: 'json', codec: sessionIdCodec() },
+              { name: 'roleId', wire: 'roleId', source: 'json', codec: roleIdCodec() },
+              { name: 'field', wire: 'field', source: 'json', codec: fieldCodec() },
+              { name: 'value', wire: 'value', source: 'json', codec: jsonValueCodec() },
+            ],
+            invocation: { kind: 'direct' },
+            result: { mode: 'src-json' },
+          },
+          {
+            id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/clearSessionOverride`,
+            service: REMOTE_SERVICE,
+            namespace: REMOTE_SERVICE,
+            method: 'clearSessionOverride',
+            parameters: [
+              { name: 'sessionId', wire: 'sessionId', source: 'json', codec: sessionIdCodec() },
+              { name: 'roleId', wire: 'roleId', source: 'json', codec: roleIdCodec() },
+              {
+                name: 'field',
+                wire: 'field',
+                source: 'json',
+                acceptsUndefined: true,
+                codec: fieldCodec(),
+              },
+            ],
+            invocation: { kind: 'direct' },
+            result: { mode: 'src-json' },
+          },
+        ]
+      : []
+
+    /**
      * 手写 Typert Remote contribution。
      *
      * 官方包由 `@deepseek-ai/dsh-typert-generator` 生成 `typert.remote-client.js`
      * （形如 dsh-host-plugin-inventory/lib/typert.remote-client.js）。本仓库没有生成器，
-     * 且 `meetingstone/list` 是**零参数、无结果解码**的只读方法，故按生成物字段
-     * 手写最小 descriptor。
-     *
-     * 真机证据（2026-11-11）：带参方法不可手写。宿主 Gateway 要求参数是 strict
-     * codec（zod typeSymbol + create），手写 host 没有类型符号，无法伪造；
-     * `src-json` 参数也会被 `requireStrictInputs` 拒绝。真机错误：
-     * `generated Remote meetingstone/getSessionConfig field "sessionId" has no
-     * strict codec`。因此这里**只保留无参 `list`**；会话级覆盖编辑等宿主生成式
-     * Remote 支持后再接。
+     * 但官方明确允许手写 wire schema（dsh-typert-loader/lib/index.js:27-29），
+     * 且 registry 只要求非空 typeSymbol + 真实 create()（dsh-typert-registry:584-628）。
      *
      * 字段不是随便写的：`ctx.remote.$mount` 会先经 `typert.remotes.register()`
      * 校验 descriptor（dsh-typert-registry/lib/index.js:143-155,584-627）：
      *   - `id` / `service` / `namespace` / `method` 必须是非空 segment；
-     *   - `result` codec 要么 `{mode:"src-json"}`，要么 strict + `typeSymbol` + `create()`。
-     * 这里没有 zod，故用宿主 SRC 路径的 `src-json`；Gateway 客户端对非 strict
-     * 结果原样透传（dsh-api-gateway/lib/client.browser.js:1820-1845）。
+     *   - 参数 codec 必须 `mode:"strict"`（Gateway 客户端硬校验）；
+     *   - `result` codec 可以是 `{mode:"src-json"}`（结果原样透传）。
      */
     const REMOTE_CONTRIBUTION = {
       package: REMOTE_PACKAGE,
@@ -102,6 +196,7 @@ window.__ModuleLoader__.load({
           invocation: { kind: 'direct' },
           result: { mode: 'src-json' },
         },
+        ...SESSION_DESCRIPTORS,
       ],
     }
 
@@ -1239,6 +1334,9 @@ window.__ModuleLoader__.load({
       // 1) Remote contribution：先做能力检测；失败只记 mountError，下面照常注册。
       let mountError = null
       let unmount = null
+      if (!z) {
+        log('warn', 'remote', 'strict', 'error=ZOD_UNAVAILABLE')
+      }
       if (typeof ctx.remote?.$mount !== 'function') {
         mountError = 'CAPABILITY_MISSING: ctx.remote.$mount'
         log('warn', 'remote', 'mount', `error=${mountError}`)
@@ -1281,6 +1379,8 @@ window.__ModuleLoader__.load({
       CliPaths,
       ChannelModels,
       REMOTE_CONTRIBUTION,
+      SESSION_DESCRIPTORS,
+      SESSION_TYPES,
       REMOTE_INJECT,
       TAB_ID,
       HEADER_ACTION_ID,

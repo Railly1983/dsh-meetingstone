@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
+import { z } from 'zod'
 
 const DEFAULT_ASAR =
   'C:/Users/30673/AppData/Local/Programs/DeepSeek Harness/resources/app.asar'
@@ -170,6 +171,7 @@ const fakeRequire = (name) => {
   }
   if (name === 'react') return fakeReact
   if (name === '@deepseek-ai/dsh-client-ui-primitives') return { Tag: function Tag() {} }
+  if (name === 'zod') return { z }
   throw new Error(`unexpected module ${name}`)
 }
 
@@ -221,10 +223,10 @@ async function settle(ms = 30) {
   await fiber
   await settle()
   assert.equal(registrations.length, 4, 'header + section + 两个 keyed seat')
-  assert.equal(client.__test.REMOTE_CONTRIBUTION.descriptors.length, 1, 'descriptor 只剩无参 list')
+  assert.equal(client.__test.REMOTE_CONTRIBUTION.descriptors.length, 4, 'list + 三个 strict 会话方法')
   assert.deepEqual(
     client.__test.REMOTE_CONTRIBUTION.descriptors.map((d) => d.method),
-    ['list'],
+    ['list', 'getSessionConfig', 'setSessionOverride', 'clearSessionOverride'],
   )
   assert.deepEqual(
     registrations.map((r) => r.options.name),

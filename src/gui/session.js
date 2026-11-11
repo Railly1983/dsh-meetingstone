@@ -1,14 +1,4 @@
 // @ts-check
-/**
- * 右侧栏「当前会话角色编辑」的 Host 侧远程方法（纯逻辑，无 I/O 之外的副作用）。
- *
- * ⚠️ 暂不接入客户端（2026-11-11）：本模块只保留纯逻辑与单测，**不再注册为
- * Remote 方法**。真机证据：手写带参 descriptor 被宿主 Gateway 拒绝——
- * `generated Remote meetingstone/getSessionConfig field "sessionId" has no
- * strict codec`；strict codec 需要 zod 类型符号，手写 host 无法伪造，
- * `src-json` 参数也被 `requireStrictInputs` 拒绝。等宿主提供生成式 Remote
- * （typert generator）后再接。右侧栏面板当前为只读 `list()` 渲染。
- */
 import { resolveEffectiveConfig, normalizeFieldPath } from '../session/config.js'
 import { isValidRoleId } from '../roles/ids.js'
 import { isValidSessionId } from '../session/store.js'
@@ -16,14 +6,17 @@ import { isValidSessionId } from '../session/store.js'
 /**
  * 右侧栏「当前会话角色编辑」的 Host 侧远程方法（纯逻辑，无 I/O 之外的副作用）。
  *
+ * 传输层（0.2.0 P0-S0）：三个方法经 `src/gui/typert.js` 的 strict Host 定义
+ * 暴露给客户端；本文件仍只做业务校验与继承解析，不感知 Typert/zod。
+ *
  * 三层继承（global → project → session）的解析复用 `resolveEffectiveConfig`
  * （src/session/config.js），这里只负责：
  *  - 解析出某个 session 的「生效角色表 + 来源 + 当前会话覆盖」
  *  - 把一次字段级覆盖写进会话层（只写差异：等于继承值即删除旧覆盖）
  *  - 把一次字段级「恢复继承」写进会话层
  *
- * 输入校验（白名单）在这里做，坏输入抛带 `code` 的错误，由 src/gui/host.js 的
- * Remote 方法转成 `{ ok:false, error }` 返回给浏览器 half。校验层次：
+ * 输入校验（白名单）在这里做，坏输入抛带 `code` 的错误，由
+ * `src/gui/session-remote.js` 转成宿主 `RemoteError` 返回给浏览器 half。校验层次：
  *  - sessionId：路径安全（src/session/store.js 的 isValidSessionId）
  *  - roleId：角色白名单（isValidRoleId）
  *  - field：角色级字段 / 通道字段白名单（normalizeFieldPath）
@@ -35,7 +28,8 @@ import { isValidSessionId } from '../session/store.js'
  * @param {{ get: (root: string, file?: string) => any }} deps.projectStore
  * @param {ReturnType<import('../session/store.js').createSessionOverrideStore>} deps.sessionStore
  * @param {(sessionId: string) => string | null} [deps.resolveProjectRoot]
- *   由调用方提供的 sessionId → 项目根解析（index.js 用派单时记录的映射）。
+ *   由调用方提供的 sessionId → 项目根解析（生产环境见 src/gui/session-root.js：
+ *   优先 live `ctx.sessions`/`ctx.agents` 的 header.cwd，派单映射只作兜底）。
  *   返回 null 表示找不到该会话的项目根。
  */
 export function createSessionGuiApi({ cfg, projectStore, sessionStore, resolveProjectRoot }) {
@@ -63,7 +57,7 @@ export function createSessionGuiApi({ cfg, projectStore, sessionStore, resolvePr
     if (!projectRoot) {
       throw guiError(
         SESSION_GUI_ERRORS.SESSION_ROOT_UNKNOWN,
-        `找不到会话 ${sessionId} 对应的项目根，无法定位会话级配置（请先在該会话内触发一次派单/工具调用）`,
+        `无法从宿主会话服务定位 ${sessionId} 的项目根（session/agent 未激活或缺少 header.cwd）`,
       )
     }
     const project = projectStore.get(projectRoot, projectConfigFile).config

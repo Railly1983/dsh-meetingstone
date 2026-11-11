@@ -13,6 +13,7 @@ import assert from 'node:assert/strict'
 import { join } from 'node:path'
 
 import { createSessionGuiApi, SESSION_GUI_ERRORS } from '../src/gui/session.js'
+import { createSessionRootResolver } from '../src/gui/session-root.js'
 import { createSessionOverrideStore } from '../src/session/store.js'
 import { createProjectConfigStore } from '../src/project/load.js'
 
@@ -222,4 +223,33 @@ test('resolveProjectRoot 返回 null → SESSION_ROOT_UNKNOWN', () => {
   })
   assert.throws(() => api.getSessionConfig('sess-x'), (e) => e.code === SESSION_GUI_ERRORS.SESSION_ROOT_UNKNOWN)
   assert.throws(() => api.setSessionOverride('sess-x', 'role-sashi', 'model', 'x'), (e) => e.code === SESSION_GUI_ERRORS.SESSION_ROOT_UNKNOWN)
+})
+
+test('新会话未派单：官方 ctx.sessions.header.cwd 即可读取，不依赖 sessionRoots', () => {
+  const cfg = { roles: GLOBAL_ROLES, projectConfigFile: '.meetingstone.json' }
+  const sessionStore = createSessionOverrideStore(memorySessionFs().deps)
+  const api = createSessionGuiApi({
+    cfg,
+    projectStore: { get: () => ({ config: {}, errors: [] }) },
+    sessionStore,
+    resolveProjectRoot: createSessionRootResolver({
+      ctx: {
+        reflect: {
+          get(name) {
+            if (name !== 'sessions') return null
+            return {
+              get: (id) => (id === 'sess-new' ? { header: { id, cwd: ROOT } } : undefined),
+            }
+          },
+        },
+      },
+      fallback: () => {
+        throw new Error('不应走派单兜底')
+      },
+    }),
+  })
+
+  const view = api.getSessionConfig('sess-new')
+  assert.equal(view.effective.roles.length, 1)
+  assert.equal(view.sources.roles['role-sashi'].layer, 'global')
 })
