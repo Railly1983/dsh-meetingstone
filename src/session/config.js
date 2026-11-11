@@ -2,6 +2,10 @@
 /**
  * 会话级配置（session 覆盖）的纯逻辑：白名单、规范化、差异计算与三层继承。
  *
+ * ⚠️ 暂不接入客户端（2026-11-11）：会话级编辑 GUI 的带参 Remote 被宿主 Gateway
+ * 的 strict codec 校验拒绝（真机错误见 docs/gui-0.2.0.md §6），本模块仍被派单时的
+ * 会话配置解析使用，但不再经由 GUI 写入。
+ *
  * 继承顺序：全局（profile 的 `meetingstone` 行）→ 项目（`.meetingstone.json`）
  * → 当前会话（本文件处理的那一层）。会话层**只影响当前 Session**：
  * 存储按 sessionId 分文件（见 store.js），解析时只传入当前会话的覆盖。

@@ -34,12 +34,16 @@ export const GUI_REMOTE_SERVICE = 'meetingstone'
 /** `@deepseek-ai/dsh-typert-protocol/remote-methods` 的版本。 */
 const REMOTE_METHOD_DESCRIPTOR_VERSION = 1
 
-/** 会话级远程方法名（与 src/gui/session.js 的方法一一对应）。 */
-const SESSION_REMOTE_METHODS = Object.freeze([
-  'getSessionConfig',
-  'setSessionOverride',
-  'clearSessionOverride',
-])
+/**
+ * 只暴露无参 `list`。
+ *
+ * 真机证据（2026-11-11）：手写带参 descriptor 会被宿主 Gateway 拒绝——
+ * `generated Remote meetingstone/getSessionConfig field "sessionId" has no
+ * strict codec`。strict codec 需要 zod 的 typeSymbol + create()，手写 host 没有
+ * 类型符号，无法伪造；`src-json` 参数也会被 `requireStrictInputs` 拒绝。
+ * 会话级编辑能力（src/gui/session.js）保留但**暂不接入客户端**，等宿主提供
+ * 生成式 Remote（typert generator）后再接。
+ */
 
 /**
  * 设置页打开时最多等 CLI 探测多久。探测有 5 分钟缓存（src/cli/probe.js TTL），
@@ -155,6 +159,8 @@ function cliView(result) {
   return {
     cli,
     label: typeof spec?.label === 'string' ? spec.label : cli,
+    // CLI 探测只覆盖外部 CLI（docs/design/global-config.md:41）；宿主本身不在此列表。
+    category: 'external',
     installed: source.installed === true,
     path: typeof source.path === 'string' ? source.path : '',
     version: typeof source.version === 'string' ? source.version : '',
@@ -338,14 +344,17 @@ export function markRemoteMethod(prototype, method, Remote) {
 }
 
 /**
- * 注册只读 Remote 服务。返回 `{ registered, reason?, error? }`，**永不抛**。
+ * 注册只读 Remote 服务。返回 `{ registered, reason?, error?, stack? }`，**永不抛**。
  *
  * 宿主侧由 Gateway 的 SRC（source）模式发现：`ctx.reflect.props` 里的 service
  * 若带 `typertRemote` binding 且原型上有 Remote marker，就能被 `meetingstone/list`
  * 调用（证据：dsh-api-gateway/lib/index.js:924-938,1268-1272）。
  *
+ * 只注册无参 `list`；带参会话方法在真机被 Gateway 的 strict codec 校验拒绝
+ * （见文件内 REMOTE_METHOD_DESCRIPTOR_VERSION 下方说明），故不注册。
+ *
  * @param {any} ctx Host 插件 ctx
- * @param {{ snapshot: () => any, session?: import('./session.js').createSessionGuiApi }} deps
+ * @param {{ snapshot: () => any }} deps
  */
 export function registerGuiRemote(ctx, deps) {
   if (!ctx || typeof deps?.snapshot !== 'function') {
@@ -355,8 +364,6 @@ export function registerGuiRemote(ctx, deps) {
   if (!protocol || typeof protocol.TypertRemoteService !== 'function' || typeof protocol.Remote !== 'function') {
     return { registered: false, reason: 'TYPERT_UNAVAILABLE' }
   }
-
-  const session = deps?.session ?? null
 
   try {
     const { TypertRemoteService, Remote } = protocol
@@ -369,41 +376,19 @@ export function registerGuiRemote(ctx, deps) {
       async list() {
         return deps.snapshot()
       }
-
-      /**
-       * 当前会话的角色配置视图（生效角色表 + 覆盖 + 来源）。
-       * 失败抛带 code 的错误，由 Typert Gateway 包成 `{ ok:false, error }`。
-       */
-      async getSessionConfig(sessionId) {
-        if (!session) throw new Error('session gui api 未挂载')
-        return session.getSessionConfig(sessionId)
-      }
-
-      /** 写一个字段级会话覆盖（只写差异）。 */
-      async setSessionOverride(sessionId, roleId, field, value) {
-        if (!session) throw new Error('session gui api 未挂载')
-        return session.setSessionOverride(sessionId, roleId, field, value)
-      }
-
-      /** 恢复一个字段（或全部）的继承。 */
-      async clearSessionOverride(sessionId, roleId, field) {
-        if (!session) throw new Error('session gui api 未挂载')
-        return session.clearSessionOverride(sessionId, roleId, field)
-      }
     }
     markRemoteMethod(MeetingStoneGuiRemote.prototype, 'list', Remote)
-    if (session) {
-      for (const method of SESSION_REMOTE_METHODS) {
-        markRemoteMethod(MeetingStoneGuiRemote.prototype, method, Remote)
-      }
-    }
     const instance = new MeetingStoneGuiRemote(ctx)
-    return { registered: true, instance, withSession: Boolean(session) }
+    return { registered: true, instance }
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const stack =
+      error instanceof Error && error.stack ? String(error.stack).replace(/\s+/g, ' ').slice(0, 600) : ''
     return {
       registered: false,
       reason: 'REMOTE_REGISTER_FAILED',
-      error: error instanceof Error ? error.message : String(error),
+      error: message,
+      stack,
     }
   }
 }

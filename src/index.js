@@ -25,7 +25,6 @@ import { createNodeSessionOverrideStore } from './session/store.js'
 import { createRunStore } from './run-store.js'
 import { createWorktreeManager } from './worktree.js'
 import { createGuiState, registerGuiRemote } from './gui/host.js'
-import { createSessionGuiApi } from './gui/session.js'
 
 /**
  * 宿主运行时把 `@deepseek-ai/dsh-tools` 作为 shared package 提供。
@@ -100,10 +99,12 @@ export function apply(ctx, config = {}) {
   const sessionStore = createNodeSessionOverrideStore()
 
   /**
-   * sessionId → 项目根 映射。右侧栏远程方法只有 sessionId，没有 cwd，靠每次派单/
-   * 工具执行时 `resolveRegistry` 记录的映射来定位会话配置文件。会话结束/卸载不清空
-   * （会话配置是落盘文件，下次同 sessionId 仍可解析），但换项目根后会读旧根——已在
-   * docs/gui-0.2.0.md 登记为未验证项。
+   * sessionId → 项目根 映射。派单/工具执行时由 `resolveRegistry` 记录，
+   * 用于读取该会话的 `.meetingstone/sessions/<sessionId>.json` 覆盖。
+   *
+   * 注意：会话级编辑 GUI（src/gui/session.js）**暂不接入客户端**——手写带参
+   * Remote 被宿主 Gateway 的 strict codec 校验拒绝（真机错误见 docs/gui-0.2.0.md §6）；
+   * 该映射仅服务派单时的会话配置解析。
    * @type {Map<string, string>}
    */
   const sessionRoots = new Map()
@@ -383,23 +384,20 @@ export function apply(ctx, config = {}) {
     // GUI 只读 Remote：宿主注册 `meetingstone/list`（SRC marker），浏览器 half 用
     // ctx.remote.meetingstone.list() 取快照。宿主没有 Typert 协议时静默跳过，
     // 不影响工具与派单（设置页会显示“读取失败”，不会假装有数据）。
-    const sessionApi = createSessionGuiApi({
-      cfg,
-      projectStore,
-      sessionStore,
-      resolveProjectRoot: (sessionId) => sessionRoots.get(sessionId) ?? null,
-    })
+    // 只有无参 list：带参会话方法会被 Gateway strict codec 拒绝（真机证据见
+    // docs/gui-0.2.0.md §6），src/gui/session.js 暂不接入客户端。
     const guiRemote = registerGuiRemote(ctx, {
       snapshot: () => gui.fullSnapshot(),
-      session: sessionApi,
     })
-    if (guiRemote.registered !== true) {
-      const detail = `[${name}] GUI remote unavailable: ${guiRemote.reason}${
-        guiRemote.error ? ` (${guiRemote.error})` : ''
-      }`
-      if (typeof ctx.logger?.info === 'function') ctx.logger.info(detail)
-      else console.log(detail)
-    }
+    const remoteStatus =
+      guiRemote.registered === true
+        ? 'status=ok'
+        : `status=skipped reason=${guiRemote.reason}${
+            guiRemote.error ? ` error=${guiRemote.error}` : ''
+          }${guiRemote.stack ? ` stack=${guiRemote.stack}` : ''}`
+    const remoteLine = `[${name}] gui module=remote phase=register version=${PLUGIN_VERSION} ${remoteStatus}`
+    if (typeof ctx.logger?.info === 'function') ctx.logger.info(remoteLine)
+    else console.log(remoteLine)
 
     const line = `[${name}] loaded v${PLUGIN_VERSION} (roles=${globalRegistry.list().length})`
     if (typeof ctx.logger?.info === 'function') ctx.logger.info(line)

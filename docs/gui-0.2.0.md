@@ -1,23 +1,22 @@
 # GUI 只读配置页（0.2.0）
 
 > **任务列表由原生 Jobs 提供，插件不自造 UI。** 派单成功后，宿主 `ctx.jobs` 可用时本插件会注册
-> `meetingstone-dispatch` Job（`角色简称 · 简短目标`，见 §6）；查看/停止任务使用宿主
+> `meetingstone-dispatch` Job（`角色简称 · 简短目标`，见 §7）；查看/停止任务使用宿主
 > `@deepseek-ai/dsh-tool-jobs` 提供的能力与面板。本页面只负责角色/通道/错误的只读展示，不复制任务列表。
 
 范围：**只读，接真实数据**。V1 精简为三个区，复用宿主 primitives / 主题 / i18n / a11y，
 不新增 UI 体系：
 
-1. **CLI 连接**：四平台自动检测（codex / codebuddy / claude，DSH 宿主本身不重复展示）、
-   版本、状态；完整路径移入高级。
-2. **默认协作配置**：全局角色库（只显角色数量 + 管理入口，不在此做编辑器——编辑器在对话
-   顶部入口已实现）、全局默认角色（一个设置项）、全局并发上限、同项目写任务串行、全局调度
-   补充规则（可读文本）。
-3. **高级设置（默认折叠）**：默认隔离方式、CLI 完整路径、通道模型映射、配置文件与诊断日志、
+1. **CLI 连接**：紧凑一行一个，名称 + 版本 + 状态；区分宿主（DeepSeek Harness）与外部
+   CLI（codex / codebuddy / claude）；完整路径移入高级。
+2. **默认协作配置**：角色数量 + 默认角色 + 管理入口合并在同一行（左右对齐），全局并发上限、
+   同项目写任务串行、全局调度补充规则（可读文本）。
+3. **高级设置（默认收起）**：默认隔离方式、CLI 完整路径、通道实例、配置文件与诊断日志、
    打开配置文件入口。
 
-删除 / 移出主页面：**默认模型区域整体删除**（模型 / 思考强度属于角色定义）；通道模型列表
-移入高级；项目配置文件路径展示删除（自动识别）；重复的默认角色配置项合并；「最近错误：无」
-不占位，有错误时显示一条可点击看详情的警告。
+删除 / 移出主页面：**默认模型区域整体删除**（模型 / 思考强度属于角色定义）；通道实例列表
+移入高级；项目配置文件路径展示删除（自动识别）；重复的默认角色配置项合并；错误首屏只显示
+一行摘要，详情默认折叠，无错误不占位。
 
 不做搜索 / 筛选 / 排序 / 操作按钮 / 编辑 / 任务控制 / 图表 / 动画（除协作区的「管理角色」
 入口按钮，点击打开既有右侧栏会话角色面板）。遵循宿主设计：用宿主 UI 组件
@@ -81,12 +80,14 @@ Settings 页面
 - `inject = ["slots","locale","remote"]`。
 - `apply()`：
   1. 注册 locale 字典；
-  2. `await ctx.remote.$mount(contribution)` 安装 `remote.meetingstone`；
-  3. 注册唯一一个 `settings.section`（`id:"meetingstone"`, `order:100`），并通过
-     slot 的 `inject` 把 `{ list, openRoles }` 传给组件（`openRoles` 打开右侧栏会话角色面板）；
-  4. `list()` 调 `ctx.remote.meetingstone.list()`，失败即抛错；成功后用
-     `normalizeSnapshot()` 收窄形状。
-- 组件渲染 V1 三区（CLI 连接 / 默认协作配置 / 高级设置），高级区默认折叠。除协作区的
+  2. 能力检测后调用 `ctx.remote.$mount(contribution)` 安装 `remote.meetingstone`；
+     失败只记 `mountError`，**不中断后续注册**；
+  3. 按 **header → section → sidebar** 顺序注册，每段独立 guard（一段失败只写一条
+     统一格式日志，不影响其他段）；
+  4. `settings.section` 的 `list()` 调 `ctx.remote.meetingstone.list()`，失败即抛错；
+     成功后用 `normalizeSnapshot()` 收窄形状；
+  5. 右侧栏面板同样只消费无参 `list()`，只读渲染角色名/别名/可用性/通道。
+- 组件渲染 V1 三区（CLI 连接 / 默认协作配置 / 高级设置），高级区默认收起。除协作区的
   「管理角色」入口按钮外，无任何编辑/搜索/动画控件。加载中显示「加载中…」，失败显示
   「读取宿主数据失败」+ 错误信息，**不伪造数据**。
 
@@ -147,91 +148,75 @@ node scripts/verify-package.mjs
 3. 重启 DSH / 等 HMR，让 client module system 为裸包名根行 serve `./client`。
 4. 打开 Settings（外壳由 `dsh-client-ui-settings-general` 提供）→ 侧栏「集合石」section。
 5. 预期看到 V1 三区：
-   - **CLI 连接**：codex / codebuddy / claude 的检测状态（已安装/未安装）+ 版本，无完整路径；
-   - **默认协作配置**：角色数量 + 「管理角色」入口、全局默认角色、并行写上限、同项目串行、
-     调度补充规则（只读文本）；
-   - **高级设置（默认折叠）**：展开后见默认隔离、CLI 完整路径、通道模型映射、配置文件入口。
-   可用性标签来自 `ctx.subagents.getProvider`。有错误时顶部一条可点击警告，无错误不占位。
-   控制台应出现 `[meetingstone] loaded …`；若出现
-   `[meetingstone] GUI remote unavailable: TYPERT_UNAVAILABLE`，说明宿主未解析到
-   `@deepseek-ai/dsh-typert-protocol`，页面会显示读取失败而不是假数据。
+   - **CLI 连接**：紧凑一行一个，名称 + 版本 + 状态；首行「宿主 / DeepSeek Harness /
+     运行中」，其余为「外部」CLI（codex / codebuddy / claude）的检测状态与版本；
+   - **默认协作配置**：角色数量 + 默认角色 + 「管理角色」入口合并在同一行（左右对齐），
+     并行写上限、同项目串行、调度补充规则左标签右值对齐；
+   - **高级设置（默认收起）**：展开后见默认隔离、CLI 完整路径、通道实例、配置文件入口、
+     日志目录。
+   可用性标签来自 `ctx.subagents.getProvider`。有错误时首屏只显示一行摘要（不换行），
+   点击「查看详情」才展开时间/来源/完整消息；无错误不占位。控制台应出现
+   `[meetingstone] gui module=<header|section|sidebar> phase=register version=… status=ok`
+   （失败时同一格式带 `error=` 与 `stack=`）；若出现
+   `[meetingstone] gui module=remote phase=mount … error=TYPERT_UNAVAILABLE`，说明宿主未
+   解析到 `@deepseek-ai/dsh-typert-protocol`，页面会显示读取失败而不是假数据。
 
-## 5. V1 UI：对话顶部入口 + 右侧栏会话角色编辑（决策 2/3/4/5/6）
+## 5. V1 UI：对话顶部入口 + 右侧栏只读角色面板（决策 2/3/4/5/6）
 
-在 0.2.0 只读页之外，本次新增「会话级角色覆盖」入口与编辑面板，复用同一套官方 slot 注册
-与 Typert Remote，不新建 UI 体系、不做 DOM/CSS 注入。
+在 0.2.0 只读页之外，本版提供「会话角色」入口与只读面板，复用同一套官方 slot 注册
+与无参 `list()` 数据，不新建 UI 体系、不做 DOM/CSS 注入。
 
-### 5.1 顶部集合石入口（header action）
+### 5.1 顶部集合石入口（header action，稳定性优先）
 
 - slot：`conversation.session.header.actions`（`kind:list, scope:session`）。
-- 注册形状（对齐官方 header-actions 约定）：
-  `{ name, id, order, locale, inject(sessionId) }`，组件渲染一个图标按钮
-  （宿主 `@deepseek-ai/dsh-client-ui-primitives` 的 `Icon`，缺失时回退文字）。
-- 点击 → `ctx.sidebarRightTabs.open(TAB_ID)` 打开右侧栏 tab（见 5.2）。
-- tooltip / aria 走宿主 locale（`settings.meetingstone` 命名空间），新增 key：
-  `headerTitle` / `headerDesc` / `openPanel`。
-- 代码：`src/client/index.js` 的 `registerHeaderAction()`，在 `ctx.inject([REMOTE_INJECT])`
-  回调内注册（与 `settings.section` 同一就绪子 ctx）。
+- 注册形状（对齐官方约定）：`{ name, id, order, locale, inject(sessionId) }`；组件渲染
+  图标按钮（宿主 `@deepseek-ai/dsh-client-ui-primitives` 的 `Icon`，缺失时回退文字）。
+- **注册顺序固定为 header → section → sidebar**，每段独立 guard。header 的注册**不依赖**
+  `$mount` 成功：挂载失败时仍注册，`inject` 返回 `remoteReady:false`，按钮 tooltip 与
+  点击提示均为「远程不可用」，入口不会消失。
+- 点击（remote 就绪）→ `ctx.sidebarRight.openTab(TAB_KIND, { params: {} })` 打开右侧栏 tab。
+- 注册失败统一日志格式：
+  `[meetingstone] gui module=<module> phase=<phase> version=<v> error=… stack=…`；
+  成功为同格式 `status=ok`。一段失败不影响其他段；日志不记录凭证。
 
 ### 5.2 右侧栏 tab（两步式）
 
-不能直接注册 rightbar，按官方两步：
-
 1. `ctx.sidebarRightTabs.register({ id, kind, priority, title })` 注册 tab 本体
-   （`src/client/index.js` 的 `registerSidebarTab()`）。
+   （能力检测：服务不存在时跳过 tab 本体，但仍注册 seat）。
 2. 注册两个 keyed seat（scope session，id 与 tab 对齐）：
-   - `sidebar.right.pane.tab` → 面板内容组件 `SidebarRolePane`
-   - `sidebar.right.pane.tab.title` → 标题组件 `SidebarRoleTitle`
+   - `sidebar.right.pane.tab` → 面板内容 `SidebarRolePane`
+   - `sidebar.right.pane.tab.title` → 标题 `SidebarRoleTitle`
 
-### 5.3 面板内容：当前会话角色覆盖编辑
+### 5.3 面板内容：只读角色列表
 
-`SidebarRolePane` 通过新 remote 方法拉取并写回当前会话的角色覆盖：
+- 数据只来自无参 `ctx.remote.meetingstone.list()`（全局角色库快照）；不改写、不写盘。
+- 每个角色渲染：角色名、别名、可用性 Tag、通道（`channelId · provider · model`）。
+- 顶部固定说明：**当前版本只读（展示全局角色库）；会话级覆盖编辑待宿主生成式 Remote 支持**。
+- 没有输入框 / 保存 / 恢复继承等写操作；角色为空或 remote 不可用时显示可读说明。
 
-- 角色列表来自全局角色库（经 `getSessionConfig` 的 `effective.roles`，即 global→project→
-  session 合并后的生效表）。
-- 每个角色可覆盖字段（白名单）：
-  `alias`（别名）、`description`（描述）、`provider`（CLI/provider）、`model`（模型）、
-  `reasoning`（思考强度）。别名字段统一记作 `aliases`；通道字段写成 `channel.<key>`。
-- 每个字段显示「继承 / 覆盖」状态（`sources.roles[roleId].fields['channel.model']`
-  等来自 `resolveEffectiveConfig` 的字段级来源）。
-- 修改即写入会话覆盖（`setSessionOverride`），**只存差异**；等于继承值时自动删除旧覆盖
-  （= 恢复继承）。每个字段有「恢复继承」按钮（`clearSessionOverride`）。
+### 5.4 Host 远程方法：只有无参 `list`
 
-### 5.4 Host 远程方法（复用 src/session 继承模型）
+`src/gui/host.js` 只注册 `meetingstone/list`，**三个带参会话方法已移除**。
 
-`src/gui/host.js` 的 `registerGuiRemote` 在 `meetingstone` 命名空间下新增 3 个方法
-（`deps.session` 为 `createSessionGuiApi`，见 `src/gui/session.js`）：
+真机错误（2026-11-11）：
+`client api: generated Remote meetingstone/getSessionConfig field "sessionId" has no strict codec`。
+宿主 Gateway 要求参数使用 strict codec（zod `typeSymbol` + `create()`）；手写 host 没有类型
+符号，无法伪造；`src-json` 参数也被 `requireStrictInputs` 拒绝。**不要试图绕过。**
 
-| 方法 | 入参 | 返回 |
-| --- | --- | --- |
-| `getSessionConfig(sessionId)` | sessionId | `{ effective, overrides, sources }` |
-| `setSessionOverride(sessionId, roleId, field, value)` | 见上 | store 写盘结果（written/patch/errors） |
-| `clearSessionOverride(sessionId, roleId, field)` | field 缺省=整角色 | store 写盘结果（removed） |
+`src/gui/session.js`、`src/session/config.js`、`src/session/store.js` 的纯逻辑与单测保留
+（派单时的会话配置解析仍在用），但**暂不接入客户端**，等宿主提供生成式 Remote 后再接。
 
-- 校验白名单，坏输入返回明确错误码（见 `src/gui/session.js` 的 `SESSION_GUI_ERRORS`）：
-  `SESSION_GUI_SESSION_ROOT_UNKNOWN` / `INVALID_SESSION_ID` / `INVALID_ROLE_ID` /
-  `INVALID_FIELD`。`sessionId`/`roleId`/`field` 任一非法即拒绝，不静默生效。
-- `getSessionConfig` 只接受一个 `sessionId`，但 host 需要项目根才能定位
-  `.meetingstone/sessions/<sessionId>.json`。项目根来自 `index.js` 在每次派单/工具执行时
-  记录的 `sessionRoots` 映射（sessionId→cwd）；若找不到则返回 `SESSION_ROOT_UNKNOWN`。
-
-### 5.5 继承语义（与 src/session/config.js 一致）
-
-- 会话层**只影响当前 Session**：存储按 sessionId 分文件（store.js），解析时只传入当前会话覆盖。
-- 只写差异：值等于继承值时不写入；恢复字段用 `clearSessionOverride`。
-- 字段级来源（`sources`）在 `resolveEffectiveConfig` 中逐项标注，面板据此显示「继承/覆盖」。
-
-### 5.6 验证
+### 5.5 验证
 
 ```bash
-node scripts/run-tests.mjs            # 含 tests/gui.test.mjs（header/tab/seat/remote 注册）
-                                      # + tests/session-gui-api.test.mjs（get/set/clear/继承）
+node scripts/run-tests.mjs            # gui.test.mjs（注册顺序 / descriptor=1 / 只读面板 / 日志）
+node scripts/smoke-client-inject.mjs  # 真实 Cordis：mount 失败仍注册 header
 ```
 
-`tests/session-gui-api.test.mjs`（Node 级真相测试）：直接驱动 `createSessionGuiApi` 验证
-get/set/clear 的继承语义、只写差异、恢复继承、session 隔离、白名单校验与错误码。
-`tests/gui.test.mjs` 的 stub harness 扩展覆盖：header 注册形状与点击打开右侧栏、右侧栏两步式
-注册、两个 keyed seat、以及 pane 通过 `remote.meetingstone` 的 get/set/clear 调用。
+`tests/gui.test.mjs` 覆盖：descriptor 只剩 `list`；header 最先注册且 `$mount` 失败不消失；
+pane 只读渲染且无 input/保存控件；错误摘要默认折叠；单模块注册失败不影响其他模块；
+统一日志格式与「日志不含凭证」断言。`tests/session-gui-api.test.mjs` 仍直接测试
+`createSessionGuiApi` 的继承语义（该能力当前不接入 GUI）。
 
 ## 6. 限制与未验证项（如实登记）
 
@@ -256,23 +241,25 @@ get/set/clear 的继承语义、只写差异、恢复继承、session 隔离、�
   偶发失败（两任务区间恰好相切），单跑通过；与本次改动无关。
 - **V1 UI 真机未验证**：header action（`conversation.session.header.actions`）、右侧栏两步式
   注册（`sidebarRightTabs.register` + `sidebar.right.pane.tab` / `.title` seat）、`Icon` 渲染、
-  `ctx.sidebarRightTabs.open(TAB_ID)` 的打开语义，均只做了源码级对齐 + stub harness 结构断言，
-  未做真机渲染确认。
-- **`sidebarRightTabs.open` 方法名未核实**：打开右侧栏用的是 `open(id)`（参考官方右侧栏 API 命名），
-  真机若实际为 `activate`/`show`/`select` 等，需在 `registerHeaderAction` 内调整。
-- **会话方法 contribution 的 `parameters` 写的是 `[]`**：与 `list` 一致按最小 descriptor 手写，
-  未经 `typert.remotes.register()` 对带参方法的 codec 校验；真机若要求参数描述符，需补
-  `parameters` 形状（本仓库无生成器，属未验证项）。
-- **`sessionRoots` 依赖派单/工具先触发**：右侧栏远程方法只有 sessionId、没有 cwd，靠 `index.js`
-  在 `resolveRegistry(exec)` 时记录 sessionId→项目根。若用户**未在该会话内触发过任何派单/工具**
-  就打开面板，host 找不到项目根，返回 `SESSION_GUI_SESSION_ROOT_UNKNOWN`；真机需确认该映射时机。
-- **面板为只读渲染 + 覆盖写入**：字段编辑走 `setSessionOverride`/`clearSessionOverride` 的
-  差异写盘，未做乐观更新与写入失败重试（store 写失败会在 `errors` 中返回，面板保持原值）。
+  `ctx.sidebarRight.openTab(TAB_KIND, …)` 的打开语义，均只做了源码级对齐 + stub harness 结构断言，
+  未做真机渲染确认。本次修复的「header 不消失」需在真机重启后再确认一次。
+- **`sidebarRightTabs.open` 方法名未核实**：打开右侧栏用的是 `ctx.sidebarRight.openTab(kind, …)`；
+  真机若实际为其他方法名，需在 `openRolePanelOf` 内调整（入口本身仍存在，不会因此消失）。
+- **带参会话 Remote 已移除（真机硬错误）**：`meetingstone/getSessionConfig` 被 Gateway 以
+  `has no strict codec` 拒绝；strict codec 需要 zod 类型符号，手写 host 无法伪造，
+  `src-json` 参数也被 `requireStrictInputs` 拒绝。**不要试图绕过**。会话级覆盖编辑等宿主
+  生成式 Remote（typert generator）支持后再接；`src/gui/session.js` 与 `src/session/*` 的
+  纯逻辑/单测保留，但客户端不可调用。
+- **面板为纯只读**：右侧栏只渲染 `list()` 快照，不写盘、无乐观更新；会话级覆盖写入当前
+  没有 UI 入口。
+- **`sessionRoots` 仍只服务派单解析**：`index.js` 在 `resolveRegistry(exec)` 记录
+  sessionId→项目根，用于读取 `.meetingstone/sessions/<sessionId>.json`；与会话编辑 GUI 无关
+  （该 GUI 已暂不接入）。
 
 
-## 6. 三个面板的职责与命名规则（P0-1）
+## 7. 三个面板的职责与命名规则（P0-1）
 
-### 6.1 职责边界（不互相顶替）
+### 7.1 职责边界（不互相顶替）
 
 | 面板 | 负责什么 | 谁写入 | 本插件做什么 |
 | --- | --- | --- | --- |
@@ -283,7 +270,7 @@ get/set/clear 的继承语义、只写差异、恢复继承、session 隔离、�
 一句话：**Todo 看项目进度，Background Tasks 看真实后台任务，Subagents 看 Agent 会话**。
 三者不是同一份数据的三种皮肤，不能把派单塞进 Todo，也不能自建 Subagents 列表。
 
-### 6.2 命名规则
+### 7.2 命名规则
 
 统一格式：`角色简称 · 简短目标（≤14 字）`，例如 `沙僧 · 修复 F1–F8`。
 
@@ -299,7 +286,7 @@ get/set/clear 的继承语义、只写差异、恢复继承、session 隔离、�
   工作树绝对路径不进面板。`JobView.detail`（终态）截到 ≤80 字，完整内容仍在
   `.meetingstone/runs/<childId>.json` 与 Job output ring。
 
-### 6.3 宿主 API 证据（app.asar / 已安装 provider）
+### 7.3 宿主 API 证据（app.asar / 已安装 provider）
 
 | 问题 | 结论 | 证据 |
 | --- | --- | --- |
@@ -309,7 +296,7 @@ get/set/clear 的继承语义、只写差异、恢复继承、session 隔离、�
 | 会话标题（sidebar / 第二行） | 由宿主 `dsh-session-title` 从首条用户消息自动生成，**不能**通过 `startActivation` 设置；我们控制的是目录行 `label` | `dsh-session-title/lib/index.js:386-415,630-650`；`dsh-client-ui-subagent/lib/client.js:207` |
 | Jobs 有没有可控 `detail` | `JobSpec` 只有 `kind/label/owner/run`；`progress` 由 `handle.updateProgress(line)` 控制；`JobView.detail` 来自终态 `hooks.done` 的 `detail`。宿主不自动截断，插件自己截到 80 字 | `dsh-jobs-local/lib/index.js:416,448,589-590,750-760,769-773`；`dsh-client-ui-jobs/lib/client.js:205-210` |
 
-### 6.4 未验证 / 限制
+### 7.4 未验证 / 限制
 
 - **Subagents 行标题真机渲染未截图验证**：`label` 的数据链路已按源码核对；真实桌面端目录行的
   显示仍需一次人工确认（本任务不改宿主、不做 DOM 注入）。

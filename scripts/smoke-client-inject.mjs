@@ -7,9 +7,9 @@
  *   A. 旧写法（父 fiber 未声明 `remote.meetingstone`）：`ctx.remote.meetingstone`
  *      必然抛 `cannot get property "remote.meetingstone" without inject`
  *      （cordis/src/reflect.ts:152-178）。
- *   B. 新写法：`ctx.remote.$mount(...)` 后在 `ctx.inject(['remote.meetingstone'], cb)`
- *      里注册 settings.section 并读取服务；cb 只在服务就绪后执行
- *      （cordis/src/registry.ts:300-302、fiber.ts:603-628）。
+ *   B. 现写法（0.2.0）：`ctx.remote.$mount(...)` 后**立即**注册 header / section /
+ *      sidebar（不阻塞在 `ctx.inject` 回调里），服务读取走 `ctx.get()`；$mount 失败
+ *      时 header 仍注册、loader 返回 unavailable。
  *
  * 只读诊断：从 app.asar 抽 cordis/cosmokit 到临时目录，不安装、不改宿主。
  * 用法：node scripts/smoke-client-inject.mjs
@@ -209,37 +209,54 @@ async function settle(ms = 30) {
   console.log('PASS A: 复现旧错误 cannot get property "remote.meetingstone" without inject')
 }
 
-// B. 新写法：真实 apply（模块级 inject 与真实 loader 一致）。
+// B. 现写法：真实 apply（模块级 inject 与真实 loader 一致）。
 {
   registrations.length = 0
   injectCalls.length = 0
   const ctx = new Context()
-  // Cordis 在创建每个 fiber 时发 internal/plugin；借此观察动态注入声明。
-  const fiberInjects = []
-  ctx.on('internal/plugin', (fiber) => fiberInjects.push(Object.keys(fiber.inject)))
   new Slots(ctx)
   new Locale(ctx)
   new Remote(ctx)
   const fiber = ctx.plugin({ inject: client.inject, apply: client.apply })
   await fiber
   await settle()
-  assert.deepEqual(registrations.length, 1, '应注册一个 settings.section')
-  assert.ok(
-    fiberInjects.some((keys) => keys.includes('remote.meetingstone')),
-    '必须存在声明 remote.meetingstone 的动态注入子 fiber',
+  assert.equal(registrations.length, 4, 'header + section + 两个 keyed seat')
+  assert.equal(client.__test.REMOTE_CONTRIBUTION.descriptors.length, 1, 'descriptor 只剩无参 list')
+  assert.deepEqual(
+    client.__test.REMOTE_CONTRIBUTION.descriptors.map((d) => d.method),
+    ['list'],
   )
-  const { options, Component } = registrations[0]
-  assert.equal(options.name, 'settings.section')
-  assert.equal(options.id, 'meetingstone')
-  assert.equal(typeof Component, 'function')
-  const snapshot = await options.inject().list()
+  assert.deepEqual(
+    registrations.map((r) => r.options.name),
+    [
+      'conversation.session.header.actions',
+      'settings.section',
+      'sidebar.right.pane.tab',
+      'sidebar.right.pane.tab.title',
+    ],
+    '注册顺序：header 最先',
+  )
+  const section = registrations.find((r) => r.options.name === 'settings.section')
+  assert.equal(section.options.id, 'meetingstone')
+  assert.equal(typeof section.Component, 'function')
+  const snapshot = await section.options.inject().list()
   assert.equal(snapshot.roles[0].name, '沙僧')
   assert.equal(snapshot.global.defaultRoleId, 'role-sashi')
   assert.equal(snapshot.global.cli[0].label, 'Codex CLI')
-  console.log('PASS B: 真实 Cordis 下 mount → dynamic inject → section 注册 → list 成功')
+
+  // 顶部入口独立于设置页：inject 给 remoteReady，点击打开右侧栏 tab。
+  const header = registrations[0]
+  assert.equal(header.options.id, 'meetingstone-role')
+  assert.equal(typeof header.options.inject, 'function')
+  const props = header.options.inject('sess-smoke')
+  assert.equal(props.remoteReady, true)
+  const element = header.Component(props)
+  const button = element.props.children.find((c) => c && c.type === 'button')
+  assert.ok(button, 'header 渲染图标按钮')
+  console.log('PASS B: 真实 Cordis 下 mount → getService → header/section/sidebar 注册 → list 成功')
 }
 
-// C. $mount 失败：仍注册 section，loader 返回 unavailable（页面不抛错）。
+// C. $mount 失败：header / section / sidebar 仍注册，入口不消失。
 {
   registrations.length = 0
   injectCalls.length = 0
@@ -255,20 +272,27 @@ async function settle(ms = 30) {
     }
   }
   new BrokenRemote(ctx)
-  const fiberInjects = []
-  ctx.on('internal/plugin', (fiber) => fiberInjects.push(Object.keys(fiber.inject)))
   const fiber = ctx.plugin({ inject: client.inject, apply: client.apply })
   await fiber
   await settle()
-  assert.equal(registrations.length, 1)
-  assert.ok(
-    !fiberInjects.some((keys) => keys.includes('remote.meetingstone')),
-    'mount 失败不应创建动态注入子 fiber',
+  assert.equal(registrations.length, 4, 'mount 失败也必须注册 4 段 UI')
+  assert.equal(
+    registrations[0].options.name,
+    'conversation.session.header.actions',
+    'header 必须最先注册',
   )
-  const snapshot = await registrations[0].options.inject().list()
+  const section = registrations.find((r) => r.options.name === 'settings.section')
+  const snapshot = await section.options.inject().list()
   assert.equal(snapshot.unavailable.code, 'REMOTE_MOUNT_FAILED')
   assert.match(snapshot.unavailable.message, /mount boom/)
-  console.log('PASS C: mount 失败时 section 仍在，loader 返回 unavailable')
+
+  const header = registrations[0]
+  const props = header.options.inject('sess-smoke')
+  assert.equal(props.remoteReady, false, 'mount 失败时 header 提示远程不可用')
+  const element = header.Component(props)
+  const button = element.props.children.find((c) => c && c.type === 'button')
+  assert.equal(button.props.title, 'remoteUnavailableHint')
+  console.log('PASS C: mount 失败时 header/section/sidebar 仍在，loader 返回 unavailable')
 }
 
 console.log(`\nOK: real Cordis ${extract('dsh/node_modules/@deepseek-ai/cordis/package.json').toString().match(/"version": "([^"]+)"/)?.[1]} from installed app.asar`)

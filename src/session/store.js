@@ -2,6 +2,10 @@
 /**
  * 会话级覆盖的存储：`.meetingstone/sessions/<sessionId>.json`。
  *
+ * ⚠️ 暂不接入客户端（2026-11-11）：会话级编辑 GUI 的带参 Remote 被宿主 Gateway
+ * 的 strict codec 校验拒绝（真机错误见 docs/gui-0.2.0.md §6）；存储仍供派单时的
+ * 会话配置解析读取，但 GUI 不再写入。
+ *
  * 为什么不用宿主的 session 元数据（证据见 src/session/config.js 文件头与
  * docs/configuration.md）：`@deepseek-ai/dsh-session` 的 header 是创建时深冻结的
  * 只读快照，没有插件可写的 per-session KV；`dsh-storage-domain` 需要 zod 且不是
