@@ -71,7 +71,7 @@ test('空任务/空角色被拒', async () => {
   const a = await dispatcher.dispatch({ role: 'SS', task: '   ' })
   assert.equal(a.code, DISPATCH_ERRORS.INVALID_TASK)
   const b = await dispatcher.dispatch({ role: '', task: 'x' })
-  assert.equal(b.code, DISPATCH_ERRORS.ROLE_NOT_FOUND)
+  assert.equal(b.code, DISPATCH_ERRORS.ROLE_REQUIRED, '未指定角色应明确报 ROLE_REQUIRED')
   assert.equal(adapter.calls.length, 0, '校验失败不应触达适配器')
 })
 

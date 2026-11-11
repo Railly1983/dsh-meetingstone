@@ -92,6 +92,28 @@ function normalizeWorktree(value) {
 }
 
 /**
+ * 角色路由元数据白名单（P1-B）。
+ *
+ * 只保留契约字段：`roleId` / `auto` / `reason`。手动指定角色时 `auto:false`，
+ * **不落 reason**（避免把"人选的"伪装成"规则选的"）；自动路由的 reason 截断到 2KiB。
+ *
+ * @param {unknown} value
+ * @returns {{ roleId: string, auto: boolean, reason?: string } | null}
+ */
+function normalizeRouting(value) {
+  if (!value || typeof value !== 'object') return null
+  const source = /** @type {Record<string, unknown>} */ (value)
+  const roleId = typeof source.roleId === 'string' ? source.roleId.trim() : ''
+  if (!roleId) return null
+  const auto = source.auto === true
+  const reason =
+    auto && typeof source.reason === 'string' && source.reason.trim()
+      ? truncateUtf8(source.reason.trim(), 2 * 1024).text
+      : ''
+  return { roleId, auto, ...(reason ? { reason } : {}) }
+}
+
+/**
  * 两个记录之间的改动文件交集。
  *
  * 规则（与 docs/plan/2026-11-11-parallel-plan.md §4 一致）：
@@ -571,6 +593,7 @@ export function createRunStore(options) {
       record?.overlapTruncated,
       record?.overlapTotal,
     )
+    const routing = normalizeRouting(record?.routing)
     return {
       schemaVersion: 1,
       childId: String(record.childId),
@@ -631,6 +654,8 @@ export function createRunStore(options) {
         typeof record.operationId === 'string' && record.operationId ? record.operationId : null,
       isolation:
         record.isolation === 'none' || record.isolation === 'worktree' ? record.isolation : null,
+      // P1-B：自动路由的可解释性（谁选的、为什么）。手动指定时为 { roleId, auto:false }。
+      ...(routing ? { routing } : {}),
       worktree: normalizeWorktree(record.worktree),
       changedFiles: changed.changedFiles,
       changedFilesUnknown: record.changedFilesUnknown === true,
@@ -920,6 +945,7 @@ export function createRunStore(options) {
         parsed.overlapTotal,
       )
       const failure = failureFieldsFor(parsed)
+      const routing = normalizeRouting(parsed.routing)
       return {
         childId: parsed.childId ?? 'unknown',
         runtimeId: parsed.runtimeId ?? null,
@@ -951,6 +977,8 @@ export function createRunStore(options) {
         // 并行隔离：worktree 与改动文件必须在列表里可见（手动合并/清理依赖它）
         operationId: parsed.operationId ?? null,
         isolation: parsed.isolation ?? null,
+        // P1-B：列表里能看到"这次为什么派给这个角色"（自动路由才有 reason）
+        ...(routing ? { routing } : {}),
         worktree: parsed.worktree ?? null,
         changedFiles: Array.isArray(parsed.changedFiles) ? parsed.changedFiles : null,
         changedFilesUnknown: parsed.changedFilesUnknown === true,

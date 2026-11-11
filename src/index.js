@@ -157,6 +157,9 @@ export function apply(ctx, config = {}) {
     return {
       registry,
       projectErrors,
+      // P1-B：自动路由的兜底角色按「全局 → 项目 → 会话」继承；规则表只来自插件全局配置。
+      defaultRoleId: resolved.effective.defaultRoleId ?? cfg.defaultRoleId,
+      routingRules: Array.isArray(cfg.routingRules) ? cfg.routingRules : [],
       // 供后续 UI 显示“继承/覆盖”；工具当前不返回，避免扩大回执。
       sources: resolved.sources,
       sessionId: typeof sessionId === 'string' ? sessionId : null,
@@ -353,6 +356,9 @@ export function apply(ctx, config = {}) {
       dispatcher: toolDispatcher,
       probe,
       resolveRegistry,
+      // P1-B：自动路由的全局兜底（项目/会话配置可覆盖 defaultRoleId；规则表只来自全局）
+      defaultRoleId: cfg.defaultRoleId,
+      routingRules: Array.isArray(cfg.routingRules) ? cfg.routingRules : [],
       loadPersistedRun,
       listPersistedRuns,
       recordPathFor,

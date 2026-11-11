@@ -317,6 +317,11 @@ function buildRunBase({ input, role, provider, childId, startedAt }) {
     worktree:
       input?.worktree && typeof input.worktree === 'object' ? input.worktree : null,
     isolation: input?.isolation === 'none' || input?.isolation === 'worktree' ? input.isolation : null,
+    // P1-B：角色路由结果（谁选的、为什么）随记录落盘，供 get_task/list_runs 解释与审计。
+    // 手动指定角色时 auto:false 且不带 reason（由工具层构造，这里只透传）。
+    ...(input?.routing && typeof input.routing === 'object'
+      ? { routing: { ...input.routing } }
+      : {}),
     ...(taskSpec ? { taskSpec } : {}),
     ...(contextPack ? { contextPack } : {}),
     ...(taskSpec?.title ? { title: taskSpec.title } : {}),

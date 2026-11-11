@@ -58,7 +58,8 @@
  */
 
 import { DEFAULT_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS, providerNameFor } from './adapter.js'
-import { normalizeProjectKey } from '../dispatch/dispatcher.js'
+import { DISPATCH_ERRORS, normalizeProjectKey } from '../dispatch/dispatcher.js'
+import { routeTask } from '../dispatch/routing.js'
 import {
   collectProtectedFields,
   extractProtectedSections,
@@ -359,6 +360,8 @@ function taskResultView(record, full) {
  * @param {object} deps.registry  角色注册表：`list(): Role[]`、`errors: RegistryError[]`
  * @param {object} deps.dispatcher  派单器：`dispatch(req) -> Promise<DispatchResult>`
  * @param {object} deps.probe  CLI 探测器：`probe(cli)` / `probeAll()`
+ * @param {string} [deps.defaultRoleId] 全局默认角色（项目/会话配置未覆盖时用于自动路由兜底）
+ * @param {object[]} [deps.routingRules] 全局自动路由规则表（空 = 用 `src/dispatch/routing.js` 内置表）
  * @param {(spec: object) => object} [deps.defineTool]
  *   可选；生产应注入 `@deepseek-ai/dsh-tools` 的真实 defineTool（TODO(P2-defineTool)）。
  * @returns {Array<{ name: string }>} 已注册的工具定义（便于调用方/测试核对）
@@ -433,15 +436,49 @@ export function registerTools(ctx, deps) {
     typeof deps.resolveRegistry === 'function' ? deps.resolveRegistry : null
 
   /**
+   * 注入的全局默认角色 / 规则表：项目/会话配置没有覆盖时用于自动路由兜底。
+   * 不在 registry 上推断（registry 只回答"这个名字是谁"，不持有插件级配置）。
+   */
+  const fallbackDefaultRoleId =
+    typeof deps.defaultRoleId === 'string' && deps.defaultRoleId.trim()
+      ? deps.defaultRoleId.trim()
+      : undefined
+  const fallbackRoutingRules = Array.isArray(deps.routingRules) ? deps.routingRules : []
+
+  /**
    * @param {any} exec
-   * @returns {Promise<{ registry: any, projectErrors: any[] }>}
+   * @returns {Promise<{ registry: any, projectErrors: any[], defaultRoleId?: string,
+   *   routingRules: object[] }>}
    */
   async function registryFor(exec) {
-    if (!resolveRegistry) return { registry, projectErrors: [] }
+    if (!resolveRegistry) {
+      return {
+        registry,
+        projectErrors: [],
+        defaultRoleId: fallbackDefaultRoleId,
+        routingRules: fallbackRoutingRules,
+      }
+    }
     try {
       const res = await resolveRegistry(exec)
-      if (res && res.registry) return res
-      return { registry, projectErrors: [] }
+      if (res && res.registry) {
+        const scopedDefaultRoleId =
+          typeof res.defaultRoleId === 'string' && res.defaultRoleId.trim()
+            ? res.defaultRoleId.trim()
+            : fallbackDefaultRoleId
+        return {
+          registry: res.registry,
+          projectErrors: Array.isArray(res.projectErrors) ? res.projectErrors : [],
+          defaultRoleId: scopedDefaultRoleId,
+          routingRules: Array.isArray(res.routingRules) ? res.routingRules : fallbackRoutingRules,
+        }
+      }
+      return {
+        registry,
+        projectErrors: [],
+        defaultRoleId: fallbackDefaultRoleId,
+        routingRules: fallbackRoutingRules,
+      }
     } catch (err) {
       return {
         registry,
@@ -453,6 +490,8 @@ export function registerTools(ctx, deps) {
             }`,
           },
         ],
+        defaultRoleId: fallbackDefaultRoleId,
+        routingRules: fallbackRoutingRules,
       }
     }
   }
@@ -491,10 +530,23 @@ export function registerTools(ctx, deps) {
         'isolation=none 时退回主工作区串行。工作树只隔离文件布局，不是权限沙箱。' +
         '可以只传 role+task（旧用法），也可以带 title/objective/scope/acceptance/contextPack 等结构化简报；' +
         '使用任一结构化字段时 title 必填，声明 scope 时必须给 acceptance。简单查询不需要 scope/evidence。' +
+        'P1-B：显式 role 永远优先；未指定 role 时必须传 autoRoute:true，按规则表（默认内置）' +
+        '（review/评审、edit/实现修复、research/调研、architecture/架构）从 enabled 且可用的角色里' +
+        '确定选择，回执带 routing.reason；找不到可用角色返回 AUTO_ROUTE_FAILED。' +
         '完全相同的进行中任务会返回既有 taskRef（deduplicated:true），不创建第二个子任务；' +
         '版本指纹取不到或信息不足以证明相同时照常新建（宁可重复也不误合）。',
       parameters: {
-        role: { type: 'string', required: true, description: '角色名、别名或 roleId' },
+        role: {
+          type: 'string',
+          description:
+            '角色名、别名或 roleId；显式指定时优先，不会自动路由。省略时须传 autoRoute:true',
+        },
+        autoRoute: {
+          type: 'boolean',
+          description:
+            '仅在省略 role 时生效：true=按规则表自动选角色（结果可解释，回执含 routing.reason）；' +
+            'false/省略且没有 role 时返回 ROLE_REQUIRED。不会切换 provider/model 或提升权限',
+        },
         task: { type: 'string', required: true, description: '任务内容' },
         title: {
           type: 'string',
@@ -573,6 +625,58 @@ export function registerTools(ctx, deps) {
         // 1) 按当前会话的项目根取「全局 + 项目覆盖」的注册表
         const effective = await registryFor(exec)
 
+        // 1.1) P1-B 角色路由：显式 role 永远优先；未指定 role 时必须显式开 autoRoute。
+        //      自动路由只决定「用哪个角色」，provider/model/权限仍由角色配置决定。
+        if (args?.role !== undefined && args?.role !== null && typeof args.role !== 'string') {
+          return {
+            ok: false,
+            code: DISPATCH_ERRORS.ROLE_REQUIRED,
+            message: 'role 必须是字符串（角色名、别名或 roleId）',
+          }
+        }
+        const explicitRole = typeof args?.role === 'string' ? args.role.trim() : ''
+        if (!explicitRole && args?.autoRoute !== true) {
+          return {
+            ok: false,
+            code: DISPATCH_ERRORS.ROLE_REQUIRED,
+            message:
+              '未指定 role：请显式传角色名/别名/roleId；如要按规则自动选角色，传 autoRoute:true',
+          }
+        }
+
+        /** @type {{ roleId: string, reason?: string, auto: boolean } | null} */
+        let routing = null
+        let roleRef = explicitRole
+        if (!explicitRole) {
+          // 自动路由依赖任务文本：空任务先按 INVALID_TASK 拒绝，避免拿空串去匹配规则。
+          if (typeof args?.task !== 'string' || !args.task.trim()) {
+            return { ok: false, code: DISPATCH_ERRORS.INVALID_TASK, message: '任务内容不能为空' }
+          }
+          // 只把 enabled + availability=available 的角色交给路由（失败关闭，不猜）。
+          const candidates = effective.registry.list().map((role) => ({
+            ...role,
+            availability: roleAvailability(role, ctx),
+          }))
+          const decision = routeTask({
+            task: args.task,
+            roles: candidates,
+            defaultRoleId: effective.defaultRoleId,
+            rules: effective.routingRules,
+          })
+          if (decision.ok !== true) {
+            return { ok: false, code: decision.code, message: decision.message }
+          }
+          roleRef = decision.roleId
+          routing = { roleId: decision.roleId, reason: decision.reason, auto: true }
+        } else if (typeof effective.registry.resolve === 'function') {
+          // 手动指定：只记录规范化 roleId（auto:false、不写 reason）。解析失败/歧义仍交给
+          // dispatcher 按既有错误码处理，不在这里提前改变行为。
+          const resolved = effective.registry.resolve(explicitRole)
+          if (resolved && typeof resolved.roleId === 'string' && resolved.roleId) {
+            routing = { roleId: resolved.roleId, auto: false }
+          }
+        }
+
         // 1.2) P0-B：TaskSpec / ContextPack 校验。只拒绝缺了就无法执行/验收的关键字段；
         //      纯 role+task 调用（structured=false）完全不受影响。
         const taskSpecResult = validateTaskSpec(args ?? {})
@@ -608,8 +712,10 @@ export function registerTools(ctx, deps) {
         const projectRoot = exec?.agent?.session?.header?.cwd
 
         const input = {
-          role: args?.role,
+          role: roleRef,
           task: args?.task,
+          // P1-B：路由结果随派单进入记录（自动路由带 reason；手动为 auto:false）
+          ...(routing ? { routing } : {}),
           ...(taskSpecResult.spec ? { taskSpec: taskSpecResult.spec } : {}),
           ...(taskSpecResult.contextPack ? { contextPack: taskSpecResult.contextPack } : {}),
           ...(typeof args?.cwd === 'string' ? { cwd: args.cwd } : {}),
@@ -638,12 +744,22 @@ export function registerTools(ctx, deps) {
           for (const key of ['childId', 'name', 'provider', 'jobId']) {
             if (ref[key] !== undefined && ref[key] !== null) taskRef[key] = ref[key]
           }
+          // P1-B：回执里的 routing 说明「谁选的、为什么」。自动路由带 reason；
+          // 手动指定只有 { roleId, auto:false }，不写 reason。
+          const routingReceipt =
+            result.routing && typeof result.routing === 'object'
+              ? result.routing
+              : routing ??
+                (typeof result.role?.roleId === 'string' && result.role.roleId
+                  ? { roleId: result.role.roleId, auto: false }
+                  : null)
           payload = {
             ok: true,
             taskRef,
             roleId: result.role?.roleId ?? null,
             roleName: result.role?.name ?? null,
             isolation: result.isolation ?? null,
+            ...(routingReceipt ? { routing: routingReceipt } : {}),
             // P0-D：命中相同进行中任务 → taskRef 已是原值（原 childId / jobId），
             // 只补 deduplicated 标记、当前状态与可选 deduplicatedFrom，不新建子任务。
             ...(result.deduplicated === true
@@ -656,6 +772,9 @@ export function registerTools(ctx, deps) {
                 }
               : {}),
           }
+        } else if (routing && routing.auto === true) {
+          // 自动路由成功但派单失败：失败回执同样带 reason，便于判断是路由还是执行问题。
+          payload = { ...payload, routing }
         }
         if (Array.isArray(effective.projectErrors) && effective.projectErrors.length > 0) {
           return { ...payload, projectErrors: effective.projectErrors }

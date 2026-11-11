@@ -175,10 +175,24 @@ for (const key of [
     `meetingstone_dispatch 缺结构化字段 ${key}`,
   )
 }
+// P1-B：role 改为可选（显式指定优先；省略时用 autoRoute 规则路由），task 仍必填。
 assert.deepEqual(
   dispatch.parameters.required,
-  ['role', 'task'],
-  '结构化字段必须全部可选：旧调用 role+task 不能被破坏',
+  ['task'],
+  'role 必须可选（autoRoute 时省略），task 仍必填；旧调用 role+task 不能被破坏',
+)
+assert.equal(
+  dispatch.parameters.properties.role?.type,
+  'string',
+  'meetingstone_dispatch.role 必须是 string（角色名/别名/roleId）',
+)
+const autoRoute = dispatch.parameters.properties.autoRoute
+assert.ok(autoRoute, 'meetingstone_dispatch 必须声明 autoRoute 参数（P1-B 自动路由）')
+assert.equal(autoRoute.type, 'boolean', 'autoRoute 必须是 boolean')
+assert.equal(
+  autoRoute.required,
+  undefined,
+  'autoRoute 必须可选；不能要求调用方显式关闭',
 )
 
 // 6) P0-C：新工具 get_run_artifact 必须存在且 childId 必填
