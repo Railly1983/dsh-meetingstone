@@ -1,194 +1,194 @@
-# 配置参考
+﻿# 閰嶇疆鍙傝€?
 
-> 第一版没有 UI：配置写在 profile 的 `cordis.patch.yml`（全局）、项目根的
-> `.meetingstone.json`（项目级）与 `.meetingstone/sessions/<sessionId>.json`（会话级）。
-> 改完**重启 DSH** 生效（全局配置在插件加载时读取；项目/会话配置按调用读取，改完下一次工具调用即生效）。
+> 绗竴鐗堟病鏈?UI锛氶厤缃啓鍦?profile 鐨?`cordis.patch.yml`锛堝叏灞€锛夈€侀」鐩牴鐨?
+> `.meetingstone.json`锛堥」鐩骇锛変笌 `.meetingstone/sessions/<sessionId>.json`锛堜細璇濈骇锛夈€?
+> 鏀瑰畬**閲嶅惎 DSH** 鐢熸晥锛堝叏灞€閰嶇疆鍦ㄦ彃浠跺姞杞芥椂璇诲彇锛涢」鐩?浼氳瘽閰嶇疆鎸夎皟鐢ㄨ鍙栵紝鏀瑰畬涓嬩竴娆″伐鍏疯皟鐢ㄥ嵆鐢熸晥锛夈€?
 
-## 1. 全局配置（profile 的 `cordis.patch.yml`）
+## 1. 鍏ㄥ眬閰嶇疆锛坧rofile 鐨?`cordis.patch.yml`锛?
 
 ```yaml
 - id: meetingstone
   name: dsh-meetingstone
   config:
-    channels: [...]      # 通道实例表（见 §2）
-    roles: [...]         # 角色表（见 §3）
+    channels: [...]      # 閫氶亾瀹炰緥琛紙瑙?搂2锛?
+    roles: [...]         # 瑙掕壊琛紙瑙?搂3锛?
     defaultRoleId: role-sashi
-    routingRules: []     # 自动路由规则表（空 = 用内置表；见 §1.2）
-    dispatchNotes: "常规实现优先沙僧；关键改动交悟空复核。"
+    routingRules: []     # 鑷姩璺敱瑙勫垯琛紙绌?= 鐢ㄥ唴缃〃锛涜 搂1.2锛?
+    dispatchNotes: "甯歌瀹炵幇浼樺厛娌欏儳锛涘叧閿敼鍔ㄤ氦鎮熺┖澶嶆牳銆?
     projectConfigFile: .meetingstone.json
     limits:
-      serializeWrites: true              # isolation:none 时同项目串行（正确性保护，不是并发额度）
-      maxParallelWritesTotal: 4          # 本插件派发的并行写任务全局上限（仅本插件，默认 4）
+      serializeWrites: true              # isolation:none 鏃跺悓椤圭洰涓茶锛堟纭€т繚鎶わ紝涓嶆槸骞跺彂棰濆害锛?
+      maxParallelWritesTotal: 4          # 鏈彃浠舵淳鍙戠殑骞惰鍐欎换鍔″叏灞€涓婇檺锛堜粎鏈彃浠讹紝榛樿 4锛?
       defaultIsolation: worktree         # worktree | none
 ```
 
-> ⚠️ patch 是**整值替换**：覆盖这一行时要把整个 `config` 写全，不是深合并。
+> 鈿狅笍 patch 鏄?*鏁村€兼浛鎹?*锛氳鐩栬繖涓€琛屾椂瑕佹妸鏁翠釜 `config` 鍐欏叏锛屼笉鏄繁鍚堝苟銆?
 
-### 1.1 并行与工作树隔离
+### 1.1 骞惰涓庡伐浣滄爲闅旂
 
-`meetingstone_dispatch` 默认 `isolation:'worktree'`：每个任务在
-`<projectRoot>/.meetingstone/worktrees/<operationId>` 的独立 git 工作树里执行，
-分支为 `meetingstone/<operationId>`。详见 [工作树隔离](worktree-isolation.md)。
+`meetingstone_dispatch` 榛樿 `isolation:'worktree'`锛氭瘡涓换鍔″湪
+`<projectRoot>/.meetingstone/worktrees/<operationId>` 鐨勭嫭绔?git 宸ヤ綔鏍戦噷鎵ц锛?
+鍒嗘敮涓?`meetingstone/<operationId>`銆傝瑙?[宸ヤ綔鏍戦殧绂籡(worktree-isolation.md)銆?
 
-| 配置 | 默认 | 说明 |
+| 閰嶇疆 | 榛樿 | 璇存槑 |
 | --- | --- | --- |
-| `limits.defaultIsolation` | `worktree` | `worktree`=每任务独立工作树；`none`=主工作区 |
-| `limits.maxParallelWritesTotal` | `4` | 本插件派发的并行写任务全局上限（仅统计本插件任务）；超限立即返回 `WRITE_LIMIT_TOTAL`，**不排队** |
-| `limits.serializeWrites` | `true` | 仅在 `isolation:none` 时生效：同项目串行。这是同一工作区的**正确性保护，不是并发额度** |
+| `limits.defaultIsolation` | `worktree` | `worktree`=姣忎换鍔＄嫭绔嬪伐浣滄爲锛沗none`=涓诲伐浣滃尯 |
+| `limits.maxParallelWritesTotal` | `4` | 鏈彃浠舵淳鍙戠殑骞惰鍐欎换鍔″叏灞€涓婇檺锛堜粎缁熻鏈彃浠朵换鍔★級锛涜秴闄愮珛鍗宠繑鍥?`WRITE_LIMIT_TOTAL`锛?*涓嶆帓闃?* |
+| `limits.serializeWrites` | `true` | 浠呭湪 `isolation:none` 鏃剁敓鏁堬細鍚岄」鐩覆琛屻€傝繖鏄悓涓€宸ヤ綔鍖虹殑**姝ｇ‘鎬т繚鎶わ紝涓嶆槸骞跺彂棰濆害** |
 
-并发纪律（2026-11-11 用户决策后的新模型）：
+骞跺彂绾緥锛?026-11-11 鐢ㄦ埛鍐崇瓥鍚庣殑鏂版ā鍨嬶級锛?
 
-- **宿主容量交给宿主**：宿主 `maxActiveSubagents` 默认 **8**，是**进程内共享池**——宿主自己的子 Agent 与本插件派单都计入。池满时宿主直接抛 `ACTIVATION_LIMIT_REACHED`，**没有等待/排队机制**；插件原样透传这个错误码，不重复实现容量控制，也不包成 `ADAPTER_FAILED`。
-- **插件只保留全局额度**：`limits.maxParallelWritesTotal`（默认 4）只统计**本插件派发**的在跑任务，不按通道/项目拆分。额度在**首次异步操作前**（含建树）预占；超限**立即拒绝** `WRITE_LIMIT_TOTAL`，不排队，调用方稍后重试。
-- `isolation:none` 与隔离任务**不得混跑**，同项目任一方向有活动任务就返回 `WRITE_CONFLICT`（正确性保护，不是额度）。
-- 请求隔离但建树失败 / 服务缺失 → **拒绝派单**，绝不退回主工作区。
-- 完成 / 失败 / 取消 / 卸载都**不删除**工作树与分支。
-- **隔离是文件布局隔离，不是权限沙箱**（同账号、同文件系统、共享 git 元数据）。
+- **瀹夸富瀹归噺浜ょ粰瀹夸富**锛氬涓?`maxActiveSubagents` 榛樿 **8**锛屾槸**杩涚▼鍐呭叡浜睜**鈥斺€斿涓昏嚜宸辩殑瀛?Agent 涓庢湰鎻掍欢娲惧崟閮借鍏ャ€傛睜婊℃椂瀹夸富鐩存帴鎶?`ACTIVATION_LIMIT_REACHED`锛?*娌℃湁绛夊緟/鎺掗槦鏈哄埗**锛涙彃浠跺師鏍烽€忎紶杩欎釜閿欒鐮侊紝涓嶉噸澶嶅疄鐜板閲忔帶鍒讹紝涔熶笉鍖呮垚 `ADAPTER_FAILED`銆?
+- **鎻掍欢鍙繚鐣欏叏灞€棰濆害**锛歚limits.maxParallelWritesTotal`锛堥粯璁?4锛夊彧缁熻**鏈彃浠舵淳鍙?*鐨勫湪璺戜换鍔★紝涓嶆寜閫氶亾/椤圭洰鎷嗗垎銆傞搴﹀湪**棣栨寮傛鎿嶄綔鍓?*锛堝惈寤烘爲锛夐鍗狅紱瓒呴檺**绔嬪嵆鎷掔粷** `WRITE_LIMIT_TOTAL`锛屼笉鎺掗槦锛岃皟鐢ㄦ柟绋嶅悗閲嶈瘯銆?
+- `isolation:none` 涓庨殧绂讳换鍔?*涓嶅緱娣疯窇**锛屽悓椤圭洰浠讳竴鏂瑰悜鏈夋椿鍔ㄤ换鍔″氨杩斿洖 `WRITE_CONFLICT`锛堟纭€т繚鎶わ紝涓嶆槸棰濆害锛夈€?
+- 璇锋眰闅旂浣嗗缓鏍戝け璐?/ 鏈嶅姟缂哄け 鈫?**鎷掔粷娲惧崟**锛岀粷涓嶉€€鍥炰富宸ヤ綔鍖恒€?
+- 瀹屾垚 / 澶辫触 / 鍙栨秷 / 鍗歌浇閮?*涓嶅垹闄?*宸ヤ綔鏍戜笌鍒嗘敮銆?
+- **闅旂鏄枃浠跺竷灞€闅旂锛屼笉鏄潈闄愭矙绠?*锛堝悓璐﹀彿銆佸悓鏂囦欢绯荤粺銆佸叡浜?git 鍏冩暟鎹級銆?
 
-### 1.2 自动角色路由（P1-B，规则式）
+### 1.2 鑷姩瑙掕壊璺敱锛圥1-B锛岃鍒欏紡锛?
 
-`meetingstone_dispatch` 的 `role` 现在是**可选**的；但“不指定角色”必须显式开关：
+`meetingstone_dispatch` 鐨?`role` 鐜板湪鏄?*鍙€?*鐨勶紱浣嗏€滀笉鎸囧畾瑙掕壊鈥濆繀椤绘樉寮忓紑鍏筹細
 
-| 调用方式 | 行为 |
+| 璋冪敤鏂瑰紡 | 琛屼负 |
 | --- | --- |
-| 传 `role`（旧用法） | **显式指定优先**，完全不走规则路由；回执 `routing:{roleId, auto:false}`，不写 reason |
-| 不传 `role` + `autoRoute:true` | 按下面规则表选角色；回执 `routing:{roleId, reason, auto:true}`，reason 同时落盘 |
-| 不传 `role` + 未开 `autoRoute` | 明确报 `ROLE_REQUIRED`，不会偷偷用 `defaultRoleId` |
+| 浼?`role`锛堟棫鐢ㄦ硶锛?| **鏄惧紡鎸囧畾浼樺厛**锛屽畬鍏ㄤ笉璧拌鍒欒矾鐢憋紱鍥炴墽 `routing:{roleId, auto:false}`锛屼笉鍐?reason |
+| 涓嶄紶 `role` + `autoRoute:true` | 鎸変笅闈㈣鍒欒〃閫夎鑹诧紱鍥炴墽 `routing:{roleId, reason, auto:true}`锛宺eason 鍚屾椂钀界洏 |
+| 涓嶄紶 `role` + 鏈紑 `autoRoute` | 鏄庣‘鎶?`ROLE_REQUIRED`锛屼笉浼氬伔鍋风敤 `defaultRoleId` |
 
-内置规则表（`src/dispatch/routing.js` 的 `DEFAULT_ROUTING_RULES`）：
+鍐呯疆瑙勫垯琛紙`src/dispatch/routing.js` 鐨?`DEFAULT_ROUTING_RULES`锛夛細
 
-| 任务类型 | 判定关键词（示例） | 目标角色（按角色标识匹配） | reason 标签 |
+| 浠诲姟绫诲瀷 | 鍒ゅ畾鍏抽敭璇嶏紙绀轰緥锛?| 鐩爣瑙掕壊锛堟寜瑙掕壊鏍囪瘑鍖归厤锛?| reason 鏍囩 |
 | --- | --- | --- | --- |
-| `architecture` | architecture / architect / 架构 / 决策 / 选型 / 技术方案 | roleId/name/aliases/description 含架构、决策、设计、lead、领导 | 评审/决策 |
-| `review` | review / 审查 / 评审 / 复核 / 审核 / 审计 / 验收 | 含 review、reviewer、审查、评审、复核、审核、审计、验收 | 评审 |
-| `research` | research / investigate / 调研 / 研究 / 调查 / 探索 / 分析 | 含 research、researcher、scout、调研、研究、调查、探索、分析 | 调研 |
-| `edit` | edit / implement / fix / refactor / 实现 / 修复 / 修改 / 开发 / 重构 / 改 | 含 implement、developer、执行、实现、修复、开发、主力、骨干 | 执行 |
+| `architecture` | architecture / architect / 鏋舵瀯 / 鍐崇瓥 / 閫夊瀷 / 鎶€鏈柟妗?| roleId/name/aliases/description 鍚灦鏋勩€佸喅绛栥€佽璁°€乴ead銆侀瀵?| 璇勫/鍐崇瓥 |
+| `review` | review / 瀹℃煡 / 璇勫 / 澶嶆牳 / 瀹℃牳 / 瀹¤ / 楠屾敹 | 鍚?review銆乺eviewer銆佸鏌ャ€佽瘎瀹°€佸鏍搞€佸鏍搞€佸璁°€侀獙鏀?| 璇勫 |
+| `research` | research / investigate / 璋冪爺 / 鐮旂┒ / 璋冩煡 / 鎺㈢储 / 鍒嗘瀽 | 鍚?research銆乺esearcher銆乻cout銆佽皟鐮斻€佺爺绌躲€佽皟鏌ャ€佹帰绱€佸垎鏋?| 璋冪爺 |
+| `edit` | edit / implement / fix / refactor / 瀹炵幇 / 淇 / 淇敼 / 寮€鍙?/ 閲嶆瀯 / 鏀?| 鍚?implement銆乨eveloper銆佹墽琛屻€佸疄鐜般€佷慨澶嶃€佸紑鍙戙€佷富鍔涖€侀骞?| 鎵ц |
 
-确定性规则：
+纭畾鎬ц鍒欙細
 
-1. **先看关键词首次出现的位置**：任务里 `修复 review 指出的问题` 归执行，`review 并修复` 归评审；同位置时按规则表顺序。
-2. **只从 `enabled !== false` 且 `availability === 'available'` 的角色中选**。停用、provider 未安装、别名歧义的角色都不参与；可用角色为 0 → `AUTO_ROUTE_FAILED`。
-3. **角色匹配顺序**：规则 `roleIds` 显式指定 → `roleId`/`name`/`aliases` 命中 → `description` 命中 → `prompt` 命中（弱信号兜底）→ 角色表顺序。整段 prompt 只用来找关键词，reason 也只会回显命中的关键词。
-4. **兜底**：任务类型没有匹配到可用角色、或完全没命中关键词时，使用生效配置的 `defaultRoleId`（按“全局 → 项目 → 会话”继承）；默认角色本身不可用则 `AUTO_ROUTE_FAILED`。
-5. **不改执行面**：路由只决定“用哪个角色”，provider/model/reasoning/权限继续由该角色的 `channel` 决定；不切更高成本模型、不提升权限、不调用任何 AI 分类器。
+1. **鍏堢湅鍏抽敭璇嶉娆″嚭鐜扮殑浣嶇疆**锛氫换鍔￠噷 `淇 review 鎸囧嚭鐨勯棶棰榒 褰掓墽琛岋紝`review 骞朵慨澶峘 褰掕瘎瀹★紱鍚屼綅缃椂鎸夎鍒欒〃椤哄簭銆?
+2. **鍙粠 `enabled !== false` 涓?`availability === 'available'` 鐨勮鑹蹭腑閫?*銆傚仠鐢ㄣ€乸rovider 鏈畨瑁呫€佸埆鍚嶆涔夌殑瑙掕壊閮戒笉鍙備笌锛涘彲鐢ㄨ鑹蹭负 0 鈫?`AUTO_ROUTE_FAILED`銆?
+3. **瑙掕壊鍖归厤椤哄簭**锛氳鍒?`roleIds` 鏄惧紡鎸囧畾 鈫?`roleId`/`name`/`aliases` 鍛戒腑 鈫?`description` 鍛戒腑 鈫?`prompt` 鍛戒腑锛堝急淇″彿鍏滃簳锛夆啋 瑙掕壊琛ㄩ『搴忋€傛暣娈?prompt 鍙敤鏉ユ壘鍏抽敭璇嶏紝reason 涔熷彧浼氬洖鏄惧懡涓殑鍏抽敭璇嶃€?
+4. **鍏滃簳**锛氫换鍔＄被鍨嬫病鏈夊尮閰嶅埌鍙敤瑙掕壊銆佹垨瀹屽叏娌″懡涓叧閿瘝鏃讹紝浣跨敤鐢熸晥閰嶇疆鐨?`defaultRoleId`锛堟寜鈥滃叏灞€ 鈫?椤圭洰 鈫?浼氳瘽鈥濈户鎵匡級锛涢粯璁よ鑹叉湰韬笉鍙敤鍒?`AUTO_ROUTE_FAILED`銆?
+5. **涓嶆敼鎵ц闈?*锛氳矾鐢卞彧鍐冲畾鈥滅敤鍝釜瑙掕壊鈥濓紝provider/model/reasoning/鏉冮檺缁х画鐢辫瑙掕壊鐨?`channel` 鍐冲畾锛涗笉鍒囨洿楂樻垚鏈ā鍨嬨€佷笉鎻愬崌鏉冮檺銆佷笉璋冪敤浠讳綍 AI 鍒嗙被鍣ㄣ€?
 
-成功回执示例（自动路由）：
+鎴愬姛鍥炴墽绀轰緥锛堣嚜鍔ㄨ矾鐢憋級锛?
 
 ```json
 {
   "ok": true,
   "taskRef": { "childId": "child-1", "provider": "acp" },
   "roleId": "role-wukong",
-  "roleName": "悟空",
+  "roleName": "鎮熺┖",
   "isolation": "worktree",
   "routing": {
     "roleId": "role-wukong",
-    "reason": "任务含关键词「审查」→ 评审规则（review），选择「悟空」（role-wukong；角色描述含「审核」）",
+    "reason": "浠诲姟鍚叧閿瘝銆屽鏌ャ€嶁啋 璇勫瑙勫垯锛坮eview锛夛紝閫夋嫨銆屾偀绌恒€嶏紙role-wukong锛涜鑹叉弿杩板惈銆屽鏍搞€嶏級",
     "auto": true
   }
 }
 ```
 
-手动指定角色时 `routing` 只有 `{ "roleId": "role-wukong", "auto": false }`（无 `reason`）。
-`meetingstone_get_task` / `meetingstone_list_runs` 读到的落盘记录同样带 `routing`；手动派单的
-旧记录没有该字段（不伪造）。
+鎵嬪姩鎸囧畾瑙掕壊鏃?`routing` 鍙湁 `{ "roleId": "role-wukong", "auto": false }`锛堟棤 `reason`锛夈€?
+`meetingstone_get_task` / `meetingstone_list_runs` 璇诲埌鐨勮惤鐩樿褰曞悓鏍峰甫 `routing`锛涙墜鍔ㄦ淳鍗曠殑
+鏃ц褰曟病鏈夎瀛楁锛堜笉浼€狅級銆?
 
-自定义规则表（可覆盖内置表；只来自插件全局配置，项目/会话层不支持）：
+鑷畾涔夎鍒欒〃锛堝彲瑕嗙洊鍐呯疆琛紱鍙潵鑷彃浠跺叏灞€閰嶇疆锛岄」鐩?浼氳瘽灞備笉鏀寔锛夛細
 
 ```yaml
 routingRules:
   - taskType: docs
-    label: 文档
-    keywords: [文档, 手册, 校对]
-    roleKeywords: [文档, writer, 文书]
+    label: 鏂囨。
+    keywords: [鏂囨。, 鎵嬪唽, 鏍″]
+    roleKeywords: [鏂囨。, writer, 鏂囦功]
   # - taskType: review
-  #   keywords: [审查, review]
-  #   roleIds: [role-wukong]   # 也可直接钉死角色 ID
+  #   keywords: [瀹℃煡, review]
+  #   roleIds: [role-wukong]   # 涔熷彲鐩存帴閽夋瑙掕壊 ID
 ```
 
-> 自定义表是**整体替换**而非追加；非法条目（缺 `taskType` 或 `keywords`）会被跳过。
-> 只配 `docs` 时，其它任务类型不再命中内置规则，只能走 `defaultRoleId` 或报错——这是有意为之，避免“配置了一半却偷偷用内置表”。
+> 鑷畾涔夎〃鏄?*鏁翠綋鏇挎崲**鑰岄潪杩藉姞锛涢潪娉曟潯鐩紙缂?`taskType` 鎴?`keywords`锛変細琚烦杩囥€?
+> 鍙厤 `docs` 鏃讹紝鍏跺畠浠诲姟绫诲瀷涓嶅啀鍛戒腑鍐呯疆瑙勫垯锛屽彧鑳借蛋 `defaultRoleId` 鎴栨姤閿欌€斺€旇繖鏄湁鎰忎负涔嬶紝閬垮厤鈥滈厤缃簡涓€鍗婂嵈鍋峰伔鐢ㄥ唴缃〃鈥濄€?
 
-## 2. `channels`（通道实例表）
+## 2. `channels`锛堥€氶亾瀹炰緥琛級
 
-一行 = 一个已配置好的 provider。**模型/强度写在这里**，因为宿主的子任务启动 spec 不接收这两个字段。
+涓€琛?= 涓€涓凡閰嶇疆濂界殑 provider銆?*妯″瀷/寮哄害鍐欏湪杩欓噷**锛屽洜涓哄涓荤殑瀛愪换鍔″惎鍔?spec 涓嶆帴鏀惰繖涓や釜瀛楁銆?
 
-| 字段 | 类型 | 必填 | 说明 |
+| 瀛楁 | 绫诲瀷 | 蹇呭～ | 璇存槑 |
 | --- | --- | --- | --- |
-| `channelId` | string | ✅ | 实例 ID，角色通过 `channel.channelId` 引用 |
-| `kind` | `in-process` \| `acp-cli` \| `codex` \| `claude-code` | | 通道类型 |
-| `provider` | string | | provider 名（`spawn` / `acp` / `codex` / `claude-code`），省略时按 kind 推断 |
-| `model` | string | | 该 provider 行实际使用的模型 |
-| `reasoning` | string | | 该 provider 行实际的思考强度 |
-| `description` | string | | 人类可读说明 |
+| `channelId` | string | 鉁?| 瀹炰緥 ID锛岃鑹查€氳繃 `channel.channelId` 寮曠敤 |
+| `kind` | `in-process` \| `acp-cli` \| `codex` \| `claude-code` | | 閫氶亾绫诲瀷 |
+| `provider` | string | | provider 鍚嶏紙`spawn` / `acp` / `codex` / `claude-code`锛夛紝鐪佺暐鏃舵寜 kind 鎺ㄦ柇 |
+| `model` | string | | 璇?provider 琛屽疄闄呬娇鐢ㄧ殑妯″瀷 |
+| `reasoning` | string | | 璇?provider 琛屽疄闄呯殑鎬濊€冨己搴?|
+| `description` | string | | 浜虹被鍙璇存槑 |
 
-**为什么要这层**（DD7 方案 B）：角色不能凭空指定模型。角色的声明必须与所引用实例一致，否则派单被拒（`MODEL_UNSUPPORTED`）——我们宁可报错，也不做"配置成功、执行没采用"。
+**涓轰粈涔堣杩欏眰**锛圖D7 鏂规 B锛夛細瑙掕壊涓嶈兘鍑┖鎸囧畾妯″瀷銆傝鑹茬殑澹版槑蹇呴』涓庢墍寮曠敤瀹炰緥涓€鑷达紝鍚﹀垯娲惧崟琚嫆锛坄MODEL_UNSUPPORTED`锛夆€斺€旀垜浠畞鍙姤閿欙紝涔熶笉鍋?閰嶇疆鎴愬姛銆佹墽琛屾病閲囩敤"銆?
 
-> **本项目不提供只读通道**：宿主 subagent 启动 spec 没有权限字段，做不到绝对只读。因此这里没有 `permissionPreset`，角色上也没有；不要再实现（2026-11-11 用户决策）。
+> **鏈」鐩笉鎻愪緵鍙閫氶亾**锛氬涓?subagent 鍚姩 spec 娌℃湁鏉冮檺瀛楁锛屽仛涓嶅埌缁濆鍙銆傚洜姝よ繖閲屾病鏈?`permissionPreset`锛岃鑹蹭笂涔熸病鏈夛紱涓嶈鍐嶅疄鐜帮紙2026-11-11 鐢ㄦ埛鍐崇瓥锛夈€?
 
-## 3. `roles`（角色表）
+## 3. `roles`锛堣鑹茶〃锛?
 
-| 字段 | 类型 | 默认 | 说明 |
+| 瀛楁 | 绫诲瀷 | 榛樿 | 璇存槑 |
 | --- | --- | --- | --- |
-| `roleId` | string | — | 稳定 ID，`^role-[a-z0-9][a-z0-9-]*$`，改名不变 |
-| `name` | string | — | 显示名，同时参与解析 |
-| `aliases` | string[] | `[]` | 别名；跨角色唯一（大小写/空白不敏感） |
-| `description` | string | `''` | 职责说明 |
-| `channel.kind` | 枚举 | `in-process` | 通道类型 |
-| `channel.channelId` | string | | 引用通道实例 |
-| `channel.model` / `channel.reasoning` | string | | 声明期望值，必须与实例一致 |
-| `enabled` | boolean | `true` | 停用后不得派单 |
-| `fallbackRoleId` | string | | 预留（第一版只提示，不自动接替） |
-| `timeoutMs` | number | `1800000` | 单次派单超时 |
+| `roleId` | string | 鈥?| 绋冲畾 ID锛宍^role-[a-z0-9][a-z0-9-]*$`锛屾敼鍚嶄笉鍙?|
+| `name` | string | 鈥?| 鏄剧ず鍚嶏紝鍚屾椂鍙備笌瑙ｆ瀽 |
+| `aliases` | string[] | `[]` | 鍒悕锛涜法瑙掕壊鍞竴锛堝ぇ灏忓啓/绌虹櫧涓嶆晱鎰燂級 |
+| `description` | string | `''` | 鑱岃矗璇存槑 |
+| `channel.kind` | 鏋氫妇 | `in-process` | 閫氶亾绫诲瀷 |
+| `channel.channelId` | string | | 寮曠敤閫氶亾瀹炰緥 |
+| `channel.model` / `channel.reasoning` | string | | 澹版槑鏈熸湜鍊硷紝蹇呴』涓庡疄渚嬩竴鑷?|
+| `enabled` | boolean | `true` | 鍋滅敤鍚庝笉寰楁淳鍗?|
+| `fallbackRoleId` | string | | 棰勭暀锛堢涓€鐗堝彧鎻愮ず锛屼笉鑷姩鎺ユ浛锛?|
+| `timeoutMs` | number | `1800000` | 鍗曟娲惧崟瓒呮椂 |
 
-## 4. 项目级配置 `.meetingstone.json`
+## 4. 椤圭洰绾ч厤缃?`.meetingstone.json`
 
-放在**项目根**（取 `exec.agent.session.header.cwd`）。
+鏀惧湪**椤圭洰鏍?*锛堝彇 `exec.agent.session.header.cwd`锛夈€?
 
 ```json
 {
   "version": 1,
   "defaultRoleId": "role-sashi",
-  "roles": [{ "roleId": "role-scout", "name": "斥候", "channel": { "kind": "in-process" } }],
-  "roleOverrides": { "role-sashi": { "description": "本项目里负责主力开发" } },
-  "dispatchNotes": "只改 src/；动 docs/ 前先问。",
-  "projectRules": ["未经确认不得修改数据库迁移文件"]
+  "roles": [{ "roleId": "role-scout", "name": "鏂ュ€?, "channel": { "kind": "in-process" } }],
+  "roleOverrides": { "role-sashi": { "description": "鏈」鐩噷璐熻矗涓诲姏寮€鍙? } },
+  "dispatchNotes": "鍙敼 src/锛涘姩 docs/ 鍓嶅厛闂€?,
+  "projectRules": ["鏈粡纭涓嶅緱淇敼鏁版嵁搴撹縼绉绘枃浠?]
 }
 ```
 
-**合并规则**
+**鍚堝苟瑙勫垯**
 
-1. 项目 > 全局（`roleOverrides` 按 roleId 打补丁；`roles` 里同 roleId 也是覆盖）。
-2. `channel` 覆盖是**字段级合并**；但模型/强度仍要与实例一致。
-3. 文件坏了（JSON 非法、版本不认识、字段类型错）→ **降级为空配置 + 把错误暴露在工具返回里**，绝不打断派单链路。
+1. 椤圭洰 > 鍏ㄥ眬锛坄roleOverrides` 鎸?roleId 鎵撹ˉ涓侊紱`roles` 閲屽悓 roleId 涔熸槸瑕嗙洊锛夈€?
+2. `channel` 瑕嗙洊鏄?*瀛楁绾у悎骞?*锛涗絾妯″瀷/寮哄害浠嶈涓庡疄渚嬩竴鑷淬€?
+3. 鏂囦欢鍧忎簡锛圝SON 闈炴硶銆佺増鏈笉璁よ瘑銆佸瓧娈电被鍨嬮敊锛夆啋 **闄嶇骇涓虹┖閰嶇疆 + 鎶婇敊璇毚闇插湪宸ュ叿杩斿洖閲?*锛岀粷涓嶆墦鏂淳鍗曢摼璺€?
 
-> 项目级配置**不提供 `limits`**：同项目串行开关 `serializeWrites` 只在插件全局配置（§1）里生效，项目文件里写 `limits` 会按未知字段忽略，不报错、不阻断派单。
-> `permissionPreset` 已随只读通道移除；旧配置里写了也会被忽略，不报错、不阻断派单。
+> 椤圭洰绾ч厤缃?*涓嶆彁渚?`limits`**锛氬悓椤圭洰涓茶寮€鍏?`serializeWrites` 鍙湪鎻掍欢鍏ㄥ眬閰嶇疆锛埪?锛夐噷鐢熸晥锛岄」鐩枃浠堕噷鍐?`limits` 浼氭寜鏈煡瀛楁蹇界暐锛屼笉鎶ラ敊銆佷笉闃绘柇娲惧崟銆?
+> `permissionPreset` 宸查殢鍙閫氶亾绉婚櫎锛涙棫閰嶇疆閲屽啓浜嗕篃浼氳蹇界暐锛屼笉鎶ラ敊銆佷笉闃绘柇娲惧崟銆?
 
-### 4.1 三层继承（global → project → session）
+### 4.1 涓夊眰缁ф壙锛坓lobal 鈫?project 鈫?session锛?
 
-生效配置按 **全局 → 项目 → 会话** 合并，后者覆盖前者；只影响各自的作用域：
+鐢熸晥閰嶇疆鎸?**鍏ㄥ眬 鈫?椤圭洰 鈫?浼氳瘽** 鍚堝苟锛屽悗鑰呰鐩栧墠鑰咃紱鍙奖鍝嶅悇鑷殑浣滅敤鍩燂細
 
-| 层 | 位置 | 作用域 |
+| 灞?| 浣嶇疆 | 浣滅敤鍩?|
 | --- | --- | --- |
-| global | profile `cordis.patch.yml` 的 `meetingstone` 行 | 所有项目/会话 |
-| project | `<项目根>/.meetingstone.json` | 当前项目 |
-| session | `<项目根>/.meetingstone/sessions/<sessionId>.json` | **仅当前对话**（`exec.agent.session.id`） |
+| global | profile `cordis.patch.yml` 鐨?`meetingstone` 琛?| 鎵€鏈夐」鐩?浼氳瘽 |
+| project | `<椤圭洰鏍?/.meetingstone.json` | 褰撳墠椤圭洰 |
+| session | `<椤圭洰鏍?/.meetingstone/sessions/<sessionId>.json` | **浠呭綋鍓嶅璇?*锛坄exec.agent.session.id`锛?|
 
-合并规则（`src/session/config.js` 的 `resolveEffectiveConfig`）：
+鍚堝苟瑙勫垯锛坄src/session/config.js` 鐨?`resolveEffectiveConfig`锛夛細
 
-1. 同 `roleId` 按字段覆盖；`channel` 也是字段级合并（只写 `model` 不会把 `kind` / `provider` 抹掉）。
-2. `aliases` 是**整体替换**，不是追加；`alias` 是单值/数组的简写。
-3. **只保存差异**：会话值与继承值相同 → 该键不落盘；把一个字段改回继承值 → 删除旧覆盖（恢复继承）。
-4. 未知字段**拒绝并报错**（顶层、角色、`channel` 三层都按白名单校验），不会静默生效。
-5. 会话层只改配置，不改变项目隔离：不同 `sessionId` 用不同文件，互不影响。
-6. `resolveEffectiveConfig({ global, project, session })` 返回 `{ effective, sources, errors }`；
-   `sources.roles[roleId]` 给出 `layer` 与逐字段来源（`global` / `project` / `session` / `default`），
-   `sources.defaultRoleId` / `sources.dispatchNotes` / `sources.projectRules` 同样标注，供 UI 显示"继承/覆盖"。
-7. 别名冲突不在这里判定：调用方在**最终生效角色表**上建注册表
-   （`createRegistry({ globalRoles: effective.roles })`），冲突由注册表的 `errors` 统一报告。
+1. 鍚?`roleId` 鎸夊瓧娈佃鐩栵紱`channel` 涔熸槸瀛楁绾у悎骞讹紙鍙啓 `model` 涓嶄細鎶?`kind` / `provider` 鎶规帀锛夈€?
+2. `aliases` 鏄?*鏁翠綋鏇挎崲**锛屼笉鏄拷鍔狅紱`alias` 鏄崟鍊?鏁扮粍鐨勭畝鍐欍€?
+3. **鍙繚瀛樺樊寮?*锛氫細璇濆€间笌缁ф壙鍊肩浉鍚?鈫?璇ラ敭涓嶈惤鐩橈紱鎶婁竴涓瓧娈垫敼鍥炵户鎵垮€?鈫?鍒犻櫎鏃ц鐩栵紙鎭㈠缁ф壙锛夈€?
+4. 鏈煡瀛楁**鎷掔粷骞舵姤閿?*锛堥《灞傘€佽鑹层€乣channel` 涓夊眰閮芥寜鐧藉悕鍗曟牎楠岋級锛屼笉浼氶潤榛樼敓鏁堛€?
+5. 浼氳瘽灞傚彧鏀归厤缃紝涓嶆敼鍙橀」鐩殧绂伙細涓嶅悓 `sessionId` 鐢ㄤ笉鍚屾枃浠讹紝浜掍笉褰卞搷銆?
+6. `resolveEffectiveConfig({ global, project, session })` 杩斿洖 `{ effective, sources, errors }`锛?
+   `sources.roles[roleId]` 缁欏嚭 `layer` 涓庨€愬瓧娈垫潵婧愶紙`global` / `project` / `session` / `default`锛夛紝
+   `sources.defaultRoleId` / `sources.dispatchNotes` / `sources.projectRules` 鍚屾牱鏍囨敞锛屼緵 UI 鏄剧ず"缁ф壙/瑕嗙洊"銆?
+7. 鍒悕鍐茬獊涓嶅湪杩欓噷鍒ゅ畾锛氳皟鐢ㄦ柟鍦?*鏈€缁堢敓鏁堣鑹茶〃**涓婂缓娉ㄥ唽琛?
+   锛坄createRegistry({ globalRoles: effective.roles })`锛夛紝鍐茬獊鐢辨敞鍐岃〃鐨?`errors` 缁熶竴鎶ュ憡銆?
 
-会话覆盖文件示例（`.meetingstone/sessions/<sessionId>.json`，`.meetingstone/` 已在 `.gitignore`）：
+浼氳瘽瑕嗙洊鏂囦欢绀轰緥锛坄.meetingstone/sessions/<sessionId>.json`锛宍.meetingstone/` 宸插湪 `.gitignore`锛夛細
 
 ```json
 {
@@ -196,238 +196,238 @@ routingRules:
   "roleOverrides": {
     "role-sashi": {
       "alias": ["SSS"],
-      "description": "本对话里负责实现",
-      "prompt": "本对话的额外规则",
+      "description": "鏈璇濋噷璐熻矗瀹炵幇",
+      "prompt": "鏈璇濈殑棰濆瑙勫垯",
       "channel": { "cli": "acp", "model": "m-2", "reasoning": "high" }
     }
   },
-  "roles": [{ "roleId": "role-temp", "name": "临时", "channel": { "kind": "in-process" } }],
+  "roles": [{ "roleId": "role-temp", "name": "涓存椂", "channel": { "kind": "in-process" } }],
   "defaultRoleId": "role-sashi",
-  "dispatchNotes": "本对话优先短回复",
-  "projectRules": ["本对话只改 src/"]
+  "dispatchNotes": "鏈璇濅紭鍏堢煭鍥炲",
+  "projectRules": ["鏈璇濆彧鏀?src/"]
 }
 ```
 
-字段白名单：
+瀛楁鐧藉悕鍗曪細
 
-| 层 | 允许字段 |
+| 灞?| 鍏佽瀛楁 |
 | --- | --- |
-| 顶层 | `version` / `roles` / `roleOverrides` / `defaultRoleId` / `dispatchNotes` / `projectRules` |
-| 角色 | `roleId` / `name` / `alias`（或 `aliases`）/ `description` / `prompt` / `channel` / `enabled` / `fallbackRoleId` / `timeoutMs` |
-| 通道 | `kind` / `channelId` / `provider` / `cli` / `model` / `reasoning` |
+| 椤跺眰 | `version` / `roles` / `roleOverrides` / `defaultRoleId` / `dispatchNotes` / `projectRules` |
+| 瑙掕壊 | `roleId` / `name` / `alias`锛堟垨 `aliases`锛? `description` / `prompt` / `channel` / `enabled` / `fallbackRoleId` / `timeoutMs` |
+| 閫氶亾 | `kind` / `channelId` / `provider` / `cli` / `model` / `reasoning` |
 
-新增/改字段的宿主侧 API（`src/session/store.js`，无 UI）：
+鏂板/鏀瑰瓧娈电殑瀹夸富渚?API锛坄src/session/store.js`锛屾棤 UI锛夛細
 
-- `store.setOverride(projectRoot, sessionId, { roleId, patch, inherited })`：只写差异；
-  等于继承值的字段会从旧覆盖里删除。
-- `store.clearOverride(projectRoot, sessionId, { roleId, field })`：`field` 省略 = 恢复整个角色；
-  支持 `channel.model`，也接受 `model` / `reasoning` 等通道简写。
-- `store.get(projectRoot, sessionId)`：永不抛异常；文件不存在 → 空配置，坏 JSON / 版本不认识 →
-  空配置 + `SESSION_CONFIG_INVALID_JSON` / `SESSION_CONFIG_UNSUPPORTED_VERSION`。
+- `store.setOverride(projectRoot, sessionId, { roleId, patch, inherited })`锛氬彧鍐欏樊寮傦紱
+  绛変簬缁ф壙鍊肩殑瀛楁浼氫粠鏃ц鐩栭噷鍒犻櫎銆?
+- `store.clearOverride(projectRoot, sessionId, { roleId, field })`锛歚field` 鐪佺暐 = 鎭㈠鏁翠釜瑙掕壊锛?
+  鏀寔 `channel.model`锛屼篃鎺ュ彈 `model` / `reasoning` 绛夐€氶亾绠€鍐欍€?
+- `store.get(projectRoot, sessionId)`锛氭案涓嶆姏寮傚父锛涙枃浠朵笉瀛樺湪 鈫?绌洪厤缃紝鍧?JSON / 鐗堟湰涓嶈璇?鈫?
+  绌洪厤缃?+ `SESSION_CONFIG_INVALID_JSON` / `SESSION_CONFIG_UNSUPPORTED_VERSION`銆?
 
-> **为什么不用宿主的 session 级存储**（2026-11-11 查 0.2.2-rc.1 实际包）：
-> `@deepseek-ai/dsh-session` 的 `SessionHeader` 是创建时深冻结的元数据（仅 `cwd` 等），
-> 没有插件可写的 per-session KV；会话日志是事件溯源，`appendPluginRecord()` 明确只允许
-> 仓库内 experimental 包调用。`@deepseek-ai/dsh-storage-domain` 需要 `defineDomain` + zod，
-> 本插件是零依赖的，且该服务不是所有 composition 都挂载。故退化为项目内文件。
+> **涓轰粈涔堜笉鐢ㄥ涓荤殑 session 绾у瓨鍌?*锛?026-11-11 鏌?0.2.2-rc.1 瀹為檯鍖咃級锛?
+> `@deepseek-ai/dsh-session` 鐨?`SessionHeader` 鏄垱寤烘椂娣卞喕缁撶殑鍏冩暟鎹紙浠?`cwd` 绛夛級锛?
+> 娌℃湁鎻掍欢鍙啓鐨?per-session KV锛涗細璇濇棩蹇楁槸浜嬩欢婧簮锛宍appendPluginRecord()` 鏄庣‘鍙厑璁?
+> 浠撳簱鍐?experimental 鍖呰皟鐢ㄣ€俙@deepseek-ai/dsh-storage-domain` 闇€瑕?`defineDomain` + zod锛?
+> 鏈彃浠舵槸闆朵緷璧栫殑锛屼笖璇ユ湇鍔′笉鏄墍鏈?composition 閮芥寕杞姐€傛晠閫€鍖栦负椤圭洰鍐呮枃浠躲€?
 >
-> 局限：文件不随宿主会话归档/删除而清理；换项目路径后看不到旧覆盖；多进程同时写同一
-> session 文件没有跨进程锁（最后写入者胜出）。
+> 灞€闄愶細鏂囦欢涓嶉殢瀹夸富浼氳瘽褰掓。/鍒犻櫎鑰屾竻鐞嗭紱鎹㈤」鐩矾寰勫悗鐪嬩笉鍒版棫瑕嗙洊锛涘杩涚▼鍚屾椂鍐欏悓涓€
+> session 鏂囦欢娌℃湁璺ㄨ繘绋嬮攣锛堟渶鍚庡啓鍏ヨ€呰儨鍑猴級銆?
 
-## 5. 解析与校验
+## 5. 瑙ｆ瀽涓庢牎楠?
 
-| 场景 | 行为 |
+| 鍦烘櫙 | 琛屼负 |
 | --- | --- |
-| 未指定 `role` 且未开 `autoRoute`（或 `role` 不是字符串） | `ROLE_REQUIRED`（不会隐式使用 `defaultRoleId`） |
-| 开了 `autoRoute` 但没有 `enabled + available` 的角色；或任务类型无匹配角色且 `defaultRoleId` 未配置/不可用 | `AUTO_ROUTE_FAILED`，`message` 说明失败在“无可用角色”还是“无匹配角色/兜底” |
-| 名字/别名冲突 | 冲突 token 不参与解析；角色仍可用 `roleId`；`list_roles` 的 `errors` 里给 `ALIAS_CONFLICT` |
-| 派单到歧义名字 | `ROLE_AMBIGUOUS`，提示里列出可选 roleId |
-| 派单到停用角色 | `ROLE_DISABLED` |
-| provider 未注册 | `PROVIDER_UNAVAILABLE`，附带原因 |
-| 模型与实例不一致 | `MODEL_UNSUPPORTED`，给出双方取值 |
-| `cwd` 越出项目根 | `PATH_OUTSIDE_PROJECT` |
-| 拿不到项目根却指定 `cwd` | `PROJECT_ROOT_UNKNOWN` |
-| 同项目已有任务（`isolation:none` + `serializeWrites`） | `WRITE_CONFLICT`（正确性保护，不是额度） |
-| 同项目已有未隔离任务，或隔离任务遇到未隔离任务 | `WRITE_CONFLICT`（不得混跑） |
-| 本插件并行写任务达全局上限 | `WRITE_LIMIT_TOTAL`（立即拒绝，不排队，稍后重试） |
-| 宿主子 Agent 共享池已满（`maxActiveSubagents` 默认 8） | `ACTIVATION_LIMIT_REACHED`（原样透传，不排队，等现有任务结束） |
-| 请求隔离但工作树服务缺失 | `WORKTREE_UNAVAILABLE` |
-| 项目根不是 git 工作区 | `WORKTREE_NOT_GIT_REPOSITORY` |
-| `base` 无法解析为 commit | `WORKTREE_BASE_INVALID` |
-| 工作树路径已存在/已被 git 登记 | `WORKTREE_PATH_EXISTS` |
-| `meetingstone/<operationId>` 分支已存在 | `WORKTREE_BRANCH_EXISTS` |
-| 其他 git 失败 | `WORKTREE_GIT_FAILED` |
-| git 命令超时（建树 30s / 计算改动 10s） | `WORKTREE_TIMEOUT` |
-| 工作树实际路径逃出项目根 | `WORKTREE_PATH_OUTSIDE` |
-| `isolation` 不是 `none`/`worktree` | `INVALID_ISOLATION` |
-| 结构化 TaskSpec 缺关键字段（`title`；或声明了 `scope` 却没有 `acceptance`；或字段类型错误） | `TASKSPEC_INVALID`，`message` 说明缺什么，`fields` 列出字段名 |
-| `meetingstone_get_run_artifact` 找不到记录 | `NOT_FOUND` |
-| 记录文件不是合法 JSON | `CORRUPT` |
-| `lineFrom/lineTo` 与 `headBytes/tailBytes` 同时使用、或范围非法 | `INVALID_RANGE` |
-| `meetingstone_wait` 的 `childIds` 不是非空字符串数组 | `INVALID_CHILD_IDS` |
-| `meetingstone_wait` 的 `timeoutMs` 不是正数 | `INVALID_TIMEOUT` |
-| `meetingstone_wait` 的 childId 在本进程查不到（含 DSH 重启前的任务） | `UNKNOWN_CHILD`：立即返回，不阻塞，`unknownChildIds` 列出 |
-| 记录文件超过读取上限 | `TOO_LARGE` |
-| 取消/卸载时宿主 `dispose()` 超时 | `ADAPTER_DISPOSE_TIMEOUT`：写终态（`stopConfirmed:false`）并**保留**并发槽位/隔离互斥，等 activation.result 落定后自动释放 |
-| 取消/卸载时宿主 `dispose()` 抛错 | `ADAPTER_DISPOSE_FAILED`：写终态（`stopConfirmed:false`）并**保留**并发槽位/隔离互斥，等 activation.result 落定后自动释放 |
-| 插件已卸载时仍有启动请求 | `ADAPTER_DISPOSED`：拒绝启动；启动中的 activation 在卸载后返回时先 dispose，确认停止才释放占位槽位。dispose 抛错/超时时**保留句柄与槽位**，写 `interrupted + stopConfirmed:false + error` 终态，等 result 落定后再释放；错误码原样透传，不归入 `ADAPTER_FAILED` |
+| 鏈寚瀹?`role` 涓旀湭寮€ `autoRoute`锛堟垨 `role` 涓嶆槸瀛楃涓诧級 | `ROLE_REQUIRED`锛堜笉浼氶殣寮忎娇鐢?`defaultRoleId`锛?|
+| 寮€浜?`autoRoute` 浣嗘病鏈?`enabled + available` 鐨勮鑹诧紱鎴栦换鍔＄被鍨嬫棤鍖归厤瑙掕壊涓?`defaultRoleId` 鏈厤缃?涓嶅彲鐢?| `AUTO_ROUTE_FAILED`锛宍message` 璇存槑澶辫触鍦ㄢ€滄棤鍙敤瑙掕壊鈥濊繕鏄€滄棤鍖归厤瑙掕壊/鍏滃簳鈥?|
+| 鍚嶅瓧/鍒悕鍐茬獊 | 鍐茬獊 token 涓嶅弬涓庤В鏋愶紱瑙掕壊浠嶅彲鐢?`roleId`锛沗list_roles` 鐨?`errors` 閲岀粰 `ALIAS_CONFLICT` |
+| 娲惧崟鍒版涔夊悕瀛?| `ROLE_AMBIGUOUS`锛屾彁绀洪噷鍒楀嚭鍙€?roleId |
+| 娲惧崟鍒板仠鐢ㄨ鑹?| `ROLE_DISABLED` |
+| provider 鏈敞鍐?| `PROVIDER_UNAVAILABLE`锛岄檮甯﹀師鍥?|
+| 妯″瀷涓庡疄渚嬩笉涓€鑷?| `MODEL_UNSUPPORTED`锛岀粰鍑哄弻鏂瑰彇鍊?|
+| `cwd` 瓒婂嚭椤圭洰鏍?| `PATH_OUTSIDE_PROJECT` |
+| 鎷夸笉鍒伴」鐩牴鍗存寚瀹?`cwd` | `PROJECT_ROOT_UNKNOWN` |
+| 鍚岄」鐩凡鏈変换鍔★紙`isolation:none` + `serializeWrites`锛?| `WRITE_CONFLICT`锛堟纭€т繚鎶わ紝涓嶆槸棰濆害锛?|
+| 鍚岄」鐩凡鏈夋湭闅旂浠诲姟锛屾垨闅旂浠诲姟閬囧埌鏈殧绂讳换鍔?| `WRITE_CONFLICT`锛堜笉寰楁贩璺戯級 |
+| 鏈彃浠跺苟琛屽啓浠诲姟杈惧叏灞€涓婇檺 | `WRITE_LIMIT_TOTAL`锛堢珛鍗虫嫆缁濓紝涓嶆帓闃燂紝绋嶅悗閲嶈瘯锛?|
+| 瀹夸富瀛?Agent 鍏变韩姹犲凡婊★紙`maxActiveSubagents` 榛樿 8锛?| `ACTIVATION_LIMIT_REACHED`锛堝師鏍烽€忎紶锛屼笉鎺掗槦锛岀瓑鐜版湁浠诲姟缁撴潫锛?|
+| 璇锋眰闅旂浣嗗伐浣滄爲鏈嶅姟缂哄け | `WORKTREE_UNAVAILABLE` |
+| 椤圭洰鏍逛笉鏄?git 宸ヤ綔鍖?| `WORKTREE_NOT_GIT_REPOSITORY` |
+| `base` 鏃犳硶瑙ｆ瀽涓?commit | `WORKTREE_BASE_INVALID` |
+| 宸ヤ綔鏍戣矾寰勫凡瀛樺湪/宸茶 git 鐧昏 | `WORKTREE_PATH_EXISTS` |
+| `meetingstone/<operationId>` 鍒嗘敮宸插瓨鍦?| `WORKTREE_BRANCH_EXISTS` |
+| 鍏朵粬 git 澶辫触 | `WORKTREE_GIT_FAILED` |
+| git 鍛戒护瓒呮椂锛堝缓鏍?30s / 璁＄畻鏀瑰姩 10s锛?| `WORKTREE_TIMEOUT` |
+| 宸ヤ綔鏍戝疄闄呰矾寰勯€冨嚭椤圭洰鏍?| `WORKTREE_PATH_OUTSIDE` |
+| `isolation` 涓嶆槸 `none`/`worktree` | `INVALID_ISOLATION` |
+| 缁撴瀯鍖?TaskSpec 缂哄叧閿瓧娈碉紙`title`锛涙垨澹版槑浜?`scope` 鍗存病鏈?`acceptance`锛涙垨瀛楁绫诲瀷閿欒锛?| `TASKSPEC_INVALID`锛宍message` 璇存槑缂轰粈涔堬紝`fields` 鍒楀嚭瀛楁鍚?|
+| `meetingstone_get_run_artifact` 鎵句笉鍒拌褰?| `NOT_FOUND` |
+| 璁板綍鏂囦欢涓嶆槸鍚堟硶 JSON | `CORRUPT` |
+| `lineFrom/lineTo` 涓?`headBytes/tailBytes` 鍚屾椂浣跨敤銆佹垨鑼冨洿闈炴硶 | `INVALID_RANGE` |
+| `meetingstone_wait` 鐨?`childIds` 涓嶆槸闈炵┖瀛楃涓叉暟缁?| `INVALID_CHILD_IDS` |
+| `meetingstone_wait` 鐨?`timeoutMs` 涓嶆槸姝ｆ暟 | `INVALID_TIMEOUT` |
+| `meetingstone_wait` 鐨?childId 鍦ㄦ湰杩涚▼鏌ヤ笉鍒帮紙鍚?DSH 閲嶅惎鍓嶇殑浠诲姟锛?| `UNKNOWN_CHILD`锛氱珛鍗宠繑鍥烇紝涓嶉樆濉烇紝`unknownChildIds` 鍒楀嚭 |
+| 璁板綍鏂囦欢瓒呰繃璇诲彇涓婇檺 | `TOO_LARGE` |
+| 鍙栨秷/鍗歌浇鏃跺涓?`dispose()` 瓒呮椂 | `ADAPTER_DISPOSE_TIMEOUT`锛氬啓缁堟€侊紙`stopConfirmed:false`锛夊苟**淇濈暀**骞跺彂妲戒綅/闅旂浜掓枼锛岀瓑 activation.result 钀藉畾鍚庤嚜鍔ㄩ噴鏀?|
+| 鍙栨秷/鍗歌浇鏃跺涓?`dispose()` 鎶涢敊 | `ADAPTER_DISPOSE_FAILED`锛氬啓缁堟€侊紙`stopConfirmed:false`锛夊苟**淇濈暀**骞跺彂妲戒綅/闅旂浜掓枼锛岀瓑 activation.result 钀藉畾鍚庤嚜鍔ㄩ噴鏀?|
+| 鎻掍欢宸插嵏杞芥椂浠嶆湁鍚姩璇锋眰 | `ADAPTER_DISPOSED`锛氭嫆缁濆惎鍔紱鍚姩涓殑 activation 鍦ㄥ嵏杞藉悗杩斿洖鏃跺厛 dispose锛岀‘璁ゅ仠姝㈡墠閲婃斁鍗犱綅妲戒綅銆俤ispose 鎶涢敊/瓒呮椂鏃?*淇濈暀鍙ユ焺涓庢Ы浣?*锛屽啓 `interrupted + stopConfirmed:false + error` 缁堟€侊紝绛?result 钀藉畾鍚庡啀閲婃斁锛涢敊璇爜鍘熸牱閫忎紶锛屼笉褰掑叆 `ADAPTER_FAILED` |
 
-## 6. 生命周期、runtimeId 与 interrupted
+## 6. 鐢熷懡鍛ㄦ湡銆乺untimeId 涓?interrupted
 
-- 每次插件启动生成一个 `runtimeId`，写进每一条落盘记录（`.meetingstone/runs/<childId>.json`）。
-- **取消顺序**：先 `abort` → `await activation.dispose()`（默认最多等 5 秒）→ **确认停止后**才释放并发槽位。
-  dispose 超时或抛错时槽位与隔离互斥保留，先写 `cancelled + stopConfirmed:false` 终态；等
-  `activation.result` 落定（可验证的停止证据）后**回填**：再写一条终态，把 `stopConfirmed` 改为 `true`、
-  `diagnostic` 追加 `late settlement`，`status` 保持 `cancelled` 不被改写成 `completed`，这时才自动释放槽位。
-  重复取消复用同一个收尾 promise。
-- **落盘顺序**：同一 `childId` 的写入按 FIFO 串行，`running` 一定先于终态落地，终态不会被覆盖。
-- **重启后的假 running**：读取时若 `status === 'running'` 且 `runtimeId` 不是当前进程的，投影为
-  `status: 'interrupted'` + `interrupted: true`；只改返回值，不回写磁盘。
-- **插件卸载**：对内存中仍存活的任务写 `interrupted` 终态（`stopReason: 'plugin-disposed'`），
-  不会在磁盘留下假 `running`。每个句柄独立收尾：一个 `dispose` 阻塞不会拖住其他句柄的终态。
-  `dispose` 未确认的任务保留槽位并记 `stopConfirmed:false`；等待期间 result 已落定的任务
-  也照常写终态，并记 `stopConfirmed:true`。
-  "启动中"（`startActivation` 尚未返回）的 activation 会被冻结；返回后确认 dispose 成功才释放
-  占位槽位，绝不在卸载后登记为存活任务。
-- **工作树记录**：终态记录包含 `worktree: { path, branch, baseSha, repositoryRoot, operationId }`、
-  `changedFiles`、`changedFilesUnknown`、`changedFilesTruncated`、`changedFilesTotal`、`stopConfirmed`。
-  `changedFiles` 最多写 5000 条（另有 2MB 字节预算），超出时 `changedFilesTruncated:true` 并保留总数。
-  体积闸兜底时**同时**裁剪 `changedFiles` 与 `overlapWarnings`，避免写出自己读不回的记录。
-  带 `worktree` 的记录**不参与** 100 条/30 天自动清理（保护未合并成果的元数据）；
-  超大或无法解析的记录同样按 fail-safe **不删除**。工作树/分支本身一律不自动删除。
-- **重叠预警**：`get_task` / `list_runs` 返回 `overlapWarnings: [{ childId, files }]`；
-  终态写入时在**项目级异步互斥**内计算并回写：写当前记录后，把交集有界地回写到参与交集的
-  历史记录，因此并发结束顺序任意，双方原始 JSON 都含交集。
-  `overlapWarnings` 每对最多 50 个文件、整个字段最多 64KB（JSON 转义后），超限时写
-  `overlapTruncated:true` / `overlapTotal:<原始文件总数>`。
-  `changedFilesUnknown: true` 的记录不参与比较，但会在结果里标注未知。
-- **失败上下文**：`WORKTREE_*` 失败结果保留 `path` / `branch` / `phase` / `residualPath`；
-  带工作树的启动失败同样保留工作树路径与分支，便于人工定位残留。
+- 姣忔鎻掍欢鍚姩鐢熸垚涓€涓?`runtimeId`锛屽啓杩涙瘡涓€鏉¤惤鐩樿褰曪紙`.meetingstone/runs/<childId>.json`锛夈€?
+- **鍙栨秷椤哄簭**锛氬厛 `abort` 鈫?`await activation.dispose()`锛堥粯璁ゆ渶澶氱瓑 5 绉掞級鈫?**纭鍋滄鍚?*鎵嶉噴鏀惧苟鍙戞Ы浣嶃€?
+  dispose 瓒呮椂鎴栨姏閿欐椂妲戒綅涓庨殧绂讳簰鏂ヤ繚鐣欙紝鍏堝啓 `cancelled + stopConfirmed:false` 缁堟€侊紱绛?
+  `activation.result` 钀藉畾锛堝彲楠岃瘉鐨勫仠姝㈣瘉鎹級鍚?*鍥炲～**锛氬啀鍐欎竴鏉＄粓鎬侊紝鎶?`stopConfirmed` 鏀逛负 `true`銆?
+  `diagnostic` 杩藉姞 `late settlement`锛宍status` 淇濇寔 `cancelled` 涓嶈鏀瑰啓鎴?`completed`锛岃繖鏃舵墠鑷姩閲婃斁妲戒綅銆?
+  閲嶅鍙栨秷澶嶇敤鍚屼竴涓敹灏?promise銆?
+- **钀界洏椤哄簭**锛氬悓涓€ `childId` 鐨勫啓鍏ユ寜 FIFO 涓茶锛宍running` 涓€瀹氬厛浜庣粓鎬佽惤鍦帮紝缁堟€佷笉浼氳瑕嗙洊銆?
+- **閲嶅惎鍚庣殑鍋?running**锛氳鍙栨椂鑻?`status === 'running'` 涓?`runtimeId` 涓嶆槸褰撳墠杩涚▼鐨勶紝鎶曞奖涓?
+  `status: 'interrupted'` + `interrupted: true`锛涘彧鏀硅繑鍥炲€硷紝涓嶅洖鍐欑鐩樸€?
+- **鎻掍欢鍗歌浇**锛氬鍐呭瓨涓粛瀛樻椿鐨勪换鍔″啓 `interrupted` 缁堟€侊紙`stopReason: 'plugin-disposed'`锛夛紝
+  涓嶄細鍦ㄧ鐩樼暀涓嬪亣 `running`銆傛瘡涓彞鏌勭嫭绔嬫敹灏撅細涓€涓?`dispose` 闃诲涓嶄細鎷栦綇鍏朵粬鍙ユ焺鐨勭粓鎬併€?
+  `dispose` 鏈‘璁ょ殑浠诲姟淇濈暀妲戒綅骞惰 `stopConfirmed:false`锛涚瓑寰呮湡闂?result 宸茶惤瀹氱殑浠诲姟
+  涔熺収甯稿啓缁堟€侊紝骞惰 `stopConfirmed:true`銆?
+  "鍚姩涓?锛坄startActivation` 灏氭湭杩斿洖锛夌殑 activation 浼氳鍐荤粨锛涜繑鍥炲悗纭 dispose 鎴愬姛鎵嶉噴鏀?
+  鍗犱綅妲戒綅锛岀粷涓嶅湪鍗歌浇鍚庣櫥璁颁负瀛樻椿浠诲姟銆?
+- **宸ヤ綔鏍戣褰?*锛氱粓鎬佽褰曞寘鍚?`worktree: { path, branch, baseSha, repositoryRoot, operationId }`銆?
+  `changedFiles`銆乣changedFilesUnknown`銆乣changedFilesTruncated`銆乣changedFilesTotal`銆乣stopConfirmed`銆?
+  `changedFiles` 鏈€澶氬啓 5000 鏉★紙鍙︽湁 2MB 瀛楄妭棰勭畻锛夛紝瓒呭嚭鏃?`changedFilesTruncated:true` 骞朵繚鐣欐€绘暟銆?
+  浣撶Н闂稿厹搴曟椂**鍚屾椂**瑁佸壀 `changedFiles` 涓?`overlapWarnings`锛岄伩鍏嶅啓鍑鸿嚜宸辫涓嶅洖鐨勮褰曘€?
+  甯?`worktree` 鐨勮褰?*涓嶅弬涓?* 100 鏉?30 澶╄嚜鍔ㄦ竻鐞嗭紙淇濇姢鏈悎骞舵垚鏋滅殑鍏冩暟鎹級锛?
+  瓒呭ぇ鎴栨棤娉曡В鏋愮殑璁板綍鍚屾牱鎸?fail-safe **涓嶅垹闄?*銆傚伐浣滄爲/鍒嗘敮鏈韩涓€寰嬩笉鑷姩鍒犻櫎銆?
+- **閲嶅彔棰勮**锛歚get_task` / `list_runs` 杩斿洖 `overlapWarnings: [{ childId, files }]`锛?
+  缁堟€佸啓鍏ユ椂鍦?*椤圭洰绾у紓姝ヤ簰鏂?*鍐呰绠楀苟鍥炲啓锛氬啓褰撳墠璁板綍鍚庯紝鎶婁氦闆嗘湁鐣屽湴鍥炲啓鍒板弬涓庝氦闆嗙殑
+  鍘嗗彶璁板綍锛屽洜姝ゅ苟鍙戠粨鏉熼『搴忎换鎰忥紝鍙屾柟鍘熷 JSON 閮藉惈浜ら泦銆?
+  `overlapWarnings` 姣忓鏈€澶?50 涓枃浠躲€佹暣涓瓧娈垫渶澶?64KB锛圝SON 杞箟鍚庯級锛岃秴闄愭椂鍐?
+  `overlapTruncated:true` / `overlapTotal:<鍘熷鏂囦欢鎬绘暟>`銆?
+  `changedFilesUnknown: true` 鐨勮褰曚笉鍙備笌姣旇緝锛屼絾浼氬湪缁撴灉閲屾爣娉ㄦ湭鐭ャ€?
+- **澶辫触涓婁笅鏂?*锛歚WORKTREE_*` 澶辫触缁撴灉淇濈暀 `path` / `branch` / `phase` / `residualPath`锛?
+  甯﹀伐浣滄爲鐨勫惎鍔ㄥけ璐ュ悓鏍蜂繚鐣欏伐浣滄爲璺緞涓庡垎鏀紝渚夸簬浜哄伐瀹氫綅娈嬬暀銆?
 
-## 7. 工具返回与任务契约（Token 优化，2026-11-11）
+## 7. 宸ュ叿杩斿洖涓庝换鍔″绾︼紙Token 浼樺寲锛?026-11-11锛?
 
-会话上下文是有限预算，以下默认值按审计结论收紧；需要完整内容时必须显式索取。
+浼氳瘽涓婁笅鏂囨槸鏈夐檺棰勭畻锛屼互涓嬮粯璁ゅ€兼寜瀹¤缁撹鏀剁揣锛涢渶瑕佸畬鏁村唴瀹规椂蹇呴』鏄惧紡绱㈠彇銆?
 
-| 工具 | 默认返回 | 完整/详细模式 |
+| 宸ュ叿 | 榛樿杩斿洖 | 瀹屾暣/璇︾粏妯″紡 |
 | --- | --- | --- |
-| `meetingstone_get_task` | `status` / `stopReason` / `resultBytes` / `jobId` / `recordPath`；有结构化 `summary` 时只回 summary/resultStatus/openIssues/handoff（`resultOmitted:true`），否则回结果首 1KiB + 末 512B | `full:true` 返回完整 `result`；`output` 与 `result` 相同时只回一份（字段名统一为 `result`） |
-| `meetingstone_get_run_artifact` | 完整结果文本（`.meetingstone/runs/<childId>.json` 的 `result`） | 用 `headBytes`/`tailBytes` 取首尾，或 `lineFrom`/`lineTo`（1 起、含端点）取行范围 |
-| `meetingstone_dispatch` | 成功只回 `ok` / `taskRef`（`childId`、`name`、`provider`、`jobId`）/ `roleId` / `roleName` / `isolation` / `routing`（`roleId` + 自动路由时的 `reason`） | 角色全量、prompt、工作树细节一律不回；需要时查 `meetingstone_list_runs` |
-| `meetingstone_list_runs` | 记录索引：`title` / `status` / `resultStatus` / `summaryPreview` / `resultBytes` 等 | 需要正文用 `meetingstone_get_task` 或 `meetingstone_get_run_artifact` |
-| `meetingstone_list_roles` | `roleId` / `name` / `aliases` / `enabled` / `availability` | `verbose:true` 追加 `description` / `channel` / `model` / `hasPrompt` / `source` |
-| `meetingstone_wait` | 每个任务的 `childId` / `status` / `stopReason` / `resultBytes` / `summary?` / `timedOut` | 超时未完成的任务标 `status:'running'`、`timedOut:true`；未知 `childId` 立即返回 `UNKNOWN_CHILD` |
+| `meetingstone_get_task` | `status` / `stopReason` / `resultBytes` / `jobId` / `recordPath`锛涙湁缁撴瀯鍖?`summary` 鏃跺彧鍥?summary/resultStatus/openIssues/handoff锛坄resultOmitted:true`锛夛紝鍚﹀垯鍥炵粨鏋滈 1KiB + 鏈?512B | `full:true` 杩斿洖瀹屾暣 `result`锛沗output` 涓?`result` 鐩稿悓鏃跺彧鍥炰竴浠斤紙瀛楁鍚嶇粺涓€涓?`result`锛?|
+| `meetingstone_get_run_artifact` | 瀹屾暣缁撴灉鏂囨湰锛坄.meetingstone/runs/<childId>.json` 鐨?`result`锛?| 鐢?`headBytes`/`tailBytes` 鍙栭灏撅紝鎴?`lineFrom`/`lineTo`锛? 璧枫€佸惈绔偣锛夊彇琛岃寖鍥?|
+| `meetingstone_dispatch` | 鎴愬姛鍙洖 `ok` / `taskRef`锛坄childId`銆乣name`銆乣provider`銆乣jobId`锛? `roleId` / `roleName` / `isolation` / `routing`锛坄roleId` + 鑷姩璺敱鏃剁殑 `reason`锛?| 瑙掕壊鍏ㄩ噺銆乸rompt銆佸伐浣滄爲缁嗚妭涓€寰嬩笉鍥烇紱闇€瑕佹椂鏌?`meetingstone_list_runs` |
+| `meetingstone_list_runs` | 璁板綍绱㈠紩锛歚title` / `status` / `resultStatus` / `summaryPreview` / `resultBytes` 绛?| 闇€瑕佹鏂囩敤 `meetingstone_get_task` 鎴?`meetingstone_get_run_artifact` |
+| `meetingstone_list_roles` | `roleId` / `name` / `aliases` / `enabled` / `availability` | `verbose:true` 杩藉姞 `description` / `channel` / `model` / `hasPrompt` / `source` |
+| `meetingstone_wait` | 姣忎釜浠诲姟鐨?`childId` / `status` / `stopReason` / `resultBytes` / `summary?` / `timedOut` | 瓒呮椂鏈畬鎴愮殑浠诲姟鏍?`status:'running'`銆乣timedOut:true`锛涙湭鐭?`childId` 绔嬪嵆杩斿洖 `UNKNOWN_CHILD` |
 
-- `meetingstone_wait` 用于**收口**（一次等一组任务全部到达终态），不要高频调用、不要拿它轮询：默认最多等 300000ms、上限 600000ms；已完成的立即返回，未完成的只等宿主结算通知（不忙等）；同一任务被多次 wait 复用同一监听。只认本进程内存记录，DSH 重启前的任务视为未知。
+- `meetingstone_wait` 鐢ㄤ簬**鏀跺彛**锛堜竴娆＄瓑涓€缁勪换鍔″叏閮ㄥ埌杈剧粓鎬侊級锛屼笉瑕侀珮棰戣皟鐢ㄣ€佷笉瑕佹嬁瀹冭疆璇細榛樿鏈€澶氱瓑 300000ms銆佷笂闄?600000ms锛涘凡瀹屾垚鐨勭珛鍗宠繑鍥烇紝鏈畬鎴愮殑鍙瓑瀹夸富缁撶畻閫氱煡锛堜笉蹇欑瓑锛夛紱鍚屼竴浠诲姟琚娆?wait 澶嶇敤鍚屼竴鐩戝惉銆傚彧璁ゆ湰杩涚▼鍐呭瓨璁板綍锛孌SH 閲嶅惎鍓嶇殑浠诲姟瑙嗕负鏈煡銆?
 
-- `meetingstone_get_task` 的 `recordPath` 指向 `.meetingstone/runs/<childId>.json`；`resultBytes` 是原始结果字节数（不是截断后长度）。
-- 上下文重放上限从 64KiB 收紧到 **16KiB**（头 12KiB + 尾 4KiB）。带 `continuesFrom` 的派单会在落盘记录里写 `continuationBytes`（本次实际注入的重放块字节数）；没有重放则**省略该字段**。
+- `meetingstone_get_task` 鐨?`recordPath` 鎸囧悜 `.meetingstone/runs/<childId>.json`锛沗resultBytes` 鏄師濮嬬粨鏋滃瓧鑺傛暟锛堜笉鏄埅鏂悗闀垮害锛夈€?
+- 涓婁笅鏂囬噸鏀句笂闄愪粠 64KiB 鏀剁揣鍒?**16KiB**锛堝ご 12KiB + 灏?4KiB锛夈€傚甫 `continuesFrom` 鐨勬淳鍗曚細鍦ㄨ惤鐩樿褰曢噷鍐?`continuationBytes`锛堟湰娆″疄闄呮敞鍏ョ殑閲嶆斁鍧楀瓧鑺傛暟锛夛紱娌℃湁閲嶆斁鍒?*鐪佺暐璇ュ瓧娈?*銆?
 
-### 7.1 TaskSpec（结构化任务简报，P0-B）
+### 7.1 TaskSpec锛堢粨鏋勫寲浠诲姟绠€鎶ワ紝P0-B锛?
 
-`meetingstone_dispatch` 仍接受**纯字符串** `role + task`（旧调用完全不受影响）。额外可选：
+`meetingstone_dispatch` 浠嶆帴鍙?*绾瓧绗︿覆** `role + task`锛堟棫璋冪敤瀹屽叏涓嶅彈褰卞搷锛夈€傞澶栧彲閫夛細
 
-| 字段 | 类型 | 说明 |
+| 瀛楁 | 绫诲瀷 | 璇存槑 |
 | --- | --- | --- |
-| `title` | string | 短任务名；**使用任一结构化字段时必填**（Jobs / list_runs 展示） |
-| `objective` | string | 要达成的结果；省略时任务正文即目标 |
-| `scope` | `{ include: string[], exclude: string[] }` | 范围与边界 |
-| `acceptance` | string[] | 验收标准；**声明了 scope 时必填** |
-| `evidence` | string[] | 需要提交的证据 / 文件 / 测试 |
-| `contextRefs` | string[] | 上下文包或文件引用 |
-| `roleHint` | string | 建议角色/能力提示（不改变本次 `role` 路由） |
-| `outputBudget` | `{ summaryTokens?: number, notes?: string }` | 摘要与产物预算；Provider 不支持硬上限时只作为指令 |
-| `contextPack` | 见 §7.2 | 最小上下文 |
+| `title` | string | 鐭换鍔″悕锛?*浣跨敤浠讳竴缁撴瀯鍖栧瓧娈垫椂蹇呭～**锛圝obs / list_runs 灞曠ず锛?|
+| `objective` | string | 瑕佽揪鎴愮殑缁撴灉锛涚渷鐣ユ椂浠诲姟姝ｆ枃鍗崇洰鏍?|
+| `scope` | `{ include: string[], exclude: string[] }` | 鑼冨洿涓庤竟鐣?|
+| `acceptance` | string[] | 楠屾敹鏍囧噯锛?*澹版槑浜?scope 鏃跺繀濉?* |
+| `evidence` | string[] | 闇€瑕佹彁浜ょ殑璇佹嵁 / 鏂囦欢 / 娴嬭瘯 |
+| `contextRefs` | string[] | 涓婁笅鏂囧寘鎴栨枃浠跺紩鐢?|
+| `roleHint` | string | 寤鸿瑙掕壊/鑳藉姏鎻愮ず锛堜笉鏀瑰彉鏈 `role` 璺敱锛?|
+| `outputBudget` | `{ summaryTokens?: number, notes?: string }` | 鎽樿涓庝骇鐗╅绠楋紱Provider 涓嶆敮鎸佺‖涓婇檺鏃跺彧浣滀负鎸囦护 |
+| `contextPack` | 瑙?搂7.2 | 鏈€灏忎笂涓嬫枃 |
 
-校验规则（**只有缺了就无法执行/验收才拒绝**，`TASKSPEC_INVALID`）：
+鏍￠獙瑙勫垯锛?*鍙湁缂轰簡灏辨棤娉曟墽琛?楠屾敹鎵嶆嫆缁?*锛宍TASKSPEC_INVALID`锛夛細
 
-- 结构化模式缺 `title` → 拒绝；
-- 声明了 `scope`（include/exclude 非空）却没有 `acceptance` → 拒绝；
-- 关键字段类型错误（如 `acceptance` 传字符串、`contextPack` 传数组）→ 拒绝；
-- 简单查询只传 `task`，或只带 `title`，一律放行；不强制 `scope`/`evidence`。
+- 缁撴瀯鍖栨ā寮忕己 `title` 鈫?鎷掔粷锛?
+- 澹版槑浜?`scope`锛坕nclude/exclude 闈炵┖锛夊嵈娌℃湁 `acceptance` 鈫?鎷掔粷锛?
+- 鍏抽敭瀛楁绫诲瀷閿欒锛堝 `acceptance` 浼犲瓧绗︿覆銆乣contextPack` 浼犳暟缁勶級鈫?鎷掔粷锛?
+- 绠€鍗曟煡璇㈠彧浼?`task`锛屾垨鍙甫 `title`锛屼竴寰嬫斁琛岋紱涓嶅己鍒?`scope`/`evidence`銆?
 
-### 7.2 ContextPack（最小必要上下文）
+### 7.2 ContextPack锛堟渶灏忓繀瑕佷笂涓嬫枃锛?
 
 ```json
 {
-  "knownFacts": ["已确认的技术结论/版本/配置"],
+  "knownFacts": ["宸茬‘璁ょ殑鎶€鏈粨璁?鐗堟湰/閰嶇疆"],
   "files": ["src/auth/callback.ts", "tests/auth/callback.test.ts"],
-  "priorResults": [{ "summary": "正常路径已通过，取消路径未验证", "artifactRef": ".meetingstone/runs/<childId>.json" }],
-  "doNotRepeat": ["不要重新扫描整个仓库", "不要重复测试正常完成路径"]
+  "priorResults": [{ "summary": "姝ｅ父璺緞宸查€氳繃锛屽彇娑堣矾寰勬湭楠岃瘉", "artifactRef": ".meetingstone/runs/<childId>.json" }],
+  "doNotRepeat": ["涓嶈閲嶆柊鎵弿鏁翠釜浠撳簱", "涓嶈閲嶅娴嬭瘯姝ｅ父瀹屾垚璺緞"]
 }
 ```
 
-- TaskSpec + ContextPack 会渲染成**结构化文本块**，插在角色人设之后、任务正文之前；同时附带「不要重复探索 / 不要复述长文」约束。
-- 不新增任何 AI 调用；不传 `taskSpec`/`contextPack` 时提示词与旧版一致（只多出固定的输出契约，见 §7.3）。
-- 落盘记录里的 `taskSpec` / `contextPack` 是**截断后的摘要**（列表 ≤10 条、单条 ≤200 字符），用于 `list_runs` / `get_task` 展示标题。
+- TaskSpec + ContextPack 浼氭覆鏌撴垚**缁撴瀯鍖栨枃鏈潡**锛屾彃鍦ㄨ鑹蹭汉璁句箣鍚庛€佷换鍔℃鏂囦箣鍓嶏紱鍚屾椂闄勫甫銆屼笉瑕侀噸澶嶆帰绱?/ 涓嶈澶嶈堪闀挎枃銆嶇害鏉熴€?
+- 涓嶆柊澧炰换浣?AI 璋冪敤锛涗笉浼?`taskSpec`/`contextPack` 鏃舵彁绀鸿瘝涓庢棫鐗堜竴鑷达紙鍙鍑哄浐瀹氱殑杈撳嚭濂戠害锛岃 搂7.3锛夈€?
+- 钀界洏璁板綍閲岀殑 `taskSpec` / `contextPack` 鏄?*鎴柇鍚庣殑鎽樿**锛堝垪琛?鈮?0 鏉°€佸崟鏉?鈮?00 瀛楃锛夛紝鐢ㄤ簬 `list_runs` / `get_task` 灞曠ず鏍囬銆?
 
-### 7.3 结构化结果契约（P0-C）
+### 7.3 缁撴瀯鍖栫粨鏋滃绾︼紙P0-C锛?
 
-派单提示词末尾固定包含输出契约，要求子 Agent 在回复最后给出 JSON：
+娲惧崟鎻愮ず璇嶆湯灏惧浐瀹氬寘鍚緭鍑哄绾︼紝瑕佹眰瀛?Agent 鍦ㄥ洖澶嶆渶鍚庣粰鍑?JSON锛?
 
 ```json
 {
   "status": "completed | partial | blocked | failed",
-  "summary": "结论摘要（约 300–500 token）",
-  "evidence": [{ "file": "src/auth/callback.ts", "line": 84, "finding": "缺少租户归属校验" }],
+  "summary": "缁撹鎽樿锛堢害 300鈥?00 token锛?,
+  "evidence": [{ "file": "src/auth/callback.ts", "line": 84, "finding": "缂哄皯绉熸埛褰掑睘鏍￠獙" }],
   "artifacts": [".meetingstone/runs/task-123/review.md"],
   "changedFiles": [],
-  "tests": ["静态检查完成；未运行集成测试"],
-  "openIssues": ["需要确认旧租户兼容逻辑"],
-  "nextAction": "交由沙僧修复后再由悟空复核"
+  "tests": ["闈欐€佹鏌ュ畬鎴愶紱鏈繍琛岄泦鎴愭祴璇?],
+  "openIssues": ["闇€瑕佺‘璁ゆ棫绉熸埛鍏煎閫昏緫"],
+  "nextAction": "浜ょ敱娌欏儳淇鍚庡啀鐢辨偀绌哄鏍?
 }
 ```
 
-解析规则（`src/result-contract.js`）：
+瑙ｆ瀽瑙勫垯锛坄src/result-contract.js`锛夛細
 
-- 支持整段 JSON、```json 代码块、文本中第一个平衡的 `{...}`；
-- 提取不到（纯文本）→ `structuredResult:false`，`summary` = 原文；坏 JSON 同样退回原文；
-- 子 Agent 自报的 `changedFiles` 落到 `reportedChangedFiles`，**不覆盖**记录里由 git 计算的 `changedFiles`（重叠检测依赖后者）；
-- 记录新增：`summary`（≤8KiB，超出按首尾截断，带 `summaryBytes`/`summaryTruncated`）、`resultStatus`、`evidence`、`artifacts`、`resultTests`、`openIssues`、`nextAction`、`handoff`；
-- 完整 `result` 仍然落盘（上限 256KiB），可用 `full:true` 或 `meetingstone_get_run_artifact` 取回。
+- 鏀寔鏁存 JSON銆乣``json 浠ｇ爜鍧椼€佹枃鏈腑绗竴涓钩琛＄殑 `{...}`锛?
+- 鎻愬彇涓嶅埌锛堢函鏂囨湰锛夆啋 `structuredResult:false`锛宍summary` = 鍘熸枃锛涘潖 JSON 鍚屾牱閫€鍥炲師鏂囷紱
+- 瀛?Agent 鑷姤鐨?`changedFiles` 钀藉埌 `reportedChangedFiles`锛?*涓嶈鐩?*璁板綍閲岀敱 git 璁＄畻鐨?`changedFiles`锛堥噸鍙犳娴嬩緷璧栧悗鑰咃級锛?
+- 璁板綍鏂板锛歚summary`锛堚墹8KiB锛岃秴鍑烘寜棣栧熬鎴柇锛屽甫 `summaryBytes`/`summaryTruncated`锛夈€乣resultStatus`銆乣evidence`銆乣artifacts`銆乣resultTests`銆乣openIssues`銆乣nextAction`銆乣handoff`锛?
+- 瀹屾暣 `result` 浠嶇劧钀界洏锛堜笂闄?256KiB锛夛紝鍙敤 `full:true` 鎴?`meetingstone_get_run_artifact` 鍙栧洖銆?
 
-`handoff` 字段（结论/证据/产物/未决/下一步）由解析结果生成，模板见 [handoff.md](handoff.md)。
+`handoff` 瀛楁锛堢粨璁?璇佹嵁/浜х墿/鏈喅/涓嬩竴姝ワ級鐢辫В鏋愮粨鏋滅敓鎴愶紝妯℃澘瑙?[handoff.md](handoff.md)銆?
 
-### 7.4 按需读取完整结果
+### 7.4 鎸夐渶璇诲彇瀹屾暣缁撴灉
 
-`meetingstone_get_run_artifact` 只读项目内 `.meetingstone/runs/<childId>.json`：
+`meetingstone_get_run_artifact` 鍙椤圭洰鍐?`.meetingstone/runs/<childId>.json`锛?
 
-| 参数 | 说明 |
+| 鍙傛暟 | 璇存槑 |
 | --- | --- |
-| `childId` | 必填，`meetingstone_dispatch` 返回的 `taskRef.childId` |
-| `headBytes` / `tailBytes` | 取首尾字节窗口；两者不能与行参数同时使用 |
-| `lineFrom` / `lineTo` | 1 起、含端点；省略 `lineTo` 读到末尾 |
+| `childId` | 蹇呭～锛宍meetingstone_dispatch` 杩斿洖鐨?`taskRef.childId` |
+| `headBytes` / `tailBytes` | 鍙栭灏惧瓧鑺傜獥鍙ｏ紱涓よ€呬笉鑳戒笌琛屽弬鏁板悓鏃朵娇鐢?|
+| `lineFrom` / `lineTo` | 1 璧枫€佸惈绔偣锛涚渷鐣?`lineTo` 璇诲埌鏈熬 |
 
-返回 `content`（文本）、`bytes`（本次返回字节）、`resultBytes`（原始字节）、`truncated`、`range`、`recordPath`。
+杩斿洖 `content`锛堟枃鏈級銆乣bytes`锛堟湰娆¤繑鍥炲瓧鑺傦級銆乣resultBytes`锛堝師濮嬪瓧鑺傦級銆乣truncated`銆乣range`銆乣recordPath`銆?
 
-### 7.5 进行中重复任务去重（P0-D）
+### 7.5 杩涜涓噸澶嶄换鍔″幓閲嶏紙P0-D锛?
 
-`meetingstone_dispatch` 只对**完全相同、且仍在进行中**（`queued` / `running`）的任务去重：
-命中时返回**既有**任务的 `taskRef`（原 `childId` / `jobId`）与当前状态，回执在 §7 成功回执
-基础上附 `deduplicated: true`、`status`、可选 `deduplicatedFrom`；**不**创建第二个子任务、不占
-新额度、不建新工作树。依据 `docs/reference/efficiency-v1.0.md` §3.5 / §5 表 8 / §8。
+`meetingstone_dispatch` 鍙**瀹屽叏鐩稿悓銆佷笖浠嶅湪杩涜涓?*锛坄queued` / `running`锛夌殑浠诲姟鍘婚噸锛?
+鍛戒腑鏃惰繑鍥?*鏃㈡湁**浠诲姟鐨?`taskRef`锛堝師 `childId` / `jobId`锛変笌褰撳墠鐘舵€侊紝鍥炴墽鍦?搂7 鎴愬姛鍥炴墽
+鍩虹涓婇檮 `deduplicated: true`銆乣status`銆佸彲閫?`deduplicatedFrom`锛?*涓?*鍒涘缓绗簩涓瓙浠诲姟銆佷笉鍗?
+鏂伴搴︺€佷笉寤烘柊宸ヤ綔鏍戙€備緷鎹?`docs/reference/efficiency-v1.0.md` 搂3.5 / 搂5 琛?8 / 搂8銆?
 
-#### 指纹组成（必须确认「完全相同」，绝不仅 hash Prompt）
+#### 鎸囩汗缁勬垚锛堝繀椤荤‘璁ゃ€屽畬鍏ㄧ浉鍚屻€嶏紝缁濅笉浠?hash Prompt锛?
 
-判定用 `src/dispatch/dispatcher.js` 的 `fingerprintParts` / `computeFingerprint`：对规范化对象做
-稳定序列化（键排序）后取 sha256。参与判定的信息：
+鍒ゅ畾鐢?`src/dispatch/dispatcher.js` 鐨?`fingerprintParts` / `computeFingerprint`锛氬瑙勮寖鍖栧璞″仛
+绋冲畾搴忓垪鍖栵紙閿帓搴忥級鍚庡彇 sha256銆傚弬涓庡垽瀹氱殑淇℃伅锛?
 
-| 组成 | 字段 | 变化后 |
+| 缁勬垚 | 瀛楁 | 鍙樺寲鍚?|
 | --- | --- | --- |
-| 项目 / 工作区身份 | realpath 归一化后的 `projectKey` | 不同项目不合并 |
-| 角色 ID 与 provider / CLI | `roleId`、`channel.kind/provider/channelId/model/reasoning`、`prompt/description/timeoutMs` | 执行能力不同不合并 |
-| 规范化任务内容 | `task.trim()`；有 TaskSpec 时用结构化字段（title/objective/scope/acceptance/evidence/contextRefs/outputBudget/permissionPreset），含 ContextPack | 目标或范围不同不合并 |
-| 版本指纹 | `git rev-parse HEAD`（worktree 隔离下等同 `baseSha`） | 代码变化后允许重新执行 |
-| 状态 | 固定状态桶 `in-progress`；索引只存进行中条目 | 终态即移出索引 |
-| 关键参数 | `isolation`、权限档位、输出预算、`continuesFrom` 重放 | 执行条件不同不合并 |
+| 椤圭洰 / 宸ヤ綔鍖鸿韩浠?| realpath 褰掍竴鍖栧悗鐨?`projectKey` | 涓嶅悓椤圭洰涓嶅悎骞?|
+| 瑙掕壊 ID 涓?provider / CLI | `roleId`銆乣channel.kind/provider/channelId/model/reasoning`銆乣prompt/description/timeoutMs` | 鎵ц鑳藉姏涓嶅悓涓嶅悎骞?|
+| 瑙勮寖鍖栦换鍔″唴瀹?| `task.trim()`锛涙湁 TaskSpec 鏃剁敤缁撴瀯鍖栧瓧娈碉紙title/objective/scope/acceptance/evidence/contextRefs/outputBudget/permissionPreset锛夛紝鍚?ContextPack | 鐩爣鎴栬寖鍥翠笉鍚屼笉鍚堝苟 |
+| 鐗堟湰鎸囩汗 | `git rev-parse HEAD`锛坵orktree 闅旂涓嬬瓑鍚?`baseSha`锛?| 浠ｇ爜鍙樺寲鍚庡厑璁搁噸鏂版墽琛?|
+| 鐘舵€?| 鍥哄畾鐘舵€佹《 `in-progress`锛涚储寮曞彧瀛樿繘琛屼腑鏉＄洰 | 缁堟€佸嵆绉诲嚭绱㈠紩 |
+| 鍏抽敭鍙傛暟 | `isolation`銆佹潈闄愭。浣嶃€佽緭鍑洪绠椼€乣continuesFrom` 閲嶆斁 | 鎵ц鏉′欢涓嶅悓涓嶅悎骞?|
 
-命中时的回执示例：
+鍛戒腑鏃剁殑鍥炴墽绀轰緥锛?
 
 ```json
 {
   "ok": true,
   "taskRef": { "childId": "child-1", "jobId": "job-1", "provider": "acp" },
   "roleId": "role-sashi",
-  "roleName": "沙僧",
+  "roleName": "娌欏儳",
   "isolation": "worktree",
   "deduplicated": true,
   "status": "running",
@@ -435,47 +435,48 @@ routingRules:
 }
 ```
 
-#### 误判边界（宁可重复也不误合）
+#### 璇垽杈圭晫锛堝畞鍙噸澶嶄篃涓嶈鍚堬級
 
-- **只对进行中任务去重**：任务终态（`onFinish` / `cancel` 确认停止 / 启动失败）即从内存索引
-  移除；**不复用已完成 / 失败 / 取消任务的旧结果**。完成后再次派相同任务会正常创建新任务。
-- **版本指纹取不到标 `unknown` 且不参与判定**：非 git 项目、无项目根、`git` 不在 PATH 或超时
-  时，该请求既不进索引也不命中索引，一律正常创建（不因无法确认版本而误合）。
-- **信息不足以证明完全相同**：任何参与字段缺失或无法确认时按「不相同」处理，创建新任务。
-- **索引仅内存**：`Map`，插件 / DSH 重启即失效；不建库、不落盘、不跨进程共享。
-- **并发安全**：相同请求同时到达时**先占位再启动**——占额度与写去重索引在同一同步块内完成，
-  第二个请求命中占位后等待首个任务拿到 `taskRef`（受控 pending promise），只创建一个任务。
-- **权限 / 模型 / 隔离档位差异都参与指纹**：本项目不提供逐任务权限档位，但 `isolation` 与
-  `channel` 配置不同一律不合并；去重不会擅自提升权限、切换模型或改隔离方式。
-- **不做**：不复用过期结果、不建任务队列 / 数据库 / 全量任务历史、不对「疑似相同」做模糊
-  合并（不做语义相似度、不调用额外 AI 判定）。
+- **鍙杩涜涓换鍔″幓閲?*锛氫换鍔＄粓鎬侊紙`onFinish` / `cancel` 纭鍋滄 / 鍚姩澶辫触锛夊嵆浠庡唴瀛樼储寮?
+  绉婚櫎锛?*涓嶅鐢ㄥ凡瀹屾垚 / 澶辫触 / 鍙栨秷浠诲姟鐨勬棫缁撴灉**銆傚畬鎴愬悗鍐嶆娲剧浉鍚屼换鍔′細姝ｅ父鍒涘缓鏂颁换鍔°€?
+- **鐗堟湰鎸囩汗鍙栦笉鍒版爣 `unknown` 涓斾笉鍙備笌鍒ゅ畾**锛氶潪 git 椤圭洰銆佹棤椤圭洰鏍广€乣git` 涓嶅湪 PATH 鎴栬秴鏃?
+  鏃讹紝璇ヨ姹傛棦涓嶈繘绱㈠紩涔熶笉鍛戒腑绱㈠紩锛屼竴寰嬫甯稿垱寤猴紙涓嶅洜鏃犳硶纭鐗堟湰鑰岃鍚堬級銆?
+- **淇℃伅涓嶈冻浠ヨ瘉鏄庡畬鍏ㄧ浉鍚?*锛氫换浣曞弬涓庡瓧娈电己澶辨垨鏃犳硶纭鏃舵寜銆屼笉鐩稿悓銆嶅鐞嗭紝鍒涘缓鏂颁换鍔°€?
+- **绱㈠紩浠呭唴瀛?*锛歚Map`锛屾彃浠?/ DSH 閲嶅惎鍗冲け鏁堬紱涓嶅缓搴撱€佷笉钀界洏銆佷笉璺ㄨ繘绋嬪叡浜€?
+- **骞跺彂瀹夊叏**锛氱浉鍚岃姹傚悓鏃跺埌杈炬椂**鍏堝崰浣嶅啀鍚姩**鈥斺€斿崰棰濆害涓庡啓鍘婚噸绱㈠紩鍦ㄥ悓涓€鍚屾鍧楀唴瀹屾垚锛?
+  绗簩涓姹傚懡涓崰浣嶅悗绛夊緟棣栦釜浠诲姟鎷垮埌 `taskRef`锛堝彈鎺?pending promise锛夛紝鍙垱寤轰竴涓换鍔°€?
+- **鏉冮檺 / 妯″瀷 / 闅旂妗ｄ綅宸紓閮藉弬涓庢寚绾?*锛氭湰椤圭洰涓嶆彁渚涢€愪换鍔℃潈闄愭。浣嶏紝浣?`isolation` 涓?
+  `channel` 閰嶇疆涓嶅悓涓€寰嬩笉鍚堝苟锛涘幓閲嶄笉浼氭搮鑷彁鍗囨潈闄愩€佸垏鎹㈡ā鍨嬫垨鏀归殧绂绘柟寮忋€?
+- **涓嶅仛**锛氫笉澶嶇敤杩囨湡缁撴灉銆佷笉寤轰换鍔￠槦鍒?/ 鏁版嵁搴?/ 鍏ㄩ噺浠诲姟鍘嗗彶銆佷笉瀵广€岀枒浼肩浉鍚屻€嶅仛妯＄硦
+  鍚堝苟锛堜笉鍋氳涔夌浉浼煎害銆佷笉璋冪敤棰濆 AI 鍒ゅ畾锛夈€?
 
-## 8. 宿主原生 Jobs（任务列表）
+## 8. 瀹夸富鍘熺敓 Jobs锛堜换鍔″垪琛級
 
-本插件不自造任务列表 UI。派单成功后，如果宿主提供 `ctx.jobs`，适配器会注册一个原生 Job：
+鏈彃浠朵笉鑷€犱换鍔″垪琛?UI銆傛淳鍗曟垚鍔熷悗锛屽鏋滃涓绘彁渚?`ctx.jobs`锛岄€傞厤鍣ㄤ細娉ㄥ唽涓€涓師鐢?Job锛?
 
 - `kind`: `meetingstone-dispatch`
-- `label`: `角色简称 · 简短目标（≤14 字）`，例如 `悟空 · 审核登录模块`。目标优先取 `taskSpec.title`，
-  其次任务首个有效行；剥离 Markdown 符号与 `meetingstone:` 内部前缀，空任务回退 `未命名任务`。
-  同一个名字也通过官方 `startActivation({ label })` 写进 Subagents 目录（见 `docs/gui-0.2.0.md` §6）。
-- `owner`: 本次派单的 parent Agent 对应 SessionId（宿主用 `agent.id === agent.session.id` 校验）
-- `jobId`: 同时写入 `taskRef` 与 `.meetingstone/runs/<childId>.json`
-- `progress`（运行中）：只写 `已启动`，**不写工作树绝对路径**
-- `detail`（终态）：`hooks.done` 的 `detail`，截到 ≤80 字，作为面板第二行；完整输出仍在
-  `.meetingstone/runs/<childId>.json` 与 Job output ring 里。工作树/分支路径只留在 run 记录，
-  不塞进 Jobs 行。
+- `label`: `瑙掕壊绠€绉?路 绠€鐭洰鏍囷紙鈮?4 瀛楋級`锛屼緥濡?`鎮熺┖ 路 瀹℃牳鐧诲綍妯″潡`銆傜洰鏍囦紭鍏堝彇 `taskSpec.title`锛?
+  鍏舵浠诲姟棣栦釜鏈夋晥琛岋紱鍓ョ Markdown 绗﹀彿涓?`meetingstone:` 鍐呴儴鍓嶇紑锛岀┖浠诲姟鍥為€€ `鏈懡鍚嶄换鍔銆?
+  鍚屼竴涓悕瀛椾篃閫氳繃瀹樻柟 `startActivation({ label })` 鍐欒繘 Subagents 鐩綍锛堣 `docs/gui-0.2.0.md` 搂6锛夈€?
+- `owner`: 鏈娲惧崟鐨?parent Agent 瀵瑰簲 SessionId锛堝涓荤敤 `agent.id === agent.session.id` 鏍￠獙锛?
+- `jobId`: 鍚屾椂鍐欏叆 `taskRef` 涓?`.meetingstone/runs/<childId>.json`
+- `progress`锛堣繍琛屼腑锛夛細鍙啓 `宸插惎鍔╜锛?*涓嶅啓宸ヤ綔鏍戠粷瀵硅矾寰?*
+- `detail`锛堢粓鎬侊級锛歚hooks.done` 鐨?`detail`锛屾埅鍒?鈮?0 瀛楋紝浣滀负闈㈡澘绗簩琛岋紱瀹屾暣杈撳嚭浠嶅湪
+  `.meetingstone/runs/<childId>.json` 涓?Job output ring 閲屻€傚伐浣滄爲/鍒嗘敮璺緞鍙暀鍦?run 璁板綍锛?
+  涓嶅杩?Jobs 琛屻€?
 
-行为边界：
+琛屼负杈圭晫锛?
 
-- **Jobs 不可用时派单照常**：没有 `ctx.jobs`、或 `jobs.start` 抛错（例如当前 composition 没加载
-  `@deepseek-ai/dsh-tool-jobs`，没有 controller 服务该 owner）时，只记一条 warning，不建 Job、不伪造 `jobId`。
-- 任务终态（完成/失败/取消/插件卸载）会 resolve Job 的 `done`；`meetingstone_cancel_task` 优先走
-  `ctx.jobs.kill()` → Job 的 `cancel`，再回落到适配器原路径，保证面板与工具停止的是同一个任务。
-- 插件本身**不拥有** Jobs 面板；面板由宿主 `@deepseek-ai/dsh-tool-jobs` 提供。
+- **Jobs 涓嶅彲鐢ㄦ椂娲惧崟鐓у父**锛氭病鏈?`ctx.jobs`銆佹垨 `jobs.start` 鎶涢敊锛堜緥濡傚綋鍓?composition 娌″姞杞?
+  `@deepseek-ai/dsh-tool-jobs`锛屾病鏈?controller 鏈嶅姟璇?owner锛夋椂锛屽彧璁颁竴鏉?warning锛屼笉寤?Job銆佷笉浼€?`jobId`銆?
+- 浠诲姟缁堟€侊紙瀹屾垚/澶辫触/鍙栨秷/鎻掍欢鍗歌浇锛変細 resolve Job 鐨?`done`锛沗meetingstone_cancel_task` 浼樺厛璧?
+  `ctx.jobs.kill()` 鈫?Job 鐨?`cancel`锛屽啀鍥炶惤鍒伴€傞厤鍣ㄥ師璺緞锛屼繚璇侀潰鏉夸笌宸ュ叿鍋滄鐨勬槸鍚屼竴涓换鍔°€?
+- 鎻掍欢鏈韩**涓嶆嫢鏈?* Jobs 闈㈡澘锛涢潰鏉跨敱瀹夸富 `@deepseek-ai/dsh-tool-jobs` 鎻愪緵銆?
 
-## 9. 示例
+## 9. 绀轰緥
 
-- 全局五角色：[examples/meetingstone.desktop.yml](../examples/meetingstone.desktop.yml)
-- 项目覆盖：[examples/project.meetingstone.json](../examples/project.meetingstone.json)
-- 仓库自检角色：[examples/selftest.roles.json](../examples/selftest.roles.json)（`role-selftest*`，in-process / codex / acp 通道）
-- 本仓库项目配置：根目录 `.meetingstone.json`（五角色 + 通道引用）
+- 鍏ㄥ眬浜旇鑹诧細[examples/meetingstone.desktop.yml](../examples/meetingstone.desktop.yml)
+- 椤圭洰瑕嗙洊锛歔examples/project.meetingstone.json](../examples/project.meetingstone.json)
+- 浠撳簱鑷瑙掕壊锛歔examples/selftest.roles.json](../examples/selftest.roles.json)锛坄role-selftest*`锛宨n-process / codex / acp 閫氶亾锛?
+- 鏈粨搴撻」鐩厤缃細鏍圭洰褰?`.meetingstone.json`锛堜簲瑙掕壊 + 閫氶亾寮曠敤锛?
+
