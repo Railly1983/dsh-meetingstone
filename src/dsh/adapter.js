@@ -48,10 +48,19 @@ import { composePromptWithContinuation } from '../context-replay.js'
  * 6. `ContentBlock` 形如 `{ type:'text', text }`：`docs/user/develop/basic/tool.md`
  *    （02-plugin-spec.md §3.1 摘录的 `output.render` 返回 `[{ type:'text', text:value }]`）。
  *
- * 7. `ctx.jobs.start(spec: JobSpec): JobId`（**本版未调用**，仅登记）：
- *    `docs/subsystems/jobs.md` §「`ctx.jobs` — `JobRegistry`」cordis-surface
+ * 7. `ctx.jobs.start(spec: JobSpec): JobId` —— **本版已接入**（2026-11-11）。
+ *    出处：`docs/subsystems/jobs.md` §「`ctx.jobs` — `JobRegistry`」cordis-surface
  *    「abstract start(spec: JobSpec): JobId」；`JobSpec` 需 `kind` / `label` /
- *    `run(job: JobHandle): JobHooks`，且 `owner?: SessionId`。见下方 TODO。
+ *    `run(job: JobHandle): JobHooks`。本机 `@deepseek-ai/dsh-jobs-local` 实现核对：
+ *    - `owner` 是 **SessionId**（`resolveOwner(session)` 用 `agents.get(session)` 找活 Agent），
+ *      不是 Agent 对象本身；这里传 `parent.id`（宿主保证 `agent.id === agent.session.id`）。
+ *    - `run(handle)` 必须**同步**返回 `{ cancel, done }`；`handle` 提供
+ *      `append(text)` / `updateProgress(line)`。
+ *    - 加载 `@deepseek-ai/dsh-tool-jobs` 才会挂 controller；没有它时 `start()` 抛
+ *      「no job controller serves this agent」，本适配器只告警、不建 Job，派单照常。
+ *    取消：`ctx.jobs.kill(jobId, caller)` 会调用 `hooks.cancel`；这里让 hooks.cancel
+ *    复用适配器内部的 `cancelActivation`，避免 cancel 工具 → Job kill → 适配器 cancel
+ *    的递归。
  *
  * ── 明确未解决 / 待运行验证（不许假装已解决） ───────────────────────────────
  * **本项目不提供只读通道**（2026-11-11 用户决策）：官方 `SubagentActivationSpec` /
@@ -64,10 +73,6 @@ import { composePromptWithContinuation } from '../context-replay.js'
  *   `createDshAdapter(ctx, { getParent })` 注入；未注入时抛错失败关闭，不编造 Agent。
  *   `docs/cookbook/adding-a-tool.md` 提到 `exec.agent`，但「它能直接当 `parent`」**未验证**，
  *   需由工具调用方（src/index.js，并行工作面）在真实会话里确认后注入。
- * TODO(P2-jobs): 若将来改走后台 Job 路线，用上面的 `ctx.jobs.start(spec)`，把返回的
- *   `JobId` 放进 taskRef；取消信号用该 Job 的 task-owned signal + `job_kill` / owner
- *   disposal（`docs/cookbook/adding-a-tool.md` §「Long-running work」），**不是** `exec.signal`。
- *   该路径的 `JobHooks` 形状与 `run()` 同步 starter 尚未验证，本版不调用。
  * TODO(P2-runtime): `getProvider` / `startActivation` 的签名来自官方文档，但本项目
  *   `docs/audit/10-provider-install.md` §7.3 / §12 明确「真实启动后返回非空」**未验证**
  *   （阶段 0 只做了安装与 --dump-config）。需在阶段 2 的真机联调里补一次运行实测。
@@ -155,6 +160,7 @@ export function providerNameFor(role) {
  * @property {string} name      `SubagentActivation.name`（模型可见名）
  * @property {number} startedAt 本适配器记录的启动时间（Date.now()）
  * @property {string} [operationId] 隔离工作树的 operationId（仅隔离任务有）
+ * @property {string} [jobId] 宿主原生 Job id（`ctx.jobs` 可用且创建成功时）
  */
 
 /** @param {unknown} err */
@@ -283,6 +289,12 @@ function buildRunBase({ input, role, provider, childId, startedAt }) {
     status: 'running',
     createdAt: startedAt,
     startedAt,
+    // 原生 Job id：创建 Job 后由 start() 回填（Job 创建失败/服务缺失时为 null）
+    jobId: typeof input?.jobId === 'string' && input.jobId ? input.jobId : null,
+    // 上下文重放实际注入的字节数：只有带了 continuation 才写（"有就用，无则不写"）
+    ...(input?.continuation && Number.isInteger(input.continuation.bytes)
+      ? { continuationBytes: input.continuation.bytes }
+      : {}),
     // 并行隔离元数据：记录与 childId 的映射，便于审计"这个 childId 用了哪棵树"
     operationId:
       typeof input?.operationId === 'string' && input.operationId
@@ -356,6 +368,121 @@ function safeService(ctx, name) {
 }
 
 /**
+ * 读取**可选**宿主服务（未写进 `inject` 的依赖）。
+ *
+ * Cordis 的官方可选依赖方式是 `ctx.get(name)`（见 docs/audit/02-plugin-spec.md
+ * §「可选依赖不写 inject，改用 ctx.get」）；没有 `ctx.get` 的假 ctx
+ * 退回属性访问，并同样容错。拿不到返回 null —— 调用方不得因此失败。
+ *
+ * @param {any} ctx
+ * @param {string} name
+ */
+function optionalService(ctx, name) {
+  try {
+    if (ctx && typeof ctx.get === 'function') return ctx.get(name) ?? null
+    return ctx ? ctx[name] ?? null : null
+  } catch {
+    return null
+  }
+}
+
+/** 原生 Job 的任务摘要上限（字符数，不是字节）。 */
+const JOB_TASK_SUMMARY_MAX = 40
+
+/**
+ * 压成一行并截到 40 字（用码点切，避免把 emoji/汉字切坏）。
+ * 超长时保留 39 字 + 省略号，总长仍 ≤ 40。
+ * @param {unknown} task
+ */
+function summarizeJobTask(task) {
+  const text = String(task ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!text) return '未命名任务'
+  const chars = Array.from(text)
+  if (chars.length <= JOB_TASK_SUMMARY_MAX) return text
+  return `${chars.slice(0, JOB_TASK_SUMMARY_MAX - 1).join('')}…`
+}
+
+/**
+ * Job 面板里的一行标签：`角色名 · 通道 · 任务摘要（≤40 字）`。
+ * 通道用实际执行的 provider 名（与任务真正跑在哪个通道一致）。
+ *
+ * @param {any} role
+ * @param {string} provider
+ * @param {unknown} task
+ */
+function jobLabelFor(role, provider, task) {
+  const roleName =
+    typeof role?.name === 'string' && role.name.trim() ? role.name.trim() : '未知角色'
+  const channel = provider || role?.channel?.kind || 'unknown'
+  return `${roleName} · ${channel} · ${summarizeJobTask(task)}`
+}
+
+/**
+ * Job 的 owner 是宿主 SessionId，不是 Agent 对象。
+ * 宿主保证 `agent.id === agent.session.id`；两个来源都试，拿不到就返回 null
+ * （宁可不建 Job，也不传一个会让 `agents.get()` 查不到的假 id）。
+ *
+ * @param {any} parent
+ * @returns {string | null}
+ */
+function jobOwnerId(parent) {
+  const id = parent?.id ?? parent?.session?.id
+  return typeof id === 'string' && id.trim() ? id.trim() : null
+}
+
+/**
+ * Job 的 detail 是给面板看的一行摘要，不是完整结果。
+ * @param {unknown} value
+ * @param {number} [max]
+ */
+function truncateDetail(value, max = 200) {
+  const text = String(value ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!text) return ''
+  const chars = Array.from(text)
+  return chars.length <= max ? text : `${chars.slice(0, max - 1).join('')}…`
+}
+
+/**
+ * 适配器终态 → Job done 状态。Job 只接受 completed/failed/cancelled 三态：
+ * - 完成：completed（stopReason 非 completed 时如实写进 detail，例如 refusal）
+ * - 失败：failed（detail 用诊断/错误码）
+ * - 取消/插件卸载：cancelled
+ *
+ * @param {any} settled
+ * @returns {{ status: 'completed' | 'failed' | 'cancelled', detail?: string }}
+ */
+function jobOutcomeFor(settled) {
+  const status = String(settled?.status ?? '')
+  if (status === 'failed') {
+    const detail =
+      truncateDetail(settled?.diagnostic) ||
+      truncateDetail(settled?.error?.code) ||
+      'failed'
+    return { status: 'failed', detail }
+  }
+  if (status === 'cancelled' || status === 'interrupted') {
+    const base = truncateDetail(settled?.stopReason) || 'cancelled'
+    // dispose 未确认时进程可能仍在跑：不要用干净的 cancelled 掩盖这一点。
+    const detail =
+      settled?.stopConfirmed === false ? `${base} (stop unconfirmed)` : base
+    return { status: 'cancelled', detail }
+  }
+  const stopReason =
+    typeof settled?.stopReason === 'string' && settled.stopReason
+      ? settled.stopReason
+      : 'completed'
+  if (stopReason !== 'completed') {
+    return { status: 'completed', detail: truncateDetail(stopReason) }
+  }
+  const output = truncateDetail(settled?.output)
+  return { status: 'completed', ...(output ? { detail: output } : {}) }
+}
+
+/**
  * 创建 DSH 适配器。
  *
  * @param {object} ctx 宿主 Context（需 `ctx.subagents`；可选 `ctx.effect` / `ctx.logger`）
@@ -364,6 +491,9 @@ function safeService(ctx, name) {
  *   返回 `SubagentActivationSpec.parent` 所需的 Agent；仅在拿不到 `context.agent` 时兜底。
  * @param {Array<{ channelId: string, kind?: string, provider?: string, model?: string, reasoning?: string }>} [options.channels]
  *   通道实例表（来自插件 Config 的 `channels`）。模型/强度只能由它承载（DD7 方案 B）。
+ * @param {object} [options.jobs]
+ *   可选的原生 Jobs 服务覆盖（`{ start, kill }`）；未提供时运行时读取 `ctx.jobs`。
+ *   两条路径都拿不到时只是不建 Job，派单不受影响。
  * @param {() => number} [options.now]
  * @returns {{ canStart: (role: object) => { ok: boolean, reason?: string },
  *            start: (input: object) => Promise<{ taskRef: MeetingstoneTaskRef }>,
@@ -440,6 +570,144 @@ export function createDshAdapter(ctx, options = {}) {
       const oldest = finished.keys().next().value
       if (oldest === undefined) break
       finished.delete(oldest)
+    }
+  }
+
+  // ─── 宿主原生 Jobs（可选） ──────────────────────────────────────────────────
+  // 边界：没有 `ctx.jobs`（或 `start` 抛错）时只记 warning，**派单照常**；
+  // 绝不伪造 jobId，也绝不因为建 Job 失败回滚已启动的 activation。
+  /** @type {Map<string, { resolve: (outcome: any) => void }>} */
+  const jobDeferreds = new Map()
+  /** @type {Map<string, { updateProgress?: (line: string) => void }>} */
+  const jobHandles = new Map()
+
+  function warn(line) {
+    if (typeof ctx?.logger?.warn === 'function') {
+      try {
+        ctx.logger.warn(line)
+      } catch {
+        /* 日志失败不影响任务 */
+      }
+    }
+  }
+
+  /** 取原生 jobs 服务；只认有 `start` 的实现，拿不到返回 null。 */
+  function jobsService() {
+    const injected = options.jobs
+    if (injected && typeof injected.start === 'function') return injected
+    const jobs = optionalService(ctx, 'jobs')
+    return jobs && typeof jobs.start === 'function' ? jobs : null
+  }
+
+  /**
+   * 更新 Job 的一行进度（失败不影响任务）。
+   * @param {string} childId
+   * @param {string} line
+   */
+  function updateJobProgress(childId, line) {
+    const handle = jobHandles.get(childId)
+    if (!handle || typeof handle.updateProgress !== 'function') return
+    try {
+      handle.updateProgress(line)
+    } catch {
+      /* 进度只是展示，不能影响任务 */
+    }
+  }
+
+  /**
+   * 用适配器的真实终态结算 Job：先更新进度，再 resolve `done`，之后清理句柄。
+   * 重复调用无副作用（deferred 只取一次）。
+   *
+   * @param {string} childId
+   * @param {any} settled 适配器终态记录
+   */
+  function settleJob(childId, settled) {
+    const deferred = jobDeferreds.get(childId)
+    if (!deferred) return
+    const outcome = jobOutcomeFor(settled)
+    updateJobProgress(
+      childId,
+      outcome.status === 'completed'
+        ? `已完成${outcome.detail ? ` · ${truncateDetail(outcome.detail, 80)}` : ''}`
+        : outcome.status === 'failed'
+          ? `失败 · ${truncateDetail(outcome.detail, 80)}`
+          : '已取消',
+    )
+    jobDeferreds.delete(childId)
+    jobHandles.delete(childId)
+    try {
+      deferred.resolve(outcome)
+    } catch {
+      /* resolve 不应失败 */
+    }
+  }
+
+  /**
+   * 派单启动成功后创建原生 Job。失败只告警，返回 null。
+   *
+   * `run(handle)` 必须同步返回 hooks；`done` 由 `settleJob()` 在 activation 终态时
+   * resolve，`cancel` 复用适配器内部的 `cancelActivation()`（不能回调 `cancel()`，
+   * 否则 Job kill → hooks.cancel → Job kill 会递归）。
+   *
+   * @param {object} args
+   * @param {string} args.childId
+   * @param {any} args.role
+   * @param {string} args.provider
+   * @param {unknown} args.task
+   * @param {any} args.parent
+   * @param {string} args.where 启动位置（工作树路径或主工作区）
+   * @param {() => Promise<any>} args.cancel
+   * @returns {string | null}
+   */
+  function createDispatchJob({ childId, role, provider, task, parent, where, cancel }) {
+    const jobs = jobsService()
+    if (!jobs) return null
+    const owner = jobOwnerId(parent)
+    if (!owner) {
+      warn('[meetingstone] jobs: 无法从 parent 取得 SessionId，跳过创建原生 Job（派单继续）')
+      return null
+    }
+    /** @type {(outcome: any) => void} */
+    let resolveDone = () => {}
+    const done = new Promise((resolve) => {
+      resolveDone = resolve
+    })
+    jobDeferreds.set(childId, { resolve: resolveDone })
+    try {
+      const started = jobs.start({
+        kind: 'meetingstone-dispatch',
+        label: jobLabelFor(role, provider, task),
+        owner,
+        run(/** @type {any} */ jobHandle) {
+          if (jobHandle && typeof jobHandle === 'object') {
+            jobHandles.set(childId, jobHandle)
+            try {
+              jobHandle.updateProgress?.(`已启动 · ${where}`)
+            } catch {
+              /* 进度只是展示 */
+            }
+          }
+          return {
+            done,
+            cancel: () => cancel(),
+          }
+        },
+      })
+      // 本机 dsh-jobs-local 的 `start()` 返回 JobId 字符串；
+      // 任务说明里的契约写成 `{ id, append, updateProgress }`。两种形状都接受，
+      // 保证换实现/不同版宿主时不会因为形状差异静默丢掉 jobId。
+      const jobId = typeof started === 'string' ? started : started?.id
+      if (typeof jobId !== 'string' || !jobId) {
+        throw new Error('jobs.start 没有返回有效 job id')
+      }
+      return jobId
+    } catch (err) {
+      jobDeferreds.delete(childId)
+      jobHandles.delete(childId)
+      warn(
+        `[meetingstone] jobs: 创建原生 Job 失败，派单继续（无 Job）：${errorMessage(err)}`,
+      )
+      return null
     }
   }
 
@@ -790,16 +1058,7 @@ export function createDshAdapter(ctx, options = {}) {
     }
 
     const childId = String(activation.childId)
-    /** @type {MeetingstoneTaskRef} */
-    const taskRef = {
-      kind: 'subagent-activation',
-      provider,
-      childId,
-      name: typeof activation.name === 'string' ? activation.name : childId,
-      startedAt: now(),
-      // operationId → childId 的即时映射；落盘记录里也有同样一对字段
-      ...(operationId ? { operationId } : {}),
-    }
+    const startedAt = now()
 
     // 5. 取消信号：我们自己的 AbortController（spec.signal）+ activation.dispose()。
     //    timeoutMs 只用来给这个 controller 装一个定时器，是我们自己的策略，不是宿主 API。
@@ -808,8 +1067,49 @@ export function createDshAdapter(ctx, options = {}) {
       timer = setTimeout(() => controller.abort(new Error('meetingstone: timeout')), timeoutMs)
     }
     /** 落盘用的基础信息（不含终态），cancel 也需要它 */
-    const runBase = buildRunBase({ input, role, provider, childId, startedAt: taskRef.startedAt })
-    handles.set(childId, { activation, controller, timer, onFinish: input?.onFinish, runBase })
+    const runBase = buildRunBase({ input, role, provider, childId, startedAt })
+    // 先登记句柄，再建 Job：hooks.cancel 要能按 childId 找到同一个 activation。
+    handles.set(childId, {
+      activation,
+      controller,
+      timer,
+      onFinish: input?.onFinish,
+      runBase,
+      jobId: null,
+      ownerId: jobOwnerId(parent),
+    })
+
+    // 5.1 原生 Jobs：失败只告警，绝不回滚已启动的 activation。
+    const jobWhere =
+      input?.isolation === 'worktree' && typeof input?.worktree?.path === 'string'
+        ? `工作树 ${input.worktree.path}`
+        : '主工作区'
+    const jobId = createDispatchJob({
+      childId,
+      role,
+      provider,
+      task,
+      parent,
+      where: jobWhere,
+      cancel: () => cancelActivation({ childId }),
+    })
+    if (jobId) {
+      const handle = handles.get(childId)
+      if (handle) handle.jobId = jobId
+      runBase.jobId = jobId
+    }
+
+    /** @type {MeetingstoneTaskRef} */
+    const taskRef = {
+      kind: 'subagent-activation',
+      provider,
+      childId,
+      name: typeof activation.name === 'string' ? activation.name : childId,
+      startedAt,
+      // operationId → childId 的即时映射；落盘记录里也有同样一对字段
+      ...(operationId ? { operationId } : {}),
+      ...(jobId ? { jobId } : {}),
+    }
 
     // 先记 running（结果落盘），再挂终态钩子
     emitRunStart(runBase)
@@ -862,6 +1162,7 @@ export function createDshAdapter(ctx, options = {}) {
           stopConfirmed: true,
           output: settledOutput,
           ...(settledDiagnostic !== undefined ? { diagnostic: settledDiagnostic } : {}),
+          ...(current.jobId ? { jobId: current.jobId } : {}),
           at: now(),
         }
         rememberFinished(childId, settled)
@@ -872,6 +1173,7 @@ export function createDshAdapter(ctx, options = {}) {
           result: settled.output,
           finishedAt: settled.at,
         })
+        settleJob(childId, settled)
         cleanup(childId)
       },
       (err) => {
@@ -892,6 +1194,7 @@ export function createDshAdapter(ctx, options = {}) {
           stopConfirmed: true,
           output: '',
           diagnostic: errorMessage(err),
+          ...(current.jobId ? { jobId: current.jobId } : {}),
           at: now(),
         }
         rememberFinished(childId, settled)
@@ -902,6 +1205,7 @@ export function createDshAdapter(ctx, options = {}) {
           error: { code: 'ADAPTER_ERROR', message: errorMessage(err) },
           finishedAt: settled.at,
         })
+        settleJob(childId, settled)
         cleanup(childId)
       },
     )
@@ -948,7 +1252,14 @@ export function createDshAdapter(ctx, options = {}) {
     if (done) return { childId: String(childId), ...done }
 
     const handle = handles.get(String(childId))
-    if (handle) return { childId: String(childId), status: 'running', output: '' }
+    if (handle) {
+      return {
+        childId: String(childId),
+        status: 'running',
+        output: '',
+        ...(handle.jobId ? { jobId: handle.jobId } : {}),
+      }
+    }
 
     return {
       childId: String(childId),
@@ -958,7 +1269,7 @@ export function createDshAdapter(ctx, options = {}) {
   }
 
   /**
-   * 取消：先 abort，再让宿主 dispose 这个 activation。
+   * 取消的适配器内部实现：先 abort，再让宿主 dispose 这个 activation。
    *
    * 顺序是**先 dispose、后 cleanup**：只有拿到 `stopConfirmed:true`（dispose 成功，
    * 或 activation.result 已落定）才释放并发槽位；dispose 超时/抛错时**保留槽位与隔离互斥**，
@@ -966,9 +1277,12 @@ export function createDshAdapter(ctx, options = {}) {
    * 保留的槽位会在 result 落定时释放（结果落定是可验证的停止证据）。
    * 重复调用无害：并发的第二次调用复用同一个 cancelPromise。
    *
+   * 这是 `hooks.cancel` 的落点，**不能**反过来调用 `cancel()`：`cancel()` 会先
+   * `jobs.kill()` → hooks.cancel → 这里，形成递归。
+   *
    * @returns {Promise<{ stopConfirmed: boolean, code?: string, message?: string, reason?: string }>}
    */
-  async function cancel(taskRef) {
+  async function cancelActivation(taskRef) {
     const childId = typeof taskRef === 'string' ? taskRef : taskRef?.childId
     if (!childId) return { stopConfirmed: false, reason: '缺少 childId' }
     const id = String(childId)
@@ -1009,6 +1323,7 @@ export function createDshAdapter(ctx, options = {}) {
             stopReason: 'cancelled',
             stopConfirmed,
             output: '',
+            ...(handle.jobId ? { jobId: handle.jobId } : {}),
             at: now(),
             ...(disposeError
               ? {
@@ -1029,6 +1344,7 @@ export function createDshAdapter(ctx, options = {}) {
             ...(disposeError ? { error: disposeError } : {}),
             finishedAt: settled.at,
           })
+          settleJob(id, settled)
         }
       } finally {
         // 3) 只有确认停止才释放并发槽位；未确认时保留句柄（result 落定后再释放）
@@ -1040,6 +1356,35 @@ export function createDshAdapter(ctx, options = {}) {
       }
     })()
     return handle.cancelPromise
+  }
+
+  /**
+   * 取消入口。
+   *
+   * 有原生 Job 时**优先走 Job 的 cancel**（`ctx.jobs.kill` → `hooks.cancel` →
+   * `cancelActivation`），保证面板与工具的停止路径一致；Job 不存在、服务缺失、
+   * kill 抛错（例如 owner 已失效）时回退到原来的适配器路径。
+   *
+   * @returns {Promise<{ stopConfirmed: boolean, code?: string, message?: string, reason?: string }>}
+   */
+  async function cancel(taskRef) {
+    const childId = typeof taskRef === 'string' ? taskRef : taskRef?.childId
+    if (!childId) return { stopConfirmed: false, reason: '缺少 childId' }
+    const id = String(childId)
+    const handle = handles.get(id)
+    if (handle && !handle.cancelPromise && handle.jobId) {
+      const jobs = jobsService()
+      if (jobs && typeof jobs.kill === 'function') {
+        try {
+          jobs.kill(String(handle.jobId), handle.ownerId ?? undefined, 'meetingstone_cancel_task')
+        } catch (err) {
+          warn(
+            `[meetingstone] jobs: kill ${handle.jobId} 失败，回退到适配器取消：${errorMessage(err)}`,
+          )
+        }
+      }
+    }
+    return cancelActivation(taskRef)
   }
 
   // 插件卸载：单一 disposer 内收尾全部存活任务（02-plugin-spec.md §2.4 的硬要求，
@@ -1133,6 +1478,7 @@ export function createDshAdapter(ctx, options = {}) {
                   ...(disposeError
                     ? { error: { code: disposeError.code, message: disposeError.message } }
                     : {}),
+                  ...(handle.jobId ? { jobId: handle.jobId } : {}),
                   at: now(),
                 }
                 rememberFinished(id, settled)
@@ -1143,6 +1489,7 @@ export function createDshAdapter(ctx, options = {}) {
                   ...(disposeError ? { error: disposeError } : {}),
                   finishedAt: settled.at,
                 })
+                settleJob(id, settled)
               }
             } finally {
               // 只有确认停止才释放槽位；未确认时保留句柄（result 落定后由回调 cleanup）

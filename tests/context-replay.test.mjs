@@ -52,7 +52,7 @@ test('重放块：running 不允许重放（CONTINUATION_NOT_READY）', () => {
   )
 })
 
-test('重放块：超长输出按 64 KiB 截断且保留尾部', () => {
+test('重放块：超长输出按 16 KiB 截断且保留尾部', () => {
   const big = '头'.repeat(30000) + '尾'.repeat(30000)
   const out = formatContinuation({ childId: 'big', status: 'completed', output: big })
   assert.equal(out.truncated, true)
@@ -60,6 +60,7 @@ test('重放块：超长输出按 64 KiB 截断且保留尾部', () => {
   assert.ok(out.text.includes('truncated: true'))
   assert.ok(out.text.includes('头'))
   assert.ok(out.text.endsWith('尾\n[END PREVIOUS TASK OUTPUT]'))
+  assert.ok(Number.isInteger(out.bytes) && out.bytes > 0, '必须记录实际注入的字节数')
 })
 
 test('拼接顺序固定：人设 → 重放块 → 本次任务（任务在最后）', () => {

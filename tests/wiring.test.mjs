@@ -226,7 +226,10 @@ test('list_roles 按当前会话项目根读取 .meetingstone.json（项目角�
     assert.deepEqual(ids, ['role-reviewer', 'role-sashi', 'role-scout'], '项目新增角色应出现')
 
     const sashi = scoped.roles.find((r) => r.roleId === 'role-sashi')
-    assert.equal(sashi.description, '项目内改为复核', '项目覆盖应生效')
+    assert.equal(sashi.description, undefined, '默认紧凑视图不返回 description')
+    const verbose = await listTool.execute({ verbose: true }, exec)
+    const sashiVerbose = verbose.roles.find((r) => r.roleId === 'role-sashi')
+    assert.equal(sashiVerbose.description, '项目内改为复核', 'verbose:true 才返回项目覆盖后的描述')
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -255,7 +258,7 @@ test('项目配置文件损坏时：仍能列角色，并把解析错误一起�
   }
 })
 
-test('list_roles 暴露配置透明度字段（职责/人设/通道）', async () => {
+test('list_roles verbose:true 暴露配置透明度字段（职责/人设/通道）', async () => {
   const { ctx, tools } = makeCtx()
   apply(ctx, {
     roles: [
@@ -270,7 +273,7 @@ test('list_roles 暴露配置透明度字段（职责/人设/通道）', async (
     ],
   })
   const listTool = tools.find((t) => t.name === 'meetingstone_list_roles')
-  const res = await listTool.execute({})
+  const res = await listTool.execute({ verbose: true })
   const byId = Object.fromEntries((res?.roles ?? res).map((r) => [r.roleId, r]))
   assert.equal(byId['role-sashi'].description, '技术骨干')
   assert.equal(byId['role-sashi'].hasPrompt, true)

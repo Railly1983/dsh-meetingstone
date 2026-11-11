@@ -438,6 +438,9 @@ export function createRunStore(options) {
       model: record.model ?? null,
       status: record.status,
       stopReason: record.stopReason ?? null,
+      // 宿主原生 Job id（可选）：派单成功且宿主 jobs 服务可用时写入，
+      // 供 get_task / 取消路径定位原生任务；没有 Job 时为 null（不伪造）。
+      jobId: typeof record.jobId === 'string' && record.jobId ? record.jobId : null,
       diagnostic: record.diagnostic
         ? truncateUtf8(record.diagnostic, MAX_ERROR_BYTES).text
         : null,
@@ -449,6 +452,11 @@ export function createRunStore(options) {
       resultTruncated: result.truncated,
       error: err,
       continuation: record.continuation ?? null,
+      // 上下文重放实际注入的字节数：只在本次派单带 continuation 时写入，
+      // 没有就省略该字段（不写 null，避免把"没重放"伪装成"重放了 0 字节"）。
+      ...(Number.isInteger(record.continuationBytes)
+        ? { continuationBytes: record.continuationBytes }
+        : {}),
       // 并行隔离元数据（P0）：operationId 与 childId 的映射、工作树位置、改动文件
       operationId:
         typeof record.operationId === 'string' && record.operationId ? record.operationId : null,
@@ -750,6 +758,8 @@ export function createRunStore(options) {
         model: parsed.model ?? null,
         status: parsed.status ?? 'unknown',
         ...(parsed.interrupted === true ? { interrupted: true } : {}),
+        // 原生 Job id（无 Job 时省略）：列表里能直接看到面板中的任务
+        ...(typeof parsed.jobId === 'string' && parsed.jobId ? { jobId: parsed.jobId } : {}),
         stopReason: parsed.stopReason ?? null,
         stopConfirmed: typeof parsed.stopConfirmed === 'boolean' ? parsed.stopConfirmed : null,
         // 诊断摘要：同样只取前 200 字符（与 preview 一致），避免列表膨胀
@@ -871,7 +881,7 @@ export function createRunStore(options) {
     return { removed, protected: classified.length - unprotected.length }
   }
 
-  return { root, dir, writeRun, loadRun, listRuns, pruneRuns, truncateUtf8 }
+  return { root, dir, pathFor: fileFor, writeRun, loadRun, listRuns, pruneRuns, truncateUtf8 }
 }
 
 /** @param {any} error */

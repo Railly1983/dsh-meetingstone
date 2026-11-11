@@ -1,5 +1,9 @@
 # GUI 最小骨架（0.2.0）
 
+> **任务列表由原生 Jobs 提供，插件不自造 UI。** 派单成功后，宿主 `ctx.jobs` 可用时本插件会注册
+> `meetingstone-dispatch` Job（角色 · 通道 · 任务摘要）；查看/停止任务使用宿主
+> `@deepseek-ai/dsh-tool-jobs` 提供的能力与面板。本页面只负责角色/通道/错误的只读展示，不复制任务列表。
+
 范围：**只读**。只保留三段——角色列表（名称 + 别名 + 是否可用）、通道列表（channelId + kind）、
 最近错误（无则显示「无」）。不做搜索 / 筛选 / 排序 / 操作按钮 / 编辑 / 任务控制 / 图表 / 动画。
 遵循宿主设计：用宿主 UI 组件（`@deepseek-ai/dsh-client-ui-primitives` 的 `Tag`）与主题 token

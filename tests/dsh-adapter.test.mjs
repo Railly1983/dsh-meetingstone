@@ -389,7 +389,7 @@ test('registerTools：ctx.tools.register 不可用时失败关闭', () => {
   assert.throws(() => registerTools({}, deps), /TOOLS_UNAVAILABLE/)
 })
 
-test('meetingstone_list_roles：返回角色视图 + registry.errors，来源与可用性如实标注', async () => {
+test('meetingstone_list_roles：默认紧凑；verbose 才给来源/描述，available 如实标注', async () => {
   const { ctx, registered } = fakeCtx()
   const { deps } = makeDeps()
   registerTools(ctx, deps)
@@ -399,9 +399,15 @@ test('meetingstone_list_roles：返回角色视图 + registry.errors，来源与
   assert.equal(r.roleId, 'role-sashi')
   assert.deepEqual(r.aliases, ['SS'])
   assert.equal(r.enabled, true)
-  assert.equal(r.source, 'unknown', 'registry 未暴露来源，不得编造')
   assert.equal(r.availability, 'unknown', '没有 ctx.subagents 查询能力，不得假装可用')
+  assert.equal(Object.hasOwn(r, 'source'), false, '默认紧凑视图不返回 source')
+  assert.equal(Object.hasOwn(r, 'channel'), false, '默认紧凑视图不返回 channel')
   assert.equal(out.errors[0].code, 'ALIAS_CONFLICT')
+
+  const verbose = await registered[0].execute({ verbose: true })
+  assert.equal(verbose.roles[0].source, 'unknown', 'registry 未暴露来源，不得编造')
+  assert.equal(verbose.roles[0].hasPrompt, false)
+  assert.equal(verbose.roles[0].channel.kind, 'acp-cli')
 })
 
 test('meetingstone_dispatch：直接返回 dispatcher 的结果，并把入参透传', async () => {

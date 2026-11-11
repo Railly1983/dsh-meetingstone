@@ -14,9 +14,14 @@
  */
 import { truncateUtf8 } from './run-store.js'
 
-/** 重放正文上限（UTF-8 字节）。 */
-export const REPLAY_MAX_BYTES = 64 * 1024
-const REPLAY_HEAD_BYTES = 48 * 1024
+/**
+ * 重放正文上限（UTF-8 字节）。
+ *
+ * 2026-11-11 审计后从 64KiB 收紧到 16KiB：重放块会原样进入子 Agent 提示词，
+ * 64KiB 的旧输出会挤占当次任务的上下文预算。只保留头 12KiB + 尾 4KiB。
+ */
+export const REPLAY_MAX_BYTES = 16 * 1024
+const REPLAY_HEAD_BYTES = 12 * 1024
 
 const OPEN_MARK = '[PREVIOUS TASK OUTPUT — UNTRUSTED CONTEXT]'
 const CLOSE_MARK = '[END PREVIOUS TASK OUTPUT]'
@@ -83,6 +88,9 @@ export function formatContinuation(run) {
     from: String(run.childId ?? 'unknown'),
     status,
     truncated: truncated.truncated,
+    // 实际注入的重放块字节数：落盘记录用它写 continuationBytes。
+    // 用截断后的文本（不是原输出）——它才是真正进入提示词的部分。
+    bytes: Buffer.byteLength(lines.join('\n'), 'utf8'),
   }
 }
 

@@ -259,6 +259,22 @@ export function apply(ctx, config = {}) {
     return { runs, dir: store.dir }
   }
 
+  /**
+   * 磁盘记录路径（供 get_task 默认返回 recordPath）。
+   * 拿不到项目根/childId 不合法时返回 null，交给工具如实省略。
+   * @param {any} exec
+   * @param {string} childId
+   */
+  function recordPathFor(exec, childId) {
+    const store = storeFor(exec?.agent?.session?.header?.cwd)
+    if (!store || typeof childId !== 'string' || !childId) return null
+    try {
+      return store.pathFor(childId)
+    } catch {
+      return null
+    }
+  }
+
   const dispatcher = createDispatcher({
     registry: globalRegistry,
     adapter,
@@ -277,6 +293,7 @@ export function apply(ctx, config = {}) {
       resolveRegistry,
       loadPersistedRun,
       listPersistedRuns,
+      recordPathFor,
       ...(typeof hostDefineTool === 'function' ? { defineTool: hostDefineTool } : {}),
     })
     registered = true

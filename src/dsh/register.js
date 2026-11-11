@@ -60,6 +60,7 @@
 import { providerNameFor } from './adapter.js'
 import { normalizeProjectKey } from '../dispatch/dispatcher.js'
 import { resolveContinuation } from '../context-replay.js'
+import { truncateUtf8 } from '../run-store.js'
 
 // 兼容旧引用：归一化实现只在 dispatcher 里维护一份，避免两处逻辑漂移。
 export { normalizeProjectKey }
@@ -175,21 +176,31 @@ function assertHostReadySchema(definition) {
 }
 
 /**
- * 角色 → 对外视图。只挑契约要求的字段，外加几个「如实标注」的派生字段。
+ * 角色 → 对外视图。
+ *
+ * 默认**紧凑**（Token 审计 2026-11-11）：只回 roleId/name/aliases/enabled/availability。
+ * `verbose:true` 才追加 description/channel/model/hasPrompt/source —— 角色多时
+ * 默认返回全量字段会把工具结果撑得很大，而模型通常只需要角色标识与可用性。
+ *
  * @param {object} role
  * @param {object} ctx
+ * @param {{ verbose?: boolean }} [options]
  */
-function toRoleView(role, ctx) {
-  return {
+function toRoleView(role, ctx, options = {}) {
+  const view = {
     roleId: role.roleId,
     name: role.name,
     aliases: Array.isArray(role.aliases) ? [...role.aliases] : [],
-    channel: { ...role.channel },
     enabled: role.enabled !== false,
     availability: availabilityOf(role, ctx),
+  }
+  if (options.verbose !== true) return view
+  return {
+    ...view,
     // 配置透明性：不返回 prompt 全文（可能很长），只给"有没有人设"和摘要
     description: typeof role.description === 'string' ? role.description : '',
     hasPrompt: typeof role.prompt === 'string' && role.prompt.trim() !== '',
+    channel: { ...role.channel },
     ...(typeof role.channel?.channelId === 'string' ? { channelId: role.channel.channelId } : {}),
     ...(typeof role.channel?.model === 'string' ? { model: role.channel.model } : {}),
     source: typeof role.source === 'string' ? role.source : 'unknown',
@@ -239,6 +250,43 @@ function toCliView(r) {
   }
 }
 
+/** get_task 默认摘要的结果窗口（UTF-8 字节）：头 1KiB + 尾 512B。 */
+export const TASK_RESULT_HEAD_BYTES = 1024
+export const TASK_RESULT_TAIL_BYTES = 512
+
+/**
+ * 任务记录 → 模型可见视图（Token 审计 2026-11-11）。
+ *
+ * - 默认只给 `result` 的首 1KiB + 末 512B，并附 `resultBytes`；
+ * - `full:true` 才返回全文；
+ * - 记录里 `output`/`result` 可能同时存在（内存终态用 output、磁盘用 result），
+ *   这里统一压成**一个** `result` 字段，绝不重复返回两份正文。
+ *
+ * @param {any} record
+ * @param {boolean} full
+ */
+function taskResultView(record, full) {
+  const source = record && typeof record === 'object' ? record : {}
+  // 内存终态优先（`output` 来自本进程），但它为空时退回磁盘快照 `result`，
+  // 避免"内存空串"把已经落盘的结果吞掉。
+  const liveText = typeof source.output === 'string' ? source.output : ''
+  const storedText = typeof source.result === 'string' ? source.result : ''
+  const text = liveText || storedText
+  const bytes = Buffer.byteLength(text, 'utf8')
+  const preview = full
+    ? { text, truncated: false }
+    : truncateUtf8(text, TASK_RESULT_HEAD_BYTES + TASK_RESULT_TAIL_BYTES, {
+        headBytes: TASK_RESULT_HEAD_BYTES,
+        tailBytes: TASK_RESULT_TAIL_BYTES,
+      })
+  const storedTruncated = source.resultTruncated === true
+  const out = { ...source, result: preview.text, resultBytes: bytes }
+  delete out.output
+  out.resultTruncated = preview.truncated || storedTruncated
+  if (storedTruncated) out.recordResultTruncated = true
+  return out
+}
+
 /**
  * 注册六个工具。
  *
@@ -268,6 +316,38 @@ export function registerTools(ctx, deps) {
           if (live && live.status !== 'unknown') return live
           return loadPersistedRun ? await loadPersistedRun(exec, childId) : live
         }
+
+  /**
+   * 记录文件路径（可选依赖）：由入口用 run-store 的 pathFor 计算，
+   * 让 get_task 默认就能告诉调用方磁盘记录在哪。
+   * @param {any} exec
+   * @param {string} childId
+   * @returns {string | null}
+   */
+  const recordPathFor = typeof deps.recordPathFor === 'function' ? deps.recordPathFor : null
+  function recordPathOf(exec, childId) {
+    if (!recordPathFor) return null
+    try {
+      const path = recordPathFor(exec, childId)
+      return typeof path === 'string' && path ? path : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 给记录补 recordPath（不覆盖已有值）。
+   * @param {any} record
+   * @param {any} exec
+   * @param {string} childId
+   */
+  function withRecordPath(record, exec, childId) {
+    if (!record || typeof record !== 'object') return record
+    if (typeof record.recordPath === 'string' && record.recordPath) return record
+    const path = recordPathOf(exec, childId)
+    return path ? { ...record, recordPath: path } : record
+  }
+
   if (!ctx || !ctx.tools || typeof ctx.tools.register !== 'function') {
     throw new Error('TOOLS_UNAVAILABLE: ctx.tools.register 不可用')
   }
@@ -318,14 +398,21 @@ export function registerTools(ctx, deps) {
     {
       name: TOOL_NAMES.LIST_ROLES,
       description:
-        '列出集合石已配置的角色（roleId/名称/别名/通道/启用状态/可用性/来源/职责说明/是否配置人设）与注册表的错误；不派单、不探测本机 CLI。',
-      parameters: {},
+        '列出集合石已配置的角色。默认紧凑：roleId/名称/别名/启用状态/可用性（provider 未装时标为不可用）。' +
+        'verbose:true 才返回职责说明、通道/模型、是否配置人设与来源；不返回 prompt 全文，不派单、不探测本机 CLI。',
+      parameters: {
+        verbose: {
+          type: 'boolean',
+          description: 'true=返回 description/channel/model/hasPrompt/source 等详细字段（默认 false）',
+        },
+      },
       output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
-      async execute(_args, exec) {
+      async execute(args, exec) {
         const effective = await registryFor(exec)
+        const verbose = args?.verbose === true
         const roles = effective.registry
           .list()
-          .map((/** @type {object} */ role) => toRoleView(role, ctx))
+          .map((/** @type {object} */ role) => toRoleView(role, ctx, { verbose }))
         const errors = [
           ...(Array.isArray(effective.registry.errors) ? effective.registry.errors : []),
           ...(effective.projectErrors ?? []),
@@ -415,19 +502,36 @@ export function registerTools(ctx, deps) {
         }
         // 直接用 dispatcher 的返回（成功 { ok:true, taskRef, role, startedAt } /
         // 失败 { ok:false, code, message, ... }），不二次包装；
-        // 唯一附加字段是项目配置的解析错误，避免"配置有错但悄悄忽略"。
+        // 成功回执只保留轻量字段（Token 审计 2026-11-11）：role 全量/prompt/工作树细节
+        // 一律不返回，需要时用 meetingstone_list_runs 查。
         const result = await dispatcher.dispatch(input)
-        if (Array.isArray(effective.projectErrors) && effective.projectErrors.length > 0) {
-          return { ...result, projectErrors: effective.projectErrors }
+        let payload = result
+        if (result?.ok === true) {
+          const ref = result.taskRef && typeof result.taskRef === 'object' ? result.taskRef : {}
+          /** @type {Record<string, unknown>} */
+          const taskRef = {}
+          for (const key of ['childId', 'name', 'provider', 'jobId']) {
+            if (ref[key] !== undefined && ref[key] !== null) taskRef[key] = ref[key]
+          }
+          payload = {
+            ok: true,
+            taskRef,
+            roleId: result.role?.roleId ?? null,
+            roleName: result.role?.name ?? null,
+            isolation: result.isolation ?? null,
+          }
         }
-        return result
+        if (Array.isArray(effective.projectErrors) && effective.projectErrors.length > 0) {
+          return { ...payload, projectErrors: effective.projectErrors }
+        }
+        return payload
       },
     },
     {
       name: TOOL_NAMES.LIST_RUNS,
       description:
         '列出当前项目最近的派单记录（新的在前）：childId、角色、通道、模型、状态、耗时、工作树路径/分支、改动文件（changedFiles）、' +
-        '同项目任务之间的 overlapWarnings 与 200 字预览。' +
+        '原生 Job id（jobId，若宿主 Jobs 可用）、同项目任务之间的 overlapWarnings 与 200 字预览。' +
         '数据来自 `.meetingstone/runs/`，DSH 重启后仍可查；上一个进程遗留的 running 会显示为 interrupted。' +
         '带工作树的记录不会被 100 条/30 天自动清理，用于保护未合并成果的元数据。',
       parameters: {
@@ -445,12 +549,16 @@ export function registerTools(ctx, deps) {
     {
       name: TOOL_NAMES.GET_TASK,
       description:
-        '按 childId 查询一次派发的结果：status（running/completed/failed/cancelled/interrupted/unknown）、输出文本、停止原因、' +
-        '工作树路径/分支、改动文件（changedFiles）与同项目其他任务的 overlapWarnings。' +
-        '先查本进程内存（最近 20 条），终态再读项目内 `.meetingstone/runs/<childId>.json` 补隔离元数据，因此 DSH 重启后仍可查到终态；' +
+        '按 childId 查询一次派发：status（running/completed/failed/cancelled/interrupted/unknown）、stopReason、resultBytes、jobId、recordPath、' +
+        '工作树/改动文件/overlapWarnings。默认只回结果首 1KiB + 末 512B（resultBytes 给出原始字节数）；需要全文时传 full:true。' +
+        '先查本进程内存（最近 20 条），终态再读项目内 `.meetingstone/runs/<childId>.json` 补隔离元数据；' +
         '上一个进程留下的 running 会投影为 interrupted。',
       parameters: {
         childId: { type: 'string', required: true, description: 'meetingstone_dispatch 返回的 taskRef.childId' },
+        full: {
+          type: 'boolean',
+          description: 'true=返回完整结果文本（默认 false，只回首 1KiB + 末 512B 摘要）',
+        },
       },
       output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
       async execute(args, exec) {
@@ -459,6 +567,7 @@ export function registerTools(ctx, deps) {
           return { status: 'unknown', reason: '缺少 childId' }
         }
         const id = childId.trim()
+        const full = args?.full === true
         if (typeof dispatcher.getTask !== 'function') {
           return { status: 'unknown', reason: '当前派单器不支持结果查询' }
         }
@@ -467,7 +576,9 @@ export function registerTools(ctx, deps) {
         // 否则会把磁盘里"派单瞬间写的 running"当成当前状态（字段形状也不一致）。
         if (live?.status === 'unknown') {
           const persisted = await loadPersistedRun?.(exec, id)
-          if (persisted) return persisted
+          if (persisted) {
+            return taskResultView(withRecordPath(persisted, exec, id), full)
+          }
         }
         // 终态：内存结果没有 worktree/changedFiles/overlapWarnings，用磁盘记录补齐。
         // 内存仍优先 status/output/诊断，磁盘只提供隔离元数据。
@@ -478,12 +589,13 @@ export function registerTools(ctx, deps) {
         ) {
           const persisted = await loadPersistedRun(exec, id)
           if (persisted && persisted.status !== 'unknown') {
-            return {
+            const merged = {
               ...persisted,
               ...live,
               operationId: persisted.operationId ?? live.operationId ?? null,
               isolation: persisted.isolation ?? live.isolation ?? null,
               worktree: persisted.worktree ?? live.worktree ?? null,
+              jobId: persisted.jobId ?? live.jobId ?? null,
               changedFiles: Array.isArray(persisted.changedFiles) ? persisted.changedFiles : null,
               changedFilesUnknown: persisted.changedFilesUnknown === true,
               changedFilesTruncated: persisted.changedFilesTruncated === true,
@@ -503,15 +615,17 @@ export function registerTools(ctx, deps) {
                     ? live.stopConfirmed
                     : null,
             }
+            return taskResultView(withRecordPath(merged, exec, id), full)
           }
         }
-        return live
+        return taskResultView(withRecordPath(live, exec, id), full)
       },
     },
     {
       name: TOOL_NAMES.CANCEL_TASK,
       description:
-        '按 childId 取消一次派发（中止 + 释放宿主 activation）。只有确认停止（stopConfirmed:true）才释放并发槽位；' +
+        '按 childId 取消一次派发（中止 + 释放宿主 activation）。若该任务有原生 Job，优先走 Job 的 cancel（Jobs 面板与本工具停止路径一致），' +
+        '否则走适配器原路径。只有确认停止（stopConfirmed:true）才释放并发槽位；' +
         'dispose 超时/失败时槽位保留，等任务结果落定后自动释放。重复调用无害。',
       parameters: {
         childId: { type: 'string', required: true, description: 'meetingstone_dispatch 返回的 taskRef.childId' },

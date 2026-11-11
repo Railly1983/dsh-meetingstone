@@ -159,7 +159,37 @@
 - **失败上下文**：`WORKTREE_*` 失败结果保留 `path` / `branch` / `phase` / `residualPath`；
   带工作树的启动失败同样保留工作树路径与分支，便于人工定位残留。
 
-## 7. 示例
+## 7. 工具返回（Token 优化，2026-11-11）
+
+会话上下文是有限预算，以下默认值按审计结论收紧；需要完整内容时必须显式索取。
+
+| 工具 | 默认返回 | 完整/详细模式 |
+| --- | --- | --- |
+| `meetingstone_get_task` | `status` / `stopReason` / `resultBytes` / `jobId` / `recordPath` + **结果首 1KiB + 末 512B**（`resultTruncated:true`） | `full:true` 返回完整 `result`；`output` 与 `result` 相同时只回一份（字段名统一为 `result`） |
+| `meetingstone_dispatch` | 成功只回 `ok` / `taskRef`（`childId`、`name`、`provider`、`jobId`）/ `roleId` / `roleName` / `isolation` | 角色全量、prompt、工作树细节一律不回；需要时查 `meetingstone_list_runs` |
+| `meetingstone_list_roles` | `roleId` / `name` / `aliases` / `enabled` / `availability` | `verbose:true` 追加 `description` / `channel` / `model` / `hasPrompt` / `source` |
+
+- `meetingstone_get_task` 的 `recordPath` 指向 `.meetingstone/runs/<childId>.json`；`resultBytes` 是原始结果字节数（不是截断后长度）。
+- 上下文重放上限从 64KiB 收紧到 **16KiB**（头 12KiB + 尾 4KiB）。带 `continuesFrom` 的派单会在落盘记录里写 `continuationBytes`（本次实际注入的重放块字节数）；没有重放则**省略该字段**。
+
+## 8. 宿主原生 Jobs（任务列表）
+
+本插件不自造任务列表 UI。派单成功后，如果宿主提供 `ctx.jobs`，适配器会注册一个原生 Job：
+
+- `kind`: `meetingstone-dispatch`
+- `label`: `角色名 · 通道 · 任务摘要（≤40 字）`，例如 `悟空 · codex · 审核登录模块`
+- `owner`: 本次派单的 parent Agent 对应 SessionId（宿主用 `agent.id === agent.session.id` 校验）
+- `jobId`: 同时写入 `taskRef` 与 `.meetingstone/runs/<childId>.json`
+
+行为边界：
+
+- **Jobs 不可用时派单照常**：没有 `ctx.jobs`、或 `jobs.start` 抛错（例如当前 composition 没加载
+  `@deepseek-ai/dsh-tool-jobs`，没有 controller 服务该 owner）时，只记一条 warning，不建 Job、不伪造 `jobId`。
+- 任务终态（完成/失败/取消/插件卸载）会 resolve Job 的 `done`；`meetingstone_cancel_task` 优先走
+  `ctx.jobs.kill()` → Job 的 `cancel`，再回落到适配器原路径，保证面板与工具停止的是同一个任务。
+- 插件本身**不拥有** Jobs 面板；面板由宿主 `@deepseek-ai/dsh-tool-jobs` 提供。
+
+## 9. 示例
 
 - 全局五角色：[examples/meetingstone.desktop.yml](../examples/meetingstone.desktop.yml)
 - 项目覆盖：[examples/project.meetingstone.json](../examples/project.meetingstone.json)

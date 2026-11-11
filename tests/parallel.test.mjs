@@ -484,6 +484,20 @@ async function readRun(root, childId) {
 }
 
 /**
+ * 派单回执已瘦身（不回 worktree）：测试从落盘记录里取工作树元数据。
+ * running 记录由 onRunStart 异步写入，这里轮询等待。
+ * @param {string} root
+ * @param {string} childId
+ * @param {number} [timeoutMs]
+ */
+function waitRunningWorktree(root, childId, timeoutMs = 5000) {
+  return waitFor(async () => {
+    const record = await readRun(root, childId)
+    return record?.worktree?.path ? record.worktree : null
+  }, timeoutMs)
+}
+
+/**
  * 等到两份原始 JSON 都记录到对方的交集文件才返回。
  *
  * 为什么需要：overlap 回写是**异步持久化队列**的一部分，"两份记录都 completed"
@@ -576,52 +590,51 @@ test('默认隔离：派单在独立工作树里启动，终态记录 worktree/c
     const dispatch = tool('meetingstone_dispatch')
     const res = await dispatch.execute({ role: 'SS', task: '改点东西' }, execFor(root))
     assert.equal(res.ok, true, JSON.stringify(res))
-    assert.ok(res.operationId)
-    assert.equal(res.taskRef.operationId, res.operationId, 'taskRef 必须携带 operationId → childId 映射')
-    assert.ok(res.worktree && res.worktree.path, '返回里必须带工作树元数据')
+    const childId = res.taskRef.childId
+    const worktree = await waitRunningWorktree(root, childId)
+    assert.ok(worktree && worktree.path, '落盘记录里必须带工作树元数据')
     assert.equal(
-      res.worktree.branch,
-      `meetingstone/${res.operationId}`,
+      worktree.branch,
+      `meetingstone/${worktree.operationId}`,
       '分支名必须由 operationId 派生',
     )
     assert.match(
-      res.worktree.path.replace(/\\/g, '/'),
+      worktree.path.replace(/\\/g, '/'),
       /\.meetingstone\/worktrees\//,
       'cwd 必须指向隔离工作树',
     )
     assert.equal(subagents.calls.length, 1)
     assert.equal(
       subagents.calls[0].spec.request.cwd,
-      res.worktree.path,
+      worktree.path,
       'adapter 启动 cwd 必须是工作树路径',
     )
 
-    const childId = res.taskRef.childId
     subagents.pending[0].resolve({
       stopReason: 'completed',
       output: [{ type: 'text', text: 'done' }],
     })
     const record = await waitCompleted(root, childId)
-    assert.equal(record.worktree.path, res.worktree.path)
-    assert.equal(record.worktree.branch, res.worktree.branch)
-    assert.equal(record.operationId, res.operationId)
+    assert.equal(record.worktree.path, worktree.path)
+    assert.equal(record.worktree.branch, worktree.branch)
+    assert.equal(record.operationId, worktree.operationId)
     assert.equal(record.stopConfirmed, true)
     assert.ok(Array.isArray(record.changedFiles) && record.changedFiles.includes('work.txt'))
     assert.equal(record.changedFilesUnknown, false)
-    assert.equal(existsSync(res.worktree.path), true, '终止后不得删除工作树')
+    assert.equal(existsSync(worktree.path), true, '终止后不得删除工作树')
     assert.equal(existsSync(join(root, 'work.txt')), false, '子 Agent 的改动不得直接落到主工作区')
 
     const getTask = tool('meetingstone_get_task')
     const got = await getTask.execute({ childId }, execFor(root))
     assert.equal(got.status, 'completed')
-    assert.equal(got.worktree.path, res.worktree.path)
+    assert.equal(got.worktree.path, worktree.path)
     assert.ok(got.changedFiles.includes('work.txt'))
     assert.deepEqual(got.overlapWarnings, [])
 
     const listRuns = tool('meetingstone_list_runs')
     const listed = await listRuns.execute({}, execFor(root))
     assert.equal(listed.runs.length, 1)
-    assert.equal(listed.runs[0].worktree.path, res.worktree.path)
+    assert.equal(listed.runs[0].worktree.path, worktree.path)
     assert.ok(listed.runs[0].changedFiles.includes('work.txt'))
   } finally {
     await removeRepo(root)
@@ -646,16 +659,20 @@ test('真实并行：两任务时间重叠、两棵不同工作树、各自真�
     const b = await dispatch.execute({ role: 'SS', task: 'b' }, execFor(root))
     assert.equal(b.ok, true, JSON.stringify(b))
 
+    // 回执不回工作树细节：从落盘 running 记录取
+    const aTree = await waitRunningWorktree(root, a.taskRef.childId)
+    const bTree = await waitRunningWorktree(root, b.taskRef.childId)
+
     // 两棵不同的真实工作树，各自真实写入了自己的文件
-    assert.notEqual(a.worktree.path, b.worktree.path, '两个任务必须使用不同工作树')
-    assert.equal(existsSync(a.worktree.path), true)
-    assert.equal(existsSync(b.worktree.path), true)
-    const aFile = join(a.worktree.path, `${a.taskRef.childId}.txt`)
-    const bFile = join(b.worktree.path, `${b.taskRef.childId}.txt`)
+    assert.notEqual(aTree.path, bTree.path, '两个任务必须使用不同工作树')
+    assert.equal(existsSync(aTree.path), true)
+    assert.equal(existsSync(bTree.path), true)
+    const aFile = join(aTree.path, `${a.taskRef.childId}.txt`)
+    const bFile = join(bTree.path, `${b.taskRef.childId}.txt`)
     assert.equal(existsSync(aFile), true, 'A 的文件必须写在自己的工作树里')
     assert.equal(existsSync(bFile), true, 'B 的文件必须写在自己的工作树里')
-    assert.equal(existsSync(join(b.worktree.path, `${a.taskRef.childId}.txt`)), false, '两棵树不得串文件')
-    assert.equal(existsSync(join(a.worktree.path, `${b.taskRef.childId}.txt`)), false)
+    assert.equal(existsSync(join(bTree.path, `${a.taskRef.childId}.txt`)), false, '两棵树不得串文件')
+    assert.equal(existsSync(join(aTree.path, `${b.taskRef.childId}.txt`)), false)
     assert.equal(existsSync(join(root, `${a.taskRef.childId}.txt`)), false, '改动不得落主工作区')
     assert.equal(existsSync(join(root, `${b.taskRef.childId}.txt`)), false)
 
@@ -868,6 +885,8 @@ test('取消：不删树，另一个任务不受影响，记录 cancelled + stop
     const a = await dispatch.execute({ role: 'SS', task: 'a' }, execFor(root))
     const b = await dispatch.execute({ role: 'SS', task: 'b' }, execFor(root))
     assert.equal(a.ok && b.ok, true)
+    const aTree = await waitRunningWorktree(root, a.taskRef.childId)
+    const bTree = await waitRunningWorktree(root, b.taskRef.childId)
 
     const cancel = tool('meetingstone_cancel_task')
     await cancel.execute({ childId: a.taskRef.childId }, execFor(root))
@@ -876,8 +895,8 @@ test('取消：不删树，另一个任务不受影响，记录 cancelled + stop
       return record.status === 'cancelled' ? record : null
     })
     assert.equal(cancelled.stopConfirmed, true)
-    assert.equal(existsSync(a.worktree.path), true, '取消不得删除工作树')
-    assert.equal(existsSync(b.worktree.path), true)
+    assert.equal(existsSync(aTree.path), true, '取消不得删除工作树')
+    assert.equal(existsSync(bTree.path), true)
 
     const getTask = tool('meetingstone_get_task')
     const stillRunning = await getTask.execute({ childId: b.taskRef.childId }, execFor(root))
@@ -905,6 +924,7 @@ test('卸载：写 interrupted 终态，不删除工作树', async () => {
     const dispatch = tool('meetingstone_dispatch')
     const res = await dispatch.execute({ role: 'SS', task: '长任务' }, execFor(root))
     assert.equal(res.ok, true)
+    const tree = await waitRunningWorktree(root, res.taskRef.childId)
 
     for (const dispose of disposers) if (typeof dispose === 'function') await dispose()
 
@@ -914,7 +934,7 @@ test('卸载：写 interrupted 终态，不删除工作树', async () => {
     })
     assert.equal(record.stopReason, 'plugin-disposed')
     assert.equal(record.stopConfirmed, true)
-    assert.equal(existsSync(res.worktree.path), true, '卸载不得删除工作树')
+    assert.equal(existsSync(tree.path), true, '卸载不得删除工作树')
   } finally {
     await removeRepo(root)
   }
@@ -1004,8 +1024,10 @@ test('重叠：两棵树改同一文件 → 双方 overlapWarnings 命中；未�
     const c = await dispatch.execute({ role: 'SS', task: 'c' }, execFor(root))
     const d = await dispatch.execute({ role: 'SS', task: 'd' }, execFor(root))
     assert.equal(c.ok && d.ok, true, JSON.stringify({ c, d }))
-    await writeFile(join(c.worktree.path, 'only-c.txt'), 'c\n', 'utf8')
-    await writeFile(join(d.worktree.path, 'only-d.txt'), 'd\n', 'utf8')
+    const cTree = await waitRunningWorktree(root, c.taskRef.childId)
+    const dTree = await waitRunningWorktree(root, d.taskRef.childId)
+    await writeFile(join(cTree.path, 'only-c.txt'), 'c\n', 'utf8')
+    await writeFile(join(dTree.path, 'only-d.txt'), 'd\n', 'utf8')
     subagents.pending.find((p) => p.childId === c.taskRef.childId)?.resolve({
       stopReason: 'completed',
       output: [],
