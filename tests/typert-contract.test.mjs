@@ -18,7 +18,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { TypertRegistry } from '@deepseek-ai/dsh-typert-registry'
 
 import {
-  SESSION_REMOTE_METHODS,
+  GUI_STRICT_METHODS,
   SESSION_REMOTE_TYPES,
   TYPERT_PACKAGE,
   assertStrictDescriptors,
@@ -34,10 +34,10 @@ function buildDescriptors() {
   return createTypertRemoteInfo(createSessionRemoteSpec(z), z).descriptors
 }
 
-test('strict 契约：三个方法都存在，参数/结果全部 strict + 非空 typeSymbol + 真实 zod', () => {
+test('strict 契约：六个方法都存在，参数/结果全部 strict + 非空 typeSymbol + 真实 zod', () => {
   const descriptors = buildDescriptors()
-  assert.equal(descriptors.length, 3)
-  assert.deepEqual(descriptors.map((d) => d.method), SESSION_REMOTE_METHODS)
+  assert.equal(descriptors.length, 6)
+  assert.deepEqual(descriptors.map((d) => d.method), GUI_STRICT_METHODS)
   assert.doesNotThrow(() => assertStrictDescriptors(descriptors))
 
   for (const descriptor of descriptors) {
@@ -150,7 +150,7 @@ test('Host manifest：经真实 createTypertRemoteInfo 生成，可交给 ctx.ty
   assert.equal(built.manifest.package, TYPERT_PACKAGE)
   assert.equal(built.manifest.face, 'host')
   assert.deepEqual(built.manifest.schemas, [])
-  assert.equal(built.manifest.invocations.length, 3)
+  assert.equal(built.manifest.invocations.length, 6)
   assert.doesNotThrow(() => assertStrictDescriptors(built.manifest.invocations))
   assert.deepEqual(built.manifest.model, { services: [], events: [], objects: [] })
 })
@@ -175,7 +175,7 @@ test('registerSessionStrictRemotes：typert 就绪后注册；重复/失败只�
   })
   assert.equal(result.registered, true)
   assert.equal(registered.length, 1)
-  assert.equal(registered[0].invocations.length, 3)
+  assert.equal(registered[0].invocations.length, 6)
   assert.ok(logs.some(([level, line]) => level === 'info' && line.includes('phase=strict') && line.includes('status=ok')))
 
   // 注册抛错（例如 HMR 重复注册）：捕获并记录，调用方不需要 try/catch。
@@ -316,7 +316,7 @@ test('真实 TypertRegistry：空 typeSymbol / 空壳 create 被拒；src-json �
   )
 })
 
-test('真实 Cordis + registry：deferred 的 ctx.inject 最终注册 3 个 strict 端点', async () => {
+test('真实 Cordis + registry：deferred 的 ctx.inject 最终注册 6 个 strict 端点', async () => {
   const ctx = new Context()
   new TypertRegistry(ctx)
   const logs = []
@@ -335,7 +335,10 @@ test('真实 Cordis + registry：deferred 的 ctx.inject 最终注册 3 个 stri
   assert.deepEqual(endpoints, [
     'dsh-meetingstone#meetingstone/clearSessionOverride',
     'dsh-meetingstone#meetingstone/getSessionConfig',
+    'dsh-meetingstone#meetingstone/refreshCli',
+    'dsh-meetingstone#meetingstone/setCliEnabled',
     'dsh-meetingstone#meetingstone/setSessionOverride',
+    'dsh-meetingstone#meetingstone/updateGlobalRole',
   ])
   assert.ok(logs.some(([level, line]) => level === 'info' && line.includes('phase=strict') && line.includes('status=ok')))
 })
@@ -360,7 +363,7 @@ test('真实 Cordis 生命周期：生产 effect 路径注册，插件 dispose �
     }
   }
   await waitFor(() => root.typert.local.list().length > 0)
-  assert.equal(root.typert.local.list().length, 3, '插件存活时三个 strict 端点都在')
+  assert.equal(root.typert.local.list().length, 6, '插件存活时六个 strict 端点都在')
 
   await fiber.dispose()
   await waitFor(() => root.typert.local.list().length === 0)

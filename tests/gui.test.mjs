@@ -406,6 +406,10 @@ async function loadClientHarness(values = {}) {
   const sidebarTabRegisters = []
   const sidebarOpenCalls = []
   const sessionCalls = []
+  const sessionWrites = []
+  const sessionClears = []
+  const cliCalls = []
+  const globalWrites = []
   const sessionValue =
     values.sessionValue !== undefined
       ? values.sessionValue
@@ -418,7 +422,16 @@ async function loadClientHarness(values = {}) {
                   roleId: 'role-sashi',
                   name: '沙僧',
                   aliases: ['SS'],
-                  channel: { channelId: 'ch-acp-flash', provider: 'acp', model: 'flash-1' },
+                  description: '骨干',
+                  prompt: '少说多做',
+                  channel: {
+                    channelId: 'ch-acp-flash',
+                    kind: 'acp-cli',
+                    provider: 'acp',
+                    model: 'flash-1',
+                    reasoning: 'low',
+                  },
+                  enabled: true,
                 },
               ],
               channels: [],
@@ -426,14 +439,59 @@ async function loadClientHarness(values = {}) {
               dispatchNotes: '',
               projectRules: [],
             },
-            // role-sashi 在会话层覆盖了 model；来源层是 project。
+            // role-sashi 在会话层覆盖了 channel；来源层是 project。
             overrides: { 'role-sashi': { channel: { model: 'flash-2' } } },
             sources: {
-              roles: { 'role-sashi': { layer: 'project', fields: { 'channel.model': 'project' } } },
+              roles: {
+                'role-sashi': {
+                  layer: 'session',
+                  fields: {
+                    name: 'global',
+                    aliases: 'global',
+                    description: 'project',
+                    prompt: 'global',
+                    'channel.channelId': 'global',
+                    'channel.kind': 'global',
+                    'channel.provider': 'global',
+                    'channel.model': 'session',
+                    'channel.reasoning': 'global',
+                  },
+                },
+              },
               defaultRoleId: 'project',
               dispatchNotes: 'default',
               projectRules: [],
             },
+            channels: [
+              {
+                channelId: 'ch-acp-flash',
+                description: 'ACP 快速通道',
+                kind: 'acp-cli',
+                provider: 'acp',
+                model: 'flash-1',
+                reasoning: 'low',
+              },
+              {
+                channelId: 'ch-codex-sol',
+                description: 'Codex 通道',
+                kind: 'codex',
+                provider: 'codex',
+                model: 'sol-1',
+                reasoning: 'high',
+              },
+            ],
+            roleStates: [
+              {
+                roleId: 'role-sashi',
+                userPreference: 'enabled',
+                readiness: 'ready',
+                readinessReason: 'PROVIDER_AVAILABLE',
+                quota: 'unknown',
+                color: 'green',
+                availability: 'available',
+              },
+            ],
+            warnings: [],
           },
         }
   const remote = {
@@ -442,7 +500,7 @@ async function loadClientHarness(values = {}) {
       if (values.mountError) throw values.mountError
       return async () => {}
     },
-    // 无参 list + strict 会话方法（P0-S0 恢复；U1a 侧栏只读接 getSessionConfig）。
+    // 无参 list + strict 会话方法 + 配置方法（U2）。
     meetingstone: {
       async list() {
         return remoteValue
@@ -451,6 +509,46 @@ async function loadClientHarness(values = {}) {
         sessionCalls.push(sessionId)
         if (values.sessionThrows) throw values.sessionThrows
         return sessionValue
+      },
+      async setSessionOverride(sessionId, roleId, field, value) {
+        sessionWrites.push({ sessionId, roleId, field, value })
+        if (values.setOverrideError) return values.setOverrideError
+        return { ok: true, value: { ok: true, written: true, scope: 'field' } }
+      },
+      async clearSessionOverride(sessionId, roleId, field) {
+        sessionClears.push({ sessionId, roleId, field })
+        if (values.clearOverrideError) return values.clearOverrideError
+        return { ok: true, value: { ok: true, written: true, removed: true } }
+      },
+      async setCliEnabled(cli, enabled) {
+        cliCalls.push({ method: 'setCliEnabled', cli, enabled })
+        if (values.setCliError) return { ok: true, value: values.setCliError }
+        return {
+          ok: true,
+          value: {
+            ok: true,
+            written: true,
+            enabled,
+            state: {
+              cli,
+              enabled,
+              ready: 'ready',
+              userPreference: enabled ? 'enabled' : 'disabled',
+              blockedReason: null,
+              manualSteps: [],
+              retryable: false,
+            },
+          },
+        }
+      },
+      async refreshCli(cli, force) {
+        cliCalls.push({ method: 'refreshCli', cli, force })
+        return { ok: true, value: { ok: true, cli: { cli, enabled: false, ready: 'blocked', blockedReason: 'not-installed', manualSteps: ['安装 CLI'], retryable: true } } }
+      },
+      async updateGlobalRole(roleId, patch) {
+        globalWrites.push({ roleId, patch })
+        if (values.globalWriteError) return { ok: true, value: values.globalWriteError }
+        return { ok: true, value: { ok: true, written: true, config: {} } }
       },
     },
     pluginInventory: {
@@ -535,6 +633,10 @@ async function loadClientHarness(values = {}) {
     sidebarTabRegisters,
     sidebarOpenCalls,
     sessionCalls,
+    sessionWrites,
+    sessionClears,
+    cliCalls,
+    globalWrites,
     react: fakeReact,
     logs,
   }
@@ -559,11 +661,19 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
 
   assert.equal(mounted.length, 1)
   assert.equal(mounted[0].package, 'dsh-meetingstone')
-  // list（无参 SRC）+ 三个 strict 会话方法（P0-S0 恢复）。
-  assert.equal(mounted[0].descriptors.length, 4)
+  // list（无参 SRC）+ 三个 strict 会话方法 + 三个 strict 配置方法（U2）。
+  assert.equal(mounted[0].descriptors.length, 7)
   assert.deepEqual(
     mounted[0].descriptors.map((d) => d.method),
-    ['list', 'getSessionConfig', 'setSessionOverride', 'clearSessionOverride'],
+    [
+      'list',
+      'getSessionConfig',
+      'setSessionOverride',
+      'clearSessionOverride',
+      'setCliEnabled',
+      'refreshCli',
+      'updateGlobalRole',
+    ],
   )
   assert.deepEqual(mounted[0].descriptors[0].parameters, [], 'list 必须无参')
   const listDesc = mounted[0].descriptors.find((d) => d.method === 'list')
@@ -700,19 +810,19 @@ test('Browser half：normalizeGlobal 收窄全局配置/CLI 数据', async () =>
       reasoning: '',
     },
   ])
-  assert.deepEqual(global.cli, [
-    {
-      cli: 'codex',
-      label: 'codex',
-      category: 'external',
-      installed: true,
-      path: '',
-      version: '1.2.3',
-      source: '',
-      notes: ['a', '2'],
-      checkedAt: '2026-11-11T00:00:00.000Z',
-    },
-  ])
+  // U2：固定三行（Codex / CodeBuddy / Claude），缺失项按 unknown/关闭呈现。
+  assert.deepEqual(
+    global.cli.map((row) => [row.cli, row.label, row.installed, row.version, row.enabled]),
+    [
+      ['codex', 'Codex', true, '1.2.3', false],
+      ['codebuddy', 'CodeBuddy', false, '', false],
+      ['claude', 'Claude Code', false, '', false],
+    ],
+  )
+  assert.equal(global.cli[0].ready, 'unknown')
+  assert.equal(global.cli[0].notes.join(','), 'a,2')
+  assert.equal(global.cli[0].checkedAt, '2026-11-11T00:00:00.000Z')
+  assert.equal(global.cli[1].retryable, true, '缺失行允许重新检测')
   assert.equal(global.cliError, null)
 })
 
@@ -749,6 +859,8 @@ test('Browser half：normalizeSessionConfigView 收窄脏数据（未知来源�
     roles: [],
     defaultRoleId: '',
     defaultRoleSource: 'default',
+    channels: [],
+    warnings: [],
   })
 
   const view = exports.__test.normalizeSessionConfigView({
@@ -776,6 +888,11 @@ test('Browser half：normalizeSessionConfigView 收窄脏数据（未知来源�
   )
   assert.deepEqual(view.roles[0].aliases, [])
   assert.equal(view.defaultRoleSource, 'session')
+  // 字段来源缺失 → default；三色状态缺失 → 灰/unknown（不伪造 ready）。
+  assert.equal(view.roles[0].fieldSources.name, 'default')
+  assert.equal(view.roles[0].state.color, 'gray')
+  assert.equal(view.roles[0].state.readiness, 'unknown')
+  assert.deepEqual(view.channels, [])
 })
 
 test('Browser half：渲染期错误走统一日志（module/phase/version/stack），返回回退节点', async () => {
@@ -968,40 +1085,64 @@ test('Browser half：右侧栏两步式注册（sidebarRightTabs + 两个 keyed 
   assert.equal(typeof pane[0].Component, 'function')
 })
 
-test('Browser half：右侧栏 pane 调 strict getSessionConfig，只读展示来源/覆盖', async () => {
+test('Browser half：右侧栏列表只有名称 + 三色二态开关；详情展示字段来源并可恢复继承', async () => {
   const { exports, registrations, sessionCalls } = await loadClientHarness()
   const pane = registrations.find((r) => r.options.name === 'sidebar.right.pane.tab')
   const props = pane.options.inject('sess-p1')
   assert.equal(props.sessionId, 'sess-p1')
   assert.equal(typeof props.loadSession, 'function')
   assert.equal(props.list, undefined, '侧栏不再消费无参 list 快照')
+  assert.equal(typeof props.setOverride, 'function', '列表开关只写会话覆盖')
+  assert.equal(typeof props.clearOverride, 'function', '字段可恢复继承')
+  assert.equal(typeof props.updateGlobalRole, 'function', '全局 scope 走 global writer')
 
   const result = await props.loadSession()
   assert.deepEqual(sessionCalls, ['sess-p1'], '必须带 sessionId 调 strict getSessionConfig')
   assert.equal(result.ok, true)
-  assert.equal(result.view.roles[0].roleId, 'role-sashi')
-  assert.equal(result.view.roles[0].sourceLayer, 'project', '来源层来自 sources.roles[].layer')
-  assert.deepEqual(result.view.roles[0].overrideFields, ['channel'], '覆盖来自 overrides[roleId]')
+  const role = result.view.roles[0]
+  assert.equal(role.roleId, 'role-sashi')
+  assert.equal(role.sourceLayer, 'session', '来源层来自 sources.roles[].layer')
+  assert.deepEqual(role.overrideFields, ['channel'], '覆盖来自 overrides[roleId]')
+  assert.equal(role.state.color, 'green', '三色来自 Host roleStates')
+  assert.equal(role.fieldSources['channel.model'], 'session')
+  assert.equal(role.fieldSources.name, 'global')
   assert.equal(result.view.defaultRoleSource, 'project')
 
   const t = (k) => k
-  const tree = exports.__test.renderRolePane(t, result.view)
-  const strings = []
-  collectStringsDeep(tree, strings)
-  assert.ok(strings.includes('沙僧'), '角色名可见')
-  assert.ok(strings.includes('SS'), '别名可见')
-  assert.ok(strings.includes('sourceLabel: sourceProject'), '来源（项目）可见')
-  assert.ok(strings.includes('overrideYes'), '有覆盖标记可见')
-  assert.ok(strings.includes('overrideFieldsLabel: '), '覆盖字段标签可见')
-  assert.ok(strings.includes('channel'), '覆盖字段名可见')
-  assert.ok(strings.includes('ch-acp-flash · acp · flash-1'), '通道可见')
-  assert.ok(strings.includes('paneReadonlyNote'), '顶部只读说明可见')
-  assert.ok(!findNode(tree, (n) => n.type === 'input'), '只读面板不得有输入框')
-  assert.ok(!findNode(tree, (n) => n.type === 'select'), '只读面板不得有选择器')
-  assert.ok(!strings.includes('restore'), '不得有恢复继承按钮')
-  assert.ok(!strings.includes('saved'), '不得有保存状态')
-  assert.ok(!strings.includes('manageRoles'), '面板内不得出现编辑入口')
+  const listTree = exports.__test.renderRolePane(t, result.view)
+  const listStrings = []
+  collectStringsDeep(listTree, listStrings)
+  assert.ok(listStrings.includes('沙僧'), '角色名可见')
+  assert.ok(listStrings.includes('roleListNote'), '面板说明可见')
+  const switchNode = findNodeDeep(
+    listTree,
+    (node) => node.type === 'button' && node.props && node.props.role === 'switch',
+  )
+  assert.ok(switchNode, '每行有原生 role=switch 控件')
+  assert.equal(switchNode.props['aria-checked'], true)
+  assert.match(String(switchNode.props.style.background), /state-success-primary/, '绿色=启用且正常/未知')
+  assert.ok(!listStrings.includes('SS'), '列表不显示别名')
+  assert.ok(!listStrings.includes('flash-1') && !listStrings.includes('flash-2'), '列表不显示模型')
+  assert.ok(!listStrings.includes('ch-acp-flash'), '列表不显示通道细节')
+
+  const detailTree = exports.__test.renderRolePane(t, result.view, {
+    selectedRoleId: 'role-sashi',
+    scope: 'session',
+    draft: exports.__test.draftOfRole(role),
+  })
+  const detailStrings = []
+  collectStringsDeep(detailTree, detailStrings)
+  for (const key of ['fieldName', 'fieldAliases', 'fieldDescription', 'fieldChannel', 'fieldModel', 'fieldReasoning', 'fieldPrompt']) {
+    assert.ok(detailStrings.includes(key), `详情字段 ${key} 可见`)
+  }
+  assert.ok(detailStrings.includes('sourceGlobal'), '字段来源（全局）可见')
+  assert.ok(detailStrings.includes('sourceSession'), '字段来源（会话）可见')
+  assert.ok(detailStrings.includes('restoreInherit'), '会话覆盖字段有恢复继承')
+  assert.ok(findNodeDeep(detailTree, (node) => node.type === 'input'), '详情可编辑（input）')
+  assert.ok(findNodeDeep(detailTree, (node) => node.type === 'select'), '通道/模型是真实选项（select）')
+  assert.ok(findNodeDeep(detailTree, (node) => node.type === 'textarea'), 'Prompt 可编辑（textarea）')
 })
+
 
 test('Browser half：getSessionConfig 失败时 pane 只显示一行错误摘要（不抛、不空白）', async () => {
   const failure = {
@@ -1019,7 +1160,7 @@ test('Browser half：getSessionConfig 失败时 pane 只显示一行错误摘要
   const strings = []
   collectStringsDeep(tree, strings)
   assert.ok(strings.includes('paneTitle'), '标题仍在（不是空白）')
-  assert.ok(strings.includes('paneReadonlyNote'), '只读说明仍在')
+  assert.ok(strings.includes('roleListNote'), '面板说明仍在')
   assert.ok(
     strings.join(' ').includes('[SESSION_GUI_SESSION_ROOT_UNKNOWN] 无法定位项目根'),
     '错误码 + 摘要可见',
@@ -1144,12 +1285,74 @@ function findNode(node, pred) {
   return false
 }
 
-test('Browser half：V1 三区结构 + 删除区块不再渲染 + 错误条件 + 高级默认折叠', async () => {
+/** 收集所有满足条件的节点（含函数组件展开一次）。 */
+function collectNodes(node, pred, acc = []) {
+  if (!node || typeof node !== 'object') return acc
+  if (pred(node)) acc.push(node)
+  const props = node.props || {}
+  if (typeof node.type === 'function' && props.children === undefined) {
+    collectNodes(node.type(props), pred, acc)
+    return acc
+  }
+  const children = Array.isArray(props.children) ? props.children : props.children ? [props.children] : []
+  for (const child of children) collectNodes(child, pred, acc)
+  return acc
+}
+
+/** 返回第一个满足条件的节点（含函数组件展开一次），便于断言控件 props。 */
+function findNodeDeep(node, pred) {
+  if (!node || typeof node !== 'object') return null
+  if (pred(node)) return node
+  const props = node.props || {}
+  if (typeof node.type === 'function' && props.children === undefined) {
+    return findNodeDeep(node.type(props), pred)
+  }
+  const children = Array.isArray(props.children) ? props.children : props.children ? [props.children] : []
+  for (const child of children) {
+    const found = findNodeDeep(child, pred)
+    if (found) return found
+  }
+  return null
+}
+
+test('Browser half：设置页只剩两区（外部 CLI 连接 / 默认角色配置）+ 错误一行摘要', async () => {
   const { exports } = await loadClientHarness()
   const t = (k) => k
   const noop = () => {}
 
-  // 模拟一个真实的 ready 快照（含角色/通道/CLI/全局配置/无错误）。
+  const cliStates = [
+    {
+      cli: 'codex',
+      label: 'Codex',
+      userPreference: 'enabled',
+      enabled: true,
+      ready: 'ready',
+      blockedReason: null,
+      manualSteps: [],
+      retryable: false,
+      installed: true,
+      version: '1.2.3',
+      path: 'C:/codex.exe',
+    },
+    {
+      cli: 'codebuddy',
+      label: 'CodeBuddy',
+      enabled: false,
+      ready: 'blocked',
+      blockedReason: 'not-installed',
+      manualSteps: ['安装 CodeBuddy'],
+      retryable: true,
+    },
+    {
+      cli: 'claude',
+      label: 'Claude Code',
+      enabled: false,
+      ready: 'unknown',
+      blockedReason: 'evidence-missing',
+      manualSteps: [],
+      retryable: true,
+    },
+  ]
   const snapshot = {
     roles: [
       { roleId: 'role-sashi', name: '沙僧', aliases: ['SS'], enabled: true, availability: 'available', channelId: '', provider: '', model: '', reasoning: '' },
@@ -1163,131 +1366,129 @@ test('Browser half：V1 三区结构 + 删除区块不再渲染 + 错误条件 +
       projectConfigFile: '.meetingstone.json',
       limits: { serializeWrites: true, maxParallelWritesTotal: 4, defaultIsolation: 'worktree' },
       channels: [{ channelId: 'ch-1', kind: 'acp-cli', provider: 'acp', model: 'm1', reasoning: 'low', description: '' }],
-      cli: [
-        { cli: 'codex', label: 'Codex CLI', installed: true, path: 'C:\\codex.exe', version: '1.2.3', source: 'appx', notes: [], checkedAt: null },
-        { cli: 'claude', label: 'Claude Code CLI', installed: false, path: '', version: '', source: null, notes: ['nf'], checkedAt: null },
-      ],
+      cli: cliStates,
       cliError: null,
     },
   }
 
-  // —— 默认（高级折叠） ——
-  const collapsed = exports.__test.renderSection(t, snapshot, { advancedOpen: false, openRoles: noop })
-  const collapsedStrings = []
-  collectStringsDeep(collapsed, collapsedStrings)
+  const tree = exports.__test.renderSection(t, snapshot, { cliStates, openRoles: noop })
+  const strings = []
+  collectStringsDeep(tree, strings)
 
-  // 三区标题存在
-  assert.ok(collapsedStrings.includes('cli'), '区1 CLI 连接标题存在')
-  assert.ok(collapsedStrings.includes('collab'), '区2 默认协作配置标题存在')
-  assert.ok(collapsedStrings.includes('advanced'), '区3 高级设置标题存在')
+  // 只有两区
+  assert.ok(strings.includes('cliSection'), '区 1 外部 CLI 连接存在')
+  assert.ok(strings.includes('rolesSection'), '区 2 默认角色配置存在')
+  for (const removed of [
+    'collab',
+    'advanced',
+    'openAdvanced',
+    'parallelLimit',
+    'serializeWrites',
+    'dispatchNotes',
+    'limits',
+    'rules',
+    'models',
+    'categoryHost',
+    'hostName',
+    'cliPaths',
+    'channelInstances',
+    'configFile',
+    'projectConfigFile',
+    'isolation',
+  ]) {
+    assert.ok(!strings.includes(removed), `已删除的区块/字段不再渲染：${removed}`)
+  }
 
-  // CLI 连接区分宿主 / 外部，且保持一行一个（无完整路径）
-  assert.ok(collapsedStrings.includes('categoryHost'), '宿主分类标签存在')
-  assert.ok(collapsedStrings.includes('categoryExternal'), '外部 CLI 分类标签存在')
-  assert.ok(collapsedStrings.includes('hostName'), '宿主行名称存在')
-  assert.ok(!collapsedStrings.includes('cliPaths'), '主页面不显示 CLI 完整路径')
+  // 三行只有名称 + Switch：不显示版本、路径、额度、通道 ID、徽章。
+  for (const label of ['Codex', 'CodeBuddy', 'Claude Code']) {
+    assert.ok(strings.includes(label), `${label} 行存在`)
+  }
+  assert.ok(!strings.includes('1.2.3'), '不显示版本')
+  assert.ok(!strings.includes('C:/codex.exe'), '不显示路径')
+  const switches = collectNodes(tree, (node) => node.type === 'button' && node.props && node.props.role === 'switch')
+  assert.equal(switches.length, 3, '三行各一个原生 Switch')
+  assert.deepEqual(
+    switches.map((node) => node.props['aria-checked']),
+    [true, false, false],
+    'Switch 反映 Host 派生的 enabled（unset+ready 默认开）',
+  )
+  assert.match(String(switches[0].props.style.background), /state-success-primary/, '开启态绿色 token')
 
-  // 删除的区块不再渲染
-  assert.ok(!collapsedStrings.includes('models'), '默认模型区域整体删除（标题不再渲染）')
-  assert.ok(!collapsedStrings.includes('projectConfigFile'), '项目配置文件路径展示删除')
-  assert.ok(!collapsedStrings.includes('limits'), '旧的「额度与并发策略」独立区删除')
-  assert.ok(!collapsedStrings.includes('rules'), '旧的「全局调度规则」独立区删除')
-  assert.ok(!collapsedStrings.includes('errors'), '旧的「最近错误」独立区删除')
-
-  // 默认角色不重复：只在协作区出现一次
+  // 区 2：模板名 + 一句说明 + 角色数量 + 管理入口。
+  assert.ok(strings.includes('templateName'), '模板名存在')
+  assert.ok(strings.includes('templateDesc'), '模板说明存在')
+  assert.ok(strings.includes('roleCount'), '角色数量存在')
   assert.equal(
-    collapsedStrings.filter((s) => s === 'defaultRole').length,
+    strings.filter((value) => value === '2').length,
     1,
-    '默认角色只在协作区出现一次（不重复）',
-  )
-
-  // 通道模型列表移入高级：折叠时不可见
-  assert.ok(!collapsedStrings.includes('channelInstances'), '通道实例列表移入高级（折叠时不可见）')
-
-  // 高级默认折叠：展开后可见
-  const expanded = exports.__test.renderSection(t, snapshot, { advancedOpen: true, openRoles: noop })
-  const expandedStrings = []
-  collectStringsDeep(expanded, expandedStrings)
-  assert.ok(expandedStrings.includes('channelInstances'), '高级展开后通道实例可见')
-  assert.ok(expandedStrings.includes('cliPaths'), '高级展开后 CLI 完整路径可见')
-  assert.ok(expandedStrings.includes('configFile'), '高级展开后配置文件入口可见')
-  assert.ok(expandedStrings.includes('isolation'), '高级展开后默认隔离可见')
-  assert.ok(!collapsedStrings.includes('cliPaths'), '高级折叠时 CLI 完整路径不可见')
-  assert.ok(!collapsedStrings.includes('configFile'), '高级折叠时配置文件入口不可见')
-  assert.ok(!collapsedStrings.includes('isolation'), '高级折叠时默认隔离不可见')
-
-  // 不显式传 advancedOpen 时也必须默认收起。
-  const defaultTree = exports.__test.renderSection(t, snapshot, { openRoles: noop })
-  const defaultStrings = []
-  collectStringsDeep(defaultTree, defaultStrings)
-  assert.ok(!defaultStrings.includes('cliPaths'), '高级区默认收起（不传 advancedOpen）')
-
-  // 折叠切换按钮存在且 aria-expanded=false（默认折叠）
-  assert.ok(
-    findNode(collapsed, (n) => n.props && n.type === 'button' && (n.props.children === 'openAdvanced' || n.props.children === 'closeAdvanced')),
-    '高级区有展开/收起按钮',
+    '角色数量来自 snapshot.roles.length',
   )
   assert.ok(
-    findNode(collapsed, (n) => n.props && n.props['aria-expanded'] === false),
-    '折叠时 aria-expanded=false',
-  )
-
-  // 协作区「管理角色」入口按钮存在
-  assert.ok(
-    findNode(collapsed, (n) => {
-      if (!n.props || n.type !== 'button') return false
+    findNode(tree, (node) => {
+      if (!node.props || node.type !== 'button') return false
       const tmp = []
-      collectStrings(n, tmp)
+      collectStrings(node, tmp)
       return tmp.includes('manageRoles')
     }),
-    '协作区有「管理角色」入口按钮',
+    '「管理角色」入口存在',
   )
 
-  // 错误条件显示：首屏一行摘要；详情默认折叠；无错误不占位。
+  // 无错误不占位。
+  assert.ok(!findNode(tree, (node) => node.props && node.props.role === 'alert'), '无错误不渲染 alert')
+
+  // 错误：一行摘要 + 详情默认折叠。
   const withError = {
     ...snapshot,
     lastError: { code: 'ROLE_NOT_FOUND', message: '没有这个角色', at: '2026-11-11T00:00:00.000Z', source: 'dispatch' },
   }
-  const errCollapsed = exports.__test.renderSection(t, withError, {
-    advancedOpen: true,
-    errorOpen: false,
-    openRoles: noop,
-  })
+  const errTree = exports.__test.renderSection(t, withError, { cliStates, openRoles: noop })
   const errStrings = []
-  collectStringsDeep(errCollapsed, errStrings)
-  assert.ok(findNode(errCollapsed, (n) => n.props && n.props.role === 'alert'), '有错误时渲染 alert 警告')
+  collectStringsDeep(errTree, errStrings)
+  assert.ok(findNode(errTree, (node) => node.props && node.props.role === 'alert'), '有错误时 alert')
   assert.ok(errStrings.join(' ').includes('ROLE_NOT_FOUND'), '错误码在摘要中可见')
   assert.ok(errStrings.includes('errorDetails'), '查看详情入口存在')
-  assert.ok(!errStrings.includes('errorHideDetails'), '默认不显示收起详情')
-  assert.ok(!errStrings.includes('2026-11-11T00:00:00.000Z'), '详情（时间）默认折叠')
-  assert.ok(!errStrings.includes('ROLE_NOT_FOUND · dispatch'), '详情（来源）默认折叠')
+  assert.ok(!errStrings.includes('2026-11-11T00:00:00.000Z'), '详情默认折叠')
   assert.ok(
     findNode(
-      errCollapsed,
-      (n) =>
-        n.props &&
-        n.props.style &&
-        n.props.style.whiteSpace === 'nowrap' &&
-        String(n.props.children).includes('ROLE_NOT_FOUND'),
+      errTree,
+      (node) =>
+        node.props &&
+        node.props.style &&
+        node.props.style.whiteSpace === 'nowrap' &&
+        String(node.props.children).includes('ROLE_NOT_FOUND'),
     ),
-    '摘要必须是一行（nowrap + ellipsis）',
+    '摘要一行（nowrap）',
   )
-
-  const errExpanded = exports.__test.renderSection(t, withError, {
-    advancedOpen: true,
+  const expanded = exports.__test.renderSection(t, withError, {
+    cliStates,
     errorOpen: true,
     openRoles: noop,
   })
-  const errExpandedStrings = []
-  collectStringsDeep(errExpanded, errExpandedStrings)
-  assert.ok(errExpandedStrings.includes('errorHideDetails'), '展开后按钮变为收起详情')
-  assert.ok(errExpandedStrings.includes('2026-11-11T00:00:00.000Z'), '展开后显示时间')
-  assert.ok(errExpandedStrings.includes('ROLE_NOT_FOUND · dispatch'), '展开后显示来源')
+  const expandedStrings = []
+  collectStringsDeep(expanded, expandedStrings)
+  assert.ok(expandedStrings.includes('errorHideDetails'))
+  assert.ok(expandedStrings.includes('2026-11-11T00:00:00.000Z'))
 
-  assert.ok(
-    !findNode(collapsed, (n) => n.props && n.props.role === 'alert'),
-    '无错误时不渲染 alert（不占位、不显示「无」）',
-  )
+  // preflight 失败：开关保持关 + 一行摘要 + 人工步骤 + 重新检测。
+  const failed = exports.__test.renderSection(t, snapshot, {
+    cliStates,
+    cliFailures: {
+      codex: {
+        code: 'CLI_PREFERENCE_PREFLIGHT_FAILED',
+        message: '检测未通过（not-installed），保持关闭',
+        manualSteps: ['安装对应 CLI', '点「重新检测」'],
+        retryable: true,
+      },
+    },
+    openRoles: noop,
+  })
+  const failedStrings = []
+  collectStringsDeep(failed, failedStrings)
+  assert.ok(failedStrings.join(' ').includes('保持关闭'), '失败摘要可见')
+  assert.ok(failedStrings.includes('manualSteps：安装对应 CLI；点「重新检测」') || failedStrings.some((value) => String(value).startsWith('manualSteps')), '人工步骤标签可见')
+  assert.ok(failedStrings.includes('cliRetry'), '重新检测入口可见')
+  const failedSwitches = collectNodes(failed, (node) => node.type === 'button' && node.props && node.props.role === 'switch')
+  assert.equal(failedSwitches[0].props['aria-checked'], false, '失败后开关保持关（不做乐观假开启）')
 })
 
 test('strict 契约：Host descriptor 与 Client contribution 的 method/参数/typeSymbol 完全一致', async () => {

@@ -4,28 +4,29 @@
 > `meetingstone-dispatch` Job（`角色简称 · 简短目标`，见 §7）；查看/停止任务使用宿主
 > `@deepseek-ai/dsh-tool-jobs` 提供的能力与面板。本页面只负责角色/通道/错误的只读展示，不复制任务列表。
 
-范围：**只读，接真实数据**。V1 精简为三个区，复用宿主主题 token / i18n / a11y；
-控件按官方 CSS 自绘（**不 require primitives**），不新增 UI 体系：
+范围：**V1 最终 UI**（U2+U3）。设置页只保留两个区；右侧栏「本对话角色」提供三色二态开关与可编辑的二级详情。
+所有数据接真实 Remote，不新增 UI 库、不 require primitives、不做 DOM/CSS 注入；控件是原生
+`input/select/textarea/button[role=switch]`，样式只用宿主 token（`var(--dsw-alias-*)`、
+`--dsw-radius-*`、`--dsw-focus-ring-*`）。历史章节（§1–§9）保留为调研与实现证据；**当前行为以 §10 为准**。
 
-1. **CLI 连接**：紧凑一行一个，名称 + 版本 + 状态；区分宿主（DeepSeek Harness）与外部
-   CLI（codex / codebuddy / claude）；完整路径移入高级。
-2. **默认协作配置**：角色数量 + 默认角色 + 管理入口合并在同一行（左右对齐），全局并发上限、
-   同项目写任务串行、全局调度补充规则（可读文本）。
-3. **高级设置（默认收起）**：默认隔离方式、CLI 完整路径、通道实例、配置文件与诊断日志、
-   打开配置文件入口。
+1. **外部 CLI 连接**：Codex / CodeBuddy / Claude 三行，每行只有名称 + 原生风格 Switch。
+   不显示版本、路径、额度、通道 ID、宿主信息、徽章。开关读 CLI 偏好（`unset` 且 preflight
+   通过 → 默认开）；关闭持久化；开启前强制 preflight，失败保持关并显示一行摘要 + 人工步骤 +
+   「重新检测」。不做自动修复。
+2. **默认角色配置**：模板名「取经五人组」+ 一句说明 + 角色数量 +「管理角色」入口。
 
-删除 / 移出主页面：**默认模型区域整体删除**（模型 / 思考强度属于角色定义）；通道实例列表
-移入高级；项目配置文件路径展示删除（自动识别）；重复的默认角色配置项合并；错误首屏只显示
-一行摘要，详情默认折叠，无错误不占位。
+删除：并行上限、同项目串行、全局调度、高级设置、通道实例、配置文件路径、DSH 宿主行。
 
-不做搜索 / 筛选 / 排序 / 操作按钮 / 编辑 / 任务控制 / 图表 / 动画（除协作区的「管理角色」
-入口按钮，点击打开既有右侧栏会话角色面板）。遵循宿主设计：控件按官方 CSS 自绘（本地
-`Tag` span + 16px 内联 SVG），只用主题 token（`var(--dsw-alias-label-*)`、
-`--dsw-alias-border-l4`、`--dsw-alias-button-tool-bar-*`、`--dsw-radius-*`、
-`--dsw-focus-ring-*`）与官方间距/字号（gap 12/10px、13px/20px、max-width 760px），
-不自带 CSS 框架、不自造色板。**不 require** `@deepseek-ai/dsh-client-ui-primitives`：
-P0-U0 核验确认该包不在 asar 的 `node_modules`，且官方
-`practices.md:35` 明确禁止第三方插件 require 它。
+右侧栏**本对话角色**：每行角色名 + 三色二态 Switch（灰=关闭或依赖阻断；黄=启用且额度耗尽；
+绿=启用且正常/未知）；点击名称进入同栏二级详情（全局 / 本会话两 scope 复用），可编辑名称、简称、
+描述、CLI/通道、模型、思考强度、角色 Prompt；每字段显示来源并可恢复继承。开关只写当前会话覆盖
+（`session` scope），不污染全局/项目，失败不做乐观假开启。
+
+不做搜索 / 筛选 / 排序 / 图表 / 动画；不新增模型注册表 / 路由 / 接替规则。错误首屏只显示
+一行摘要，详情默认折叠，无错误不占位。遵循宿主设计：本地 `Tag` span + 16px 内联 SVG +
+主题 token，不自带 CSS 框架、不自造色板。**不 require**
+`@deepseek-ai/dsh-client-ui-primitives`：P0-U0 核验确认该包不在 asar 的 `node_modules`，
+且官方 `practices.md:35` 明确禁止第三方插件 require 它。
 
 ## 1. 调研结论（证据）
 
@@ -93,7 +94,8 @@ Settings 页面
   5. 右侧栏面板同样只消费无参 `list()`，只读渲染角色名/别名/可用性/通道。
 - 组件渲染 V1 三区（CLI 连接 / 默认协作配置 / 高级设置），高级区默认收起。除协作区的
   「管理角色」入口按钮外，无任何编辑/搜索/动画控件。加载中显示「加载中…」，失败显示
-  「读取宿主数据失败」+ 错误信息，**不伪造数据**。
+  「读取宿主数据失败」+ 错误信息，**不伪造数据**。（**历史阶段**：0.2.0 只读页；
+  U2+U3 已改为两区 + 可编辑详情，见 §10。）
 
 > **V1 字段核查（2026-11-11）**：设置页投影的底层字段逐一核过——
 > `maxParallelWritesTotal` / `serializeWrites` / `defaultIsolation` 真实生效（见
@@ -151,7 +153,7 @@ node scripts/verify-package.mjs
 2. 确认 Loader 行 `- id: meetingstone` 处于 enabled（`cordis.patch.yml` 已提供）。
 3. 重启 DSH / 等 HMR，让 client module system 为裸包名根行 serve `./client`。
 4. 打开 Settings（外壳由 `dsh-client-ui-settings-general` 提供）→ 侧栏「集合石」section。
-5. 预期看到 V1 三区：
+5. 预期看到 V1 三区（**历史阶段**；U2+U3 当前为两区，见 §10）：
    - **CLI 连接**：紧凑一行一个，名称 + 版本 + 状态；首行「宿主 / DeepSeek Harness /
      运行中」，其余为「外部」CLI（codex / codebuddy / claude）的检测状态与版本；
    - **默认协作配置**：角色数量 + 默认角色 + 「管理角色」入口合并在同一行（左右对齐），
@@ -166,6 +168,9 @@ node scripts/verify-package.mjs
    解析到 `@deepseek-ai/dsh-typert-protocol`，页面会显示读取失败而不是假数据。
 
 ## 5. V1 UI：对话顶部入口 + 右侧栏只读角色面板（决策 2/3/4/5/6）
+
+> **历史阶段**：本节与 §9 描述的是只读面板；U2+U3 已把同一面板升级为三色二态 + 二级详情，
+> 当前行为以 §10 为准。
 
 在 0.2.0 只读页之外，本版提供「会话角色」入口与只读面板，复用同一套官方 slot 注册；
 设置页仍用无参 `list()`，侧栏面板改用 strict `getSessionConfig(sessionId)`，不新建 UI
@@ -214,7 +219,7 @@ node scripts/verify-package.mjs
 
 ### 5.4 Host 远程方法：`list` + 三个 strict 会话方法（P0-S0）
 
-`src/gui/host.js` 注册四个方法：
+`src/gui/host.js` 注册四个方法（**历史阶段**；U2+U3 已扩到 7 个，见 §10.4）：
 
 | 方法 | 参数 codec | 说明 |
 | --- | --- | --- |
@@ -471,6 +476,10 @@ typeSymbol 一致；真实 `TypertRegistry` 接受 manifest 且 `dispose()` 后�
 
 ## 9. U1a 客户端合规化（去 primitives + strict 只读面板）
 
+> **已被 §10 取代（U2+U3）**：本节描述的是“只读面板”阶段；当前版本已在同一面板接入
+> 三色二态开关与二级详情（会话写只写差异，全局写走 S2 global writer）。合规化结论
+> （不 require primitives、priority 字符串、统一日志）仍然有效。
+
 ### 9.1 合规说明
 
 | 项 | 之前 | U1a 之后 | 依据 |
@@ -503,3 +512,125 @@ typeSymbol 一致；真实 `TypertRegistry` 接受 manifest 且 `dispose()` 后�
 4. 若真机确认 `sidebarRightTabs.open` 等入口方法名有变化，只调整 `openRolePanelOf`，不影响
    只读数据链路。
 
+## 10. U2+U3 最终 UI（两区设置页 + 三色二态 + 二级详情）
+
+### 10.1 设置页（`settings.section`）
+
+只渲染两个区，顺序固定：
+
+| 区 | 内容 | 不显示 |
+| --- | --- | --- |
+| 外部 CLI 连接 | Codex / CodeBuddy / Claude 三行，名称 + `button[role=switch]` | 版本、路径、额度、通道 ID、宿主行、徽章 |
+| 默认角色配置 | 「取经五人组」+ 一句说明 + 角色数量 +「管理角色」 | 并发上限、同项目串行、全局调度、高级设置、通道实例、配置文件路径 |
+
+开关语义（Host `src/gui/config-api.js` + `src/cli/preferences.js`）：
+
+- **读**：`cliPreferences[cli]` 只有 `true/false` 是显式偏好；缺失 = `unset`。
+  `unset` 且 preflight `ready` → 生效开关默认开（不写盘）。
+- **关**：立即写 `false` 并持久化，不跑 preflight。
+- **开**：Host 强制 `preflight.check(cli, { force:true })`；`ready !== 'ready'` 时
+  **不写任何配置**（保持关闭），返回 `CLI_PREFERENCE_PREFLIGHT_FAILED`、
+  `blockedReason` / `manualSteps` / `retryable`。客户端在该行显示一行摘要 + 人工步骤 +
+  「重新检测」（`refreshCli(force=true)`），失败时 Switch 强制显示为关，**不做乐观假开启**。
+- 不做自动修复：不安装、不登录、不改 PATH/ACL、不写宿主配置。
+
+错误：首屏一行 `[code] message`（`nowrap + ellipsis`，全文在 `title`），详情按钮展开
+时间/来源；无错误不渲染 alert、不占位。
+
+### 10.2 角色列表（`sidebar.right.pane.tab`）
+
+- 每行只有角色名（可点击，进入同栏详情）+ 三色二态 Switch；**不显示**模型、别名、通道细节。
+- 三色来自 Host `deriveRoleView`（`src/gui/state-model.js`）：
+  - 灰：`userPreference=disabled` 或 `readiness != ready`；
+  - 黄：非 disabled + ready + `quota=exhausted`；
+  - 绿：非 disabled + ready + quota 为 available/unknown/not_applicable。
+  Switch 只有开/关两态，颜色只表达上述语义（不是自绘三态控件）。
+- 阻断/额度原因：Switch `title` + 行下一行小字说明（`readinessReason` / `quota`），不展开细节。
+- 列表开关只调用 `setSessionOverride(sessionId, roleId, 'enabled', next)`：
+  - 写的是**当前会话**覆盖，不碰全局/项目；
+  - 等值写入由 Host `diffRoleOverride` 归一为“删除覆盖”（恢复继承）；
+  - 失败原样返回错误，不 reload、不改变列表状态；成功后才 reload。
+
+### 10.3 二级详情（会话 / 全局两 scope 复用）
+
+- 同栏切换（列表 ↔ 详情，`selectedRoleId` 局部 state）；不新造弹窗体系。
+- 可编辑字段：名称、简称（逗号分隔）、描述、CLI/通道（`channel.channelId`）、模型、思考强度、
+  角色 Prompt。
+- **选项只列真实可用项**：全部来自 `cfg.channels`（经 `getSessionConfig` 的 `channels` 返回）。
+  - 选中某个 `channelId` → 模型/强度只列该实例声明的值；
+  - 未选 `channelId` → 列同 `kind/provider` 实例的值（去重）；
+  - 没有真实选项 → 显示「不支持 · 当前通道没有配置模型/思考强度」，不伪造下拉项。
+  - 切换 `channelId` 时同时对齐 `kind/provider/model/reasoning`（避免派单
+    `CHANNEL_MISMATCH`）；无法对齐时提示「待配置」并拒绝保存。
+- **字段来源**：`sources.roles[roleId].fields[<field>]` 投影为 全局/项目/会话/默认 Tag，
+  逐字段展示。
+- **恢复继承**：仅会话 scope 且该字段来源为 `session` 时出现「恢复继承」→
+  `clearSessionOverride(sessionId, roleId, field)`。全局层没有“删除字段”语义，因此不提供
+  伪造的全局恢复入口，只显示来源。
+- **会话修改只写差异**：客户端把 draft 与生效角色逐字段比较，只对变化字段调用
+  `setSessionOverride`；等值字段由 Host 再次 diff 并删除旧覆盖。任一步失败立即停止并显示
+  一行错误摘要（已成功的字段不回滚，避免隐式写第二次）。
+- **全局修改**：一次 `updateGlobalRole(roleId, patch)`（S2 global writer，profile patch
+  保留未知字段）；保存前必须先点一次「保存修改」进入内联二次确认，再点「确认」。
+  全局层不能清空 Prompt/名称，也不能“删除通道字段”，相关输入会返回明确错误。
+- 会话新增角色（只在会话 `roles` 里、全局不存在的角色）：全局 scope 仍可查看字段来源，
+  但写入会由 global writer 以 `GLOBAL_CONFIG_ROLE_NOT_FOUND` 拒绝，客户端显示该错误。
+
+### 10.4 Remote 契约（7 个方法）
+
+`src/gui/typert-spec.js` 的 `GUI_STRICT_METHODS`（Host 注册）与 client descriptor 逐字一致：
+
+| 方法 | 参数（全部 strict，真实 zod） | 语义 |
+| --- | --- | --- |
+| `list` | 无参（SRC marker） | 全局只读快照 + CLI 状态 |
+| `getSessionConfig` | `sessionId` | 三层生效角色 + overrides + sources + **channels + roleStates** |
+| `setSessionOverride` | `sessionId/roleId/field/value` | 字段级会话覆盖（只写差异） |
+| `clearSessionOverride` | `sessionId/roleId/field?` | 恢复单字段/整角色继承 |
+| `setCliEnabled` | `cli/enabled` | CLI 开关（开前强制 preflight；失败不写） |
+| `refreshCli` | `cli/force` | 只读重检（force 绕过 probe 缓存），不写配置 |
+| `updateGlobalRole` | `roleId/patch` | S2 global writer 字段级写入 |
+
+新增 typeSymbol：`#CliName`（`z.enum(['codex','codebuddy','claude'])`）、
+`#BooleanValue`（`z.boolean()`）、`#JsonResult`（`z.unknown()`，写结果原样透传）。
+`SessionConfigView` 的 strict result 增加可选的 `channels` / `roleStates`；旧 Host 不返回时
+客户端按空数组处理（不伪造状态）。
+
+### 10.5 测试与验证
+
+```bash
+node scripts/run-tests.mjs   # 551 项：0 fail
+npm run verify               # exit 0（host-schema / manifest / package）
+```
+
+新增/更新的 stub：
+
+- `tests/gui-u2-u3.test.mjs`：设置页两区、失败保持关、三色派生、会话只写差异、
+  恢复继承、详情字段来源、真实选项/不支持、全局 patch 差异。
+- `tests/gui.test.mjs`：7 个 descriptor、Host/Client typeSymbol 一致、两区渲染、
+  CLI 失败行摘要/人工步骤/重检、角色列表无模型/别名、详情 input/select/textarea。
+- `tests/session-gui-api.test.mjs`：`getSessionConfig` 透传 `channels` / `roleStates`，
+  `roleState` 抛错只丢状态不影响继承视图。
+- `tests/typert-contract.test.mjs` / `tests/gui-primitives.stub.test.mjs`：6 个 strict 端点 /
+  7 个 descriptor，source 审计仍禁止 primitives。
+
+### 10.6 限制与未验证项（如实登记）
+
+- **真机未验证**：本任务未启动 DSH 桌面端、未改 profile、未重启；两区实际渲染、
+  `button[role=switch]` 在宿主 webview 的外观、`select` 选项、`getSessionConfig` 新增
+  `channels/roleStates` 的真实传输，都只做源码级 + stub 断言。真机要点：
+  设置页只出现两区；关闭 Codex 后重启仍关；在未安装 CLI 上开启 → switch 回弹为关并出现
+  人工步骤；角色列表三色与 Host 状态一致；开关后只改 `.meetingstone/sessions/<id>.json`；
+  详情「恢复继承」后字段消失；全局保存出现二次确认。
+- **全局层不能删除字段**：S2 global writer 是字段合并，没有 delete 语义，因此全局 scope
+  不提供“恢复继承”；需要删除全局字段时只能手工编辑 profile。这是当前 API 的边界，不是 UI 遗漏。
+- **模型/强度不是注册表**：只列 `cfg.channels` 已声明的值；同一 provider 的其他模型不会
+  自动出现。新增模型仍需先在 profile 的 `channels` 中配置（V1 边界）。
+- **会话保存不是事务**：多字段按顺序写；中途失败会保留已成功字段并显示错误，不回滚。
+  若需要原子性，应在后续增加 Host 端“批量覆盖”方法（本期未新增）。
+- **全局写仍受宿主覆盖限制**：profile 被 home patch/命令行 overlay 覆盖时返回
+  `GLOBAL_CONFIG_OVERRIDDEN`，UI 显示一行错误，不做绕过。
+- **三色中的额度仍是 unknown**：V1 没有可靠额度源，除按量付费 `not_applicable` 外不会
+  出现黄色；黄色只在 Host 显式注入 `quota=exhausted` 时出现（测试覆盖）。
+- **真机未验证 Remote 的 7 个 descriptor**：新增 3 个 strict 方法已过真实
+  `ctx.typert.register()` 单测，但真实 Gateway 往返仍待隔离 profile 验证；若出现
+  `has no strict codec`，按 §8.4 的日志定位。

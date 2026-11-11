@@ -313,7 +313,7 @@ function findSvg(node) {
 test('Browser half：不 require primitives 也能完成注册，header 用内联 SVG', async () => {
   const { registrations, mounted, logs, sessionCalls } = await loadClientWithoutPrimitives()
   assert.equal(mounted.length, 1, 'Remote contribution 仍应挂载')
-  assert.equal(mounted[0].descriptors.length, 4, 'list + 三个 strict 会话方法')
+  assert.equal(mounted[0].descriptors.length, 7, 'list + 三个 strict 会话方法 + 三个 strict 配置方法')
 
   const names = registrations.map((entry) => entry.options.name)
   assert.deepEqual(names, [

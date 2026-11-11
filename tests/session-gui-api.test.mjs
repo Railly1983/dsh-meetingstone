@@ -348,3 +348,41 @@ test('新会话未派单：官方 ctx.sessions.header.cwd 即可读取，不依�
   assert.equal(view.effective.roles.length, 1)
   assert.equal(view.sources.roles['role-sashi'].layer, 'global')
 })
+
+test('getSessionConfig：透传真实通道选项与已派生的 roleStates（三色）', () => {
+  const cfg = { roles: GLOBAL_ROLES, projectConfigFile: '.meetingstone.json' }
+  const channels = [
+    { channelId: 'ch-acp', kind: 'acp-cli', provider: 'acp', model: 'm1', reasoning: 'low' },
+  ]
+  const api = createSessionGuiApi({
+    cfg,
+    projectStore: { get: () => ({ config: {}, errors: [] }) },
+    sessionStore: createSessionOverrideStore(memorySessionFs().deps),
+    resolveProjectRoot: () => ROOT,
+    channels,
+    // 生产环境传 roleView；这里用最小派生确认“传什么回什么”，不在本层猜颜色。
+    roleState: (role, sources) => ({
+      roleId: role.roleId,
+      color: role.enabled === false ? 'gray' : 'green',
+      layer: sources.roles[role.roleId]?.layer,
+    }),
+  })
+  const view = api.getSessionConfig('sess-1')
+  assert.deepEqual(view.channels, channels)
+  assert.deepEqual(view.roleStates, [
+    { roleId: 'role-sashi', color: 'green', layer: 'global' },
+  ])
+  // roleState 抛错时只丢该类状态，不影响 effective/overrides/sources。
+  const broken = createSessionGuiApi({
+    cfg,
+    projectStore: { get: () => ({ config: {}, errors: [] }) },
+    sessionStore: createSessionOverrideStore(memorySessionFs().deps),
+    resolveProjectRoot: () => ROOT,
+    roleState: () => {
+      throw new Error('state boom')
+    },
+  })
+  const brokenView = broken.getSessionConfig('sess-1')
+  assert.deepEqual(brokenView.roleStates, [])
+  assert.equal(brokenView.effective.roles.length, 1)
+})

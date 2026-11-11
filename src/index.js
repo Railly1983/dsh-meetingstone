@@ -29,7 +29,7 @@ import { resolveEffectiveConfig } from './session/config.js'
 import { createNodeSessionOverrideStore } from './session/store.js'
 import { createRunStore } from './run-store.js'
 import { createWorktreeManager } from './worktree.js'
-import { createGuiState, registerGuiRemote } from './gui/host.js'
+import { createGuiState, registerGuiRemote, roleView, channelDetailView } from './gui/host.js'
 import { createSessionGuiApi } from './gui/session.js'
 import { createSessionRootResolver } from './gui/session-root.js'
 
@@ -128,6 +128,10 @@ export function apply(ctx, config = {}) {
       ctx,
       fallback: (sessionId) => sessionRoots.get(sessionId) ?? null,
     }),
+    // 详情页选项只来自真实通道表；不另建模型注册表。
+    channels: (cfg.channels ?? []).map(channelDetailView),
+    // 三色/就绪/额度与设置页同源（deriveRoleView）。
+    roleState: (role, sources) => roleView(role, ctx, sources),
   })
 
   /** @type {import('./roles/registry.js').RoleRegistry} */
@@ -472,6 +476,7 @@ export function apply(ctx, config = {}) {
     const guiRemote = registerGuiRemote(ctx, {
       snapshot: () => gui.fullSnapshot(),
       sessionApi: sessionGuiApi,
+      configApi,
     })
     const remoteStatus =
       guiRemote.registered === true

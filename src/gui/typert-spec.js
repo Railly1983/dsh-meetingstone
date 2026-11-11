@@ -33,13 +33,30 @@ export const SESSION_REMOTE_TYPES = Object.freeze({
   value: 'dsh-meetingstone/types#JsonValue',
   sessionConfigView: 'dsh-meetingstone/types#SessionConfigView',
   overrideResult: 'dsh-meetingstone/types#SessionOverrideResult',
+  // U2：外部 CLI 开关 / 重新检测 / 全局角色写入。
+  cliName: 'dsh-meetingstone/types#CliName',
+  booleanValue: 'dsh-meetingstone/types#BooleanValue',
+  jsonResult: 'dsh-meetingstone/types#JsonResult',
 })
 
-/** 三个方法名（Client contribution 与 Host spec 共用）。 */
+/** 三个会话方法名（Client contribution 与 Host spec 共用）。 */
 export const SESSION_REMOTE_METHODS = Object.freeze([
   'getSessionConfig',
   'setSessionOverride',
   'clearSessionOverride',
+])
+
+/** 三个配置方法名（U2：CLI 开关 + 重新检测 + 全局角色字段写入）。 */
+export const CONFIG_REMOTE_METHODS = Object.freeze([
+  'setCliEnabled',
+  'refreshCli',
+  'updateGlobalRole',
+])
+
+/** Host 注册的全部 strict 方法（会话 + 配置；`list` 仍走无参 SRC）。 */
+export const GUI_STRICT_METHODS = Object.freeze([
+  ...SESSION_REMOTE_METHODS,
+  ...CONFIG_REMOTE_METHODS,
 ])
 
 /**
@@ -100,6 +117,12 @@ export function createSessionRemoteSpec(zod) {
   const field = () => z.string().min(1).max(128)
   /** value：任意 JSON；Gateway 在 parse 后还会做 `assertJsonValue`。 */
   const value = () => z.unknown()
+  /** cli：只允许已支持的外部 CLI 名（业务层还会再校验一次）。 */
+  const cliName = () => z.enum(['codex', 'codebuddy', 'claude'])
+  /** force：重新检测是否绕过 probe 缓存。 */
+  const booleanValue = () => z.boolean()
+  /** 配置写结果：形状由业务层决定，这里只要求是可 JSON 化的任意值。 */
+  const jsonResult = () => z.unknown()
 
   const sessionConfigView = () =>
     z.object({
@@ -108,6 +131,9 @@ export function createSessionRemoteSpec(zod) {
       sources: z.unknown(),
       // P0-S2：读取层非致命告警（未知字段/坏字段）。可选，旧 Host 不返回也兼容。
       warnings: z.array(z.unknown()).optional(),
+      // U2：详情页选项与角色三色状态；缺省为空（不伪造）。
+      channels: z.array(z.unknown()).optional(),
+      roleStates: z.array(z.unknown()).optional(),
     })
 
   const overrideResult = () =>
@@ -190,6 +216,57 @@ export function createSessionRemoteSpec(zod) {
           }),
         ],
         result: result(SESSION_REMOTE_TYPES.overrideResult, overrideResult),
+      },
+      'meetingstone/setCliEnabled': {
+        service: 'meetingstone',
+        invocation: { kind: 'direct' },
+        parameters: [
+          parameter({
+            name: 'cli',
+            typeSymbol: SESSION_REMOTE_TYPES.cliName,
+            build: cliName,
+          }),
+          parameter({
+            name: 'enabled',
+            typeSymbol: SESSION_REMOTE_TYPES.booleanValue,
+            build: booleanValue,
+          }),
+        ],
+        result: result(SESSION_REMOTE_TYPES.jsonResult, jsonResult),
+      },
+      'meetingstone/refreshCli': {
+        service: 'meetingstone',
+        invocation: { kind: 'direct' },
+        parameters: [
+          parameter({
+            name: 'cli',
+            typeSymbol: SESSION_REMOTE_TYPES.cliName,
+            build: cliName,
+          }),
+          parameter({
+            name: 'force',
+            typeSymbol: SESSION_REMOTE_TYPES.booleanValue,
+            build: booleanValue,
+          }),
+        ],
+        result: result(SESSION_REMOTE_TYPES.jsonResult, jsonResult),
+      },
+      'meetingstone/updateGlobalRole': {
+        service: 'meetingstone',
+        invocation: { kind: 'direct' },
+        parameters: [
+          parameter({
+            name: 'roleId',
+            typeSymbol: SESSION_REMOTE_TYPES.roleId,
+            build: roleId,
+          }),
+          parameter({
+            name: 'patch',
+            typeSymbol: SESSION_REMOTE_TYPES.value,
+            build: value,
+          }),
+        ],
+        result: result(SESSION_REMOTE_TYPES.jsonResult, jsonResult),
       },
     },
   }

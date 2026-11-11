@@ -3,6 +3,9 @@ import { SESSION_CONFIG_ERRORS, resolveEffectiveConfig, normalizeFieldPath } fro
 import { isValidRoleId } from '../roles/ids.js'
 import { isValidSessionId } from '../session/store.js'
 
+/** @param {unknown} value */
+const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+
 /**
  * 右侧栏「当前会话角色编辑」的 Host 侧远程方法（纯逻辑，无 I/O 之外的副作用）。
  *
@@ -33,8 +36,20 @@ import { isValidSessionId } from '../session/store.js'
  *   由调用方提供的 sessionId → 项目根解析（生产环境见 src/gui/session-root.js：
  *   优先 live `ctx.sessions`/`ctx.agents` 的 header.cwd，派单映射只作兜底）。
  *   返回 null 表示找不到该会话的项目根。
+ * @param {Array<object>} [deps.channels] 已投影为 JSON-safe 的通道实例表
+ *   （详情页的「CLI/通道 / 模型 / 思考强度」选项只来自这里，不另建模型注册表）。
+ * @param {(role: any, sources: any) => any} [deps.roleState] 角色状态派生
+ *   （生产环境传 `roleView`：三色 / 就绪 / 额度；缺省时不伪造状态）。
  */
-export function createSessionGuiApi({ cfg, globalRaw, projectStore, sessionStore, resolveProjectRoot }) {
+export function createSessionGuiApi({
+  cfg,
+  globalRaw,
+  projectStore,
+  sessionStore,
+  resolveProjectRoot,
+  channels = [],
+  roleState = null,
+}) {
   const projectConfigFile = cfg && typeof cfg.projectConfigFile === 'string' ? cfg.projectConfigFile : undefined
 
   /** 构造一个带 code 的错误，便于 Remote 层转成结构化错误。 */
@@ -75,17 +90,42 @@ export function createSessionGuiApi({ cfg, globalRaw, projectStore, sessionStore
 
   /**
    * 读取当前会话的角色配置视图。
+   *
+   * 除三层继承结果外，还把两类**派生数据**一并返回（都可能为空数组/空对象）：
+   * - `roleStates`：每个角色的三色/就绪/额度（由注入的 `roleState` 派生，
+   *   不传时为空，明确表示「没有状态证据」而不是伪造 ready）；
+   * - `channels`：真实的通道实例选项（详情页下拉只列这些）。
+   *
    * @param {string} sessionId
-   * @returns {{ effective: any, overrides: Record<string, any>, sources: any, warnings: any[] }}
+   * @returns {{
+   *   effective: any, overrides: Record<string, any>, sources: any, warnings: any[],
+   *   channels: object[], roleStates: object[],
+   * }}
    */
   function getSessionConfig(sessionId) {
     const { resolved, sessionLoaded } = resolveView(sessionId)
+    const roles = Array.isArray(resolved.effective.roles) ? resolved.effective.roles : []
+    const roleStates =
+      typeof roleState === 'function'
+        ? roles
+            .map((role) => {
+              try {
+                return roleState(role, resolved.sources)
+              } catch {
+                return null
+              }
+            })
+            .filter((state) => state && typeof state === 'object')
+        : []
     return {
       effective: resolved.effective,
       overrides: sessionLoaded.config.roleOverrides ?? {},
       sources: resolved.sources,
       // 读取层的非致命告警（未知字段、坏字段等）；不改变 effective 的降级语义。
       warnings: Array.isArray(sessionLoaded.errors) ? sessionLoaded.errors : [],
+      // 详情页选项：只投影已知字段，避免把配置里的任意对象带进 UI。
+      channels: Array.isArray(channels) ? channels.filter(isPlainObject).map((channel) => ({ ...channel })) : [],
+      roleStates,
     }
   }
 
