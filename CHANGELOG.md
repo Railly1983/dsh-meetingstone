@@ -2,6 +2,29 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha] - 2026-11-11
+
+V1 范围冻结（docs/V1-SCOPE.md）：四个工作包 + 不做清单。
+
+### Added
+- 四 CLI 接入：Codex / CodeBuddy(ACP) / Claude Code / in-process
+- 角色派单：按名称与简称，显式优先；未指定报 `ROLE_REQUIRED`
+- 原生 Jobs 集成：任务名称、状态、耗时、停止
+- `meetingstone_wait`：一次等待多个任务，不轮询
+- 只读 GUI：设置页三区、对话顶部入口、右侧栏会话角色编辑
+- 三级配置继承：全局 → 项目 → 当前对话，只存差异、可恢复
+- 统一任务/结果协议；基础重复派单保护；基础失败分类
+
+### Changed
+- `get_task` 默认摘要、`dispatch` 紧凑回执、`list_roles` 默认紧凑
+- 上下文重放上限 16 KiB
+- 模型由角色定义决定，设置页不再展示默认模型/通道模型
+
+### Known limitations
+- 自动路由、效率账本为实验/开发工具，不属于 V1 卖点
+- Subagents 面板 Token 为累计值（含 fork 继承），不可用于成本/额度
+- WorkBuddy 与 Codex 跨宿主 POC 暂缓
+
 ## [0.0.4] - 2026-11-10
 
 ### Added

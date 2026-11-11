@@ -41,7 +41,7 @@ const disposeAll = (disposers) => {
 test('导出契约：name / PACKAGE_NAME / apply', () => {
   assert.equal(name, 'meetingstone')
   assert.equal(PACKAGE_NAME, 'dsh-meetingstone')
-  assert.match(PLUGIN_VERSION, /^\d+\.\d+\.\d+$/)
+  assert.match(PLUGIN_VERSION, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/)
   assert.equal(typeof apply, 'function')
 })
 

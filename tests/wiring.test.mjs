@@ -185,7 +185,7 @@ test('空配置也能加载（roles=0）', () => {
 
 test('插件标识与版本', () => {
   assert.equal(name, 'meetingstone')
-  assert.match(PLUGIN_VERSION, /^\d+\.\d+\.\d+$/)
+  assert.match(PLUGIN_VERSION, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/)
 })
 
 // ─── 项目级配置接线（P2-02 剩余部分）────────────────────────────────────────
