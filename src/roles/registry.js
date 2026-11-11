@@ -46,7 +46,7 @@ import { isValidRoleId, normalizeAlias } from './ids.js'
  * @property {boolean} enabled
  * @property {string | null} fallbackRoleId
  * @property {number} timeoutMs
- * @property {'global' | 'project'} [source] 来源：全局配置还是项目配置
+ * @property {'global' | 'project' | 'session'} [source] 来源：全局 / 项目 / 当前会话
  * @property {boolean} [ambiguous] 仅在同名/别名冲突时出现且为 true
  */
 
@@ -226,7 +226,11 @@ function readRole(raw, errors) {
     description: typeof input.description === 'string' ? input.description : '',
     ...(typeof input.prompt === 'string' && input.prompt.trim() ? { prompt: input.prompt } : {}),
     channel: readChannel(input.channel, errors, id),
-    source: /** @type {const} */ ('global'),
+    // 已合并好的角色表（三层继承的结果）会带上来源；没带时按全局处理。
+    source:
+      input.source === 'project' || input.source === 'session'
+        ? /** @type {'project' | 'session'} */ (input.source)
+        : 'global',
     enabled: input.enabled !== false,
     fallbackRoleId:
       typeof input.fallbackRoleId === 'string' && input.fallbackRoleId.trim()

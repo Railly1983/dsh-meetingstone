@@ -19,8 +19,9 @@ import { createDshAdapter } from './dsh/adapter.js'
 import { inject as toolsInject, registerTools } from './dsh/register.js'
 import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
-import { toRegistryInput } from './project/config-file.js'
 import { createNodeProjectConfigStore } from './project/load.js'
+import { resolveEffectiveConfig } from './session/config.js'
+import { createNodeSessionOverrideStore } from './session/store.js'
 import { createRunStore } from './run-store.js'
 import { createWorktreeManager } from './worktree.js'
 import { createGuiState, registerGuiRemote } from './gui/host.js'
@@ -92,8 +93,10 @@ export function apply(ctx, config = {}) {
     else console.warn(line)
   }
 
-  // 角色来源：全局配置 + 当前会话项目根的 `.meetingstone.json`（按 mtime 缓存）
+  // 角色来源：全局配置 + 当前项目根的 `.meetingstone.json` + 当前会话覆盖
+  // （`.meetingstone/sessions/<sessionId>.json`，按 mtime 缓存项目文件）。
   const projectStore = createNodeProjectConfigStore()
+  const sessionStore = createNodeSessionOverrideStore()
 
   /** @type {import('./roles/registry.js').RoleRegistry} */
   const globalRegistry = createRegistry({ globalRoles: cfg.roles ?? [] })
@@ -122,18 +125,42 @@ export function apply(ctx, config = {}) {
 
   /**
    * 按当前执行上下文构造项目级注册表。
-   * 项目根取 `exec.agent.session.header.cwd`（docs/audit/07-config-extension.md §4.2）。
+   * 项目根取 `exec.agent.session.header.cwd`（docs/audit/07-config-extension.md §4.2）；
+   * 会话 id 取 `exec.agent.session.id`（宿主保证 `agent.id === session.id`）。
    * @param {any} exec
    */
   async function resolveRegistry(exec) {
     const projectRoot = exec?.agent?.session?.header?.cwd
+    const sessionId = exec?.agent?.session?.id
     const loaded = projectStore.get(projectRoot, cfg.projectConfigFile)
-    const registry = createRegistry(toRegistryInput(cfg, loaded.config))
-    // 项目文件解析错误 + 注册表语义错误（别名冲突等）一起交给工具层展示
-    const projectErrors = [...(loaded.errors ?? []), ...(registry.errors ?? [])]
-    // 设置页的“最近错误”也反映项目配置问题；只记录，不改变返回结构。
+    // 没有会话 id 时不应用会话覆盖（宁可不生效，也不张冠李戴到别的会话）。
+    const sessionLoaded =
+      typeof sessionId === 'string' && sessionId
+        ? sessionStore.get(projectRoot, sessionId)
+        : { config: undefined, errors: [] }
+    const resolved = resolveEffectiveConfig({
+      global: cfg,
+      project: loaded.config,
+      session: sessionLoaded.config,
+    })
+    // 生效角色表已经合并完毕；注册表只负责解析与别名冲突判定。
+    const registry = createRegistry({ globalRoles: resolved.effective.roles })
+    // 项目文件解析错误 + 会话文件错误 + 继承/覆盖错误 + 注册表语义错误
+    const projectErrors = [
+      ...(loaded.errors ?? []),
+      ...(sessionLoaded.errors ?? []),
+      ...(resolved.errors ?? []),
+      ...(registry.errors ?? []),
+    ]
+    // 设置页的“最近错误”也反映项目/会话配置问题；只记录，不改变返回结构。
     for (const error of projectErrors) gui.recordError(error, 'project-config')
-    return { registry, projectErrors }
+    return {
+      registry,
+      projectErrors,
+      // 供后续 UI 显示“继承/覆盖”；工具当前不返回，避免扩大回执。
+      sources: resolved.sources,
+      sessionId: typeof sessionId === 'string' ? sessionId : null,
+    }
   }
 
   // parent 由每次工具执行的 context.agent 传入（不再用全局 holder）
