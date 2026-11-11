@@ -213,7 +213,7 @@ function toRoleView(role, ctx, options = {}) {
     name: role.name,
     aliases: Array.isArray(role.aliases) ? [...role.aliases] : [],
     enabled: role.enabled !== false,
-    availability: availabilityOf(role, ctx),
+    availability: roleAvailability(role, ctx),
   }
   if (options.verbose !== true) return view
   return {
@@ -231,11 +231,13 @@ function toRoleView(role, ctx, options = {}) {
 /**
  * 角色可用性。用的是**已确认**的 `ctx.subagents.getProvider(name)`（出处见文件头第 3 条）。
  * 拿不到查询能力就返回 'unknown'——不猜、不假装可用。
+ *
+ * 导出供 GUI 只读快照（src/gui/host.js）复用，避免工具与设置页两处实现漂移。
  * @param {object} role
  * @param {object} ctx
  * @returns {'disabled' | 'ambiguous' | 'available' | 'provider-unavailable' | 'unknown'}
  */
-function availabilityOf(role, ctx) {
+export function roleAvailability(role, ctx) {
   if (role.enabled === false || role.disabled === true) return 'disabled'
   if (role.ambiguous === true) return 'ambiguous'
   let subagents = null

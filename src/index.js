@@ -23,6 +23,7 @@ import { toRegistryInput } from './project/config-file.js'
 import { createNodeProjectConfigStore } from './project/load.js'
 import { createRunStore } from './run-store.js'
 import { createWorktreeManager } from './worktree.js'
+import { createGuiState, registerGuiRemote } from './gui/host.js'
 
 /**
  * 宿主运行时把 `@deepseek-ai/dsh-tools` 作为 shared package 提供。
@@ -97,6 +98,14 @@ export function apply(ctx, config = {}) {
   /** @type {import('./roles/registry.js').RoleRegistry} */
   const globalRegistry = createRegistry({ globalRoles: cfg.roles ?? [] })
 
+  // GUI 只读数据（Host half）：与工具共用同一份 registry / channels，不另建数据源。
+  // 最近错误由注册表错误初始化，随后由项目配置加载、派单失败、落盘失败更新。
+  const gui = createGuiState({
+    ctx,
+    registry: globalRegistry,
+    channels: cfg.channels ?? [],
+  })
+
   /**
    * 按当前执行上下文构造项目级注册表。
    * 项目根取 `exec.agent.session.header.cwd`（docs/audit/07-config-extension.md §4.2）。
@@ -107,7 +116,10 @@ export function apply(ctx, config = {}) {
     const loaded = projectStore.get(projectRoot, cfg.projectConfigFile)
     const registry = createRegistry(toRegistryInput(cfg, loaded.config))
     // 项目文件解析错误 + 注册表语义错误（别名冲突等）一起交给工具层展示
-    return { registry, projectErrors: [...(loaded.errors ?? []), ...(registry.errors ?? [])] }
+    const projectErrors = [...(loaded.errors ?? []), ...(registry.errors ?? [])]
+    // 设置页的“最近错误”也反映项目配置问题；只记录，不改变返回结构。
+    for (const error of projectErrors) gui.recordError(error, 'project-config')
+    return { registry, projectErrors }
   }
 
   // 本机 CLI 探测：多源解析（PATH → Appx → npm 全局 → 常见目录）
@@ -187,10 +199,12 @@ export function apply(ctx, config = {}) {
       await store.writeRun(enriched)
       persistenceWarnings.delete(childId)
     } catch (err) {
-      persistenceWarnings.set(childId, {
+      const warning = {
         code: err?.code ?? 'RUN_WRITE_FAILED',
         message: err instanceof Error ? err.message : String(err),
-      })
+      }
+      persistenceWarnings.set(childId, warning)
+      gui.recordError(warning, 'persistence')
     }
   }
 
@@ -283,12 +297,25 @@ export function apply(ctx, config = {}) {
     worktrees,
   })
 
+  /**
+   * 工具层用的派单器：只是给 dispatch 加一个“最近错误”观察，不改变任何返回值。
+   * cancel/getTask/stats 等原样透传。GUI 只读页因此能看到真实的派单失败。
+   */
+  const toolDispatcher = {
+    ...dispatcher,
+    async dispatch(input) {
+      const result = await dispatcher.dispatch(input)
+      gui.recordDispatch(result)
+      return result
+    },
+  }
+
   let registered = false
 
   ctx.effect(() => {
     registerTools(ctx, {
       registry: globalRegistry,
-      dispatcher,
+      dispatcher: toolDispatcher,
       probe,
       resolveRegistry,
       loadPersistedRun,
@@ -297,6 +324,18 @@ export function apply(ctx, config = {}) {
       ...(typeof hostDefineTool === 'function' ? { defineTool: hostDefineTool } : {}),
     })
     registered = true
+
+    // GUI 只读 Remote：宿主注册 `meetingstone/list`（SRC marker），浏览器 half 用
+    // ctx.remote.meetingstone.list() 取快照。宿主没有 Typert 协议时静默跳过，
+    // 不影响工具与派单（设置页会显示“读取失败”，不会假装有数据）。
+    const guiRemote = registerGuiRemote(ctx, { snapshot: () => gui.snapshot() })
+    if (guiRemote.registered !== true) {
+      const detail = `[${name}] GUI remote unavailable: ${guiRemote.reason}${
+        guiRemote.error ? ` (${guiRemote.error})` : ''
+      }`
+      if (typeof ctx.logger?.info === 'function') ctx.logger.info(detail)
+      else console.log(detail)
+    }
 
     const line = `[${name}] loaded v${PLUGIN_VERSION} (roles=${globalRegistry.list().length})`
     if (typeof ctx.logger?.info === 'function') ctx.logger.info(line)
