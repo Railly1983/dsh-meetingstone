@@ -51,7 +51,7 @@
         "channelId": "ch-inprocess",
         "provider": "spawn"
       },
-      "enabled": false,
+      "enabled": true,
       "timeoutMs": 3600000
     },
     {
@@ -101,7 +101,7 @@
         "kind": "claude-code",
         "provider": "claude-code"
       },
-      "enabled": true,
+      "enabled": false,
       "timeoutMs": 3600000
     }
   ],
