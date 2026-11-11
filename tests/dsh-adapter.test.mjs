@@ -179,7 +179,8 @@ test('start 成功：把 role/task/cwd 透传给宿主 startActivation', async (
   const spec = startCall.spec
   assert.ok(spec.request, 'spec 必须是嵌套 request 形状（运行时契约）')
   assert.equal(spec.provider, 'acp', 'role.channel.kind → provider')
-  assert.match(spec.label, /role-sashi/, 'roleId 必须体现在 label 里')
+  assert.equal(spec.label, '沙僧 · 改个函数', 'spec.label 走统一命名，Subagents 目录行标题读它')
+  assert.doesNotMatch(spec.label, /meetingstone:/, '不得再把内部前缀写进 UI 标签')
   assert.equal(spec.request.prompt[0].type, 'text')
   assert.match(spec.request.prompt[0].text, /改个函数/, 'task 必须透传（允许带角色前缀）')
   assert.equal(spec.request.cwd, 'D:/MeetingStone', 'cwd 必须透传')
@@ -194,6 +195,35 @@ test('start 成功：把 role/task/cwd 透传给宿主 startActivation', async (
   assert.equal(res.taskRef.name, 'agent-1')
   assert.equal(res.taskRef.startedAt, 1234)
   assert.doesNotThrow(() => JSON.stringify(res.taskRef))
+})
+
+test('start：spec.label 剥离 Markdown / 内部前缀，任务摘要 ≤14 字', async () => {
+  const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { acp: {} } }))
+  await adapter.start({
+    role: role(),
+    task: '任务：**修复** [P0-B](https://example.com) `F1`',
+    timeoutMs: 0,
+    context: { projectRoot: 'D:/MeetingStone' },
+  })
+
+  const spec = subagents.calls.find((c) => c.method === 'startActivation')?.spec
+  assert.equal(spec.label, '沙僧 · 修复 P0-B F1')
+  assert.doesNotMatch(spec.label, /[*_#`[\](){}<>|~\\]/)
+  assert.doesNotMatch(spec.label, /meetingstone:/)
+})
+
+test('start：TaskSpec.title 优先作为 Subagents / Jobs 的短目标', async () => {
+  const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { acp: {} } }))
+  await adapter.start({
+    role: role(),
+    task: '很长的任务正文，不应该成为标签',
+    taskSpec: { title: '**短标题**' },
+    timeoutMs: 0,
+    context: { projectRoot: 'D:/MeetingStone' },
+  })
+
+  const spec = subagents.calls.find((c) => c.method === 'startActivation')?.spec
+  assert.equal(spec.label, '沙僧 · 短标题')
 })
 
 test('隔离启动：taskRef 带 operationId，running 记录带 worktree 元数据', async () => {

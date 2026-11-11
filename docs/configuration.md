@@ -455,9 +455,15 @@ routingRules:
 本插件不自造任务列表 UI。派单成功后，如果宿主提供 `ctx.jobs`，适配器会注册一个原生 Job：
 
 - `kind`: `meetingstone-dispatch`
-- `label`: `角色名 · 通道 · 任务摘要（≤40 字）`，例如 `悟空 · codex · 审核登录模块`
+- `label`: `角色简称 · 简短目标（≤14 字）`，例如 `悟空 · 审核登录模块`。目标优先取 `taskSpec.title`，
+  其次任务首个有效行；剥离 Markdown 符号与 `meetingstone:` 内部前缀，空任务回退 `未命名任务`。
+  同一个名字也通过官方 `startActivation({ label })` 写进 Subagents 目录（见 `docs/gui-0.2.0.md` §6）。
 - `owner`: 本次派单的 parent Agent 对应 SessionId（宿主用 `agent.id === agent.session.id` 校验）
 - `jobId`: 同时写入 `taskRef` 与 `.meetingstone/runs/<childId>.json`
+- `progress`（运行中）：只写 `已启动`，**不写工作树绝对路径**
+- `detail`（终态）：`hooks.done` 的 `detail`，截到 ≤80 字，作为面板第二行；完整输出仍在
+  `.meetingstone/runs/<childId>.json` 与 Job output ring 里。工作树/分支路径只留在 run 记录，
+  不塞进 Jobs 行。
 
 行为边界：
 

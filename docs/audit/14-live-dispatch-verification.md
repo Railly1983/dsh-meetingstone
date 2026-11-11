@@ -52,6 +52,8 @@ d52874f6-50e6-41fc-82db-218dd8950ff3 [running] — meetingstone:role-selftest
 约 25 秒后再查：同一 id 变为 `[inactive]`。
 
 **结论**：进程内通道的子 Agent **确实进入原生 subagent 目录**，label 来自适配器（`meetingstone:<roleId>`）。
+> P0-1 起 label 改为统一命名 `角色简称 · 简短目标（≤14 字）`，不再出现 `meetingstone:` 前缀；
+> 本行保留当时真机输出作为历史证据。
 ⚠️ 这修正了 `audit/06-ui-visibility.md` 的早期结论——那条结论针对的是**外部 CLI** Worker，不适用于 in-process 通道。
 
 ### 2.4 并发纪律（写任务串行）

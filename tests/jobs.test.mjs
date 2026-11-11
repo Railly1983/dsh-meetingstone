@@ -201,16 +201,45 @@ test('派单成功后创建原生 Job：kind/label/owner 正确，taskRef 与 ru
   assert.equal(res.taskRef.jobId, job.id, 'taskRef 必须带 jobId')
   assert.equal(started.length, 1)
   assert.equal(started[0].jobId, job.id, 'running 记录必须带 jobId')
-  assert.match(job.progress[0], /已启动/)
+  assert.equal(job.progress[0], '已启动', '进度行只写状态，不含路径')
+  assert.doesNotMatch(job.progress[0], /[\\/]/, '进度行不得出现工作树/主工作区路径')
 })
 
-test('Job 标签的任务摘要不超过 40 字（超长用省略号）', async () => {
+test('Job 标签：剥离 Markdown 与 meetingstone: 前缀，任务摘要 ≤14 字', async () => {
+  const jobs = fakeJobs()
+  const { adapter } = makeAdapter({ jobs })
+  await adapter.start(
+    startInput({ task: '任务：**修复 F1–F8** (证据：日志)' }),
+  )
+  const label = jobs.jobs[0].spec.label
+  assert.equal(label, '悟空 · 修复 F1–F8 证据：日志')
+  assert.doesNotMatch(label, /[*_#`[\](){}<>|~\\]/)
+  assert.doesNotMatch(label, /meetingstone:/)
+  assert.ok(Array.from(label.split(' · ').at(-1)).length <= 14)
+})
+
+test('Job 标签：空任务回退「未命名任务」，TaskSpec.title 优先', async () => {
+  const jobs = fakeJobs()
+  const { adapter } = makeAdapter({ jobs })
+  await adapter.start(startInput({ task: '***__``' }))
+  assert.equal(jobs.jobs[0].spec.label, '悟空 · 未命名任务')
+
+  await adapter.start(
+    startInput({
+      task: '很长的任务正文，不应该成为标签',
+      taskSpec: { title: '短标题' },
+    }),
+  )
+  assert.equal(jobs.jobs[1].spec.label, '悟空 · 短标题')
+})
+
+test('Job 标签的任务摘要不超过 14 字（超长用省略号）', async () => {
   const jobs = fakeJobs()
   const { adapter } = makeAdapter({ jobs })
   const task = '一'.repeat(100)
   await adapter.start(startInput({ task }))
   const summary = jobs.jobs[0].spec.label.split(' · ').at(-1)
-  assert.ok(Array.from(summary).length <= 40, `摘要必须 ≤40 字，实际 ${Array.from(summary).length}`)
+  assert.ok(Array.from(summary).length <= 14, `摘要必须 ≤14 字，实际 ${Array.from(summary).length}`)
   assert.ok(summary.endsWith('…'))
 })
 
@@ -225,8 +254,40 @@ test('完成：hooks.done 映射为 completed，detail 带结果摘要，进度�
   const outcome = await jobs.jobs[0].hooks.done
   assert.equal(outcome.status, 'completed')
   assert.match(outcome.detail, /登录模块审核通过/)
-  assert.match(jobs.jobs[0].progress.at(-1), /已完成/)
+  assert.ok(Array.from(outcome.detail).length <= 80, 'JobView.detail 必须缩短到面板可读')
+  assert.equal(jobs.jobs[0].progress.at(-1), '已完成', '进度行只写状态')
   assert.ok(res.taskRef.childId)
+})
+
+test('隔离任务：进度行只写「已启动 / 已完成」，不含工作树绝对路径', async () => {
+  const jobs = fakeJobs()
+  const { adapter, subagents } = makeAdapter({ jobs })
+  const worktree = {
+    path: 'D:/MeetingStone/.meetingstone/worktrees/op-1',
+    branch: 'meetingstone/op-1',
+    baseSha: 'abc123',
+    repositoryRoot: 'D:/MeetingStone',
+    operationId: 'op-1',
+  }
+  await adapter.start(
+    startInput({
+      isolation: 'worktree',
+      operationId: 'op-1',
+      worktree,
+      cwd: worktree.path,
+    }),
+  )
+  assert.equal(jobs.jobs[0].progress[0], '已启动')
+  assert.equal(jobs.jobs[0].progress[0].includes(worktree.path), false)
+
+  subagents.pending.resolveResult({
+    stopReason: 'completed',
+    output: [{ type: 'text', text: '隔离任务完成' }],
+  })
+  const outcome = await jobs.jobs[0].hooks.done
+  assert.equal(outcome.status, 'completed')
+  assert.equal(jobs.jobs[0].progress.at(-1), '已完成')
+  assert.equal(jobs.jobs[0].progress.at(-1).includes(worktree.path), false)
 })
 
 test('失败：hooks.done 映射为 failed，detail 带错误信息', async () => {
@@ -237,7 +298,8 @@ test('失败：hooks.done 映射为 failed，detail 带错误信息', async () =
   const outcome = await jobs.jobs[0].hooks.done
   assert.equal(outcome.status, 'failed')
   assert.match(outcome.detail, /provider boom/)
-  assert.match(jobs.jobs[0].progress.at(-1), /失败/)
+  assert.ok(Array.from(outcome.detail).length <= 80)
+  assert.equal(jobs.jobs[0].progress.at(-1), '失败', '进度行只写状态')
 })
 
 test('取消：hooks.done 为宿主契约的 killed，run 记录仍是 cancelled，且 dispose 真被调用', async () => {
@@ -264,7 +326,7 @@ test('取消：hooks.done 为宿主契约的 killed，run 记录仍是 cancelled
   assert.match(done.detail, /cancelled/)
   assert.equal(finished.at(-1)?.status, 'cancelled', 'run 记录不得被改写成 killed')
   assert.equal((await adapter.getTask(res.taskRef)).status, 'cancelled')
-  assert.match(jobs.jobs[0].progress.at(-1), /已取消/)
+  assert.equal(jobs.jobs[0].progress.at(-1), '已取消', '进度行只写状态')
 
   // hooks.cancel 的返回值必须真实反映取消结果（重复调用不重复 dispose）
   await assertCancelContract({ job: jobs.jobs[0], subagents, finished })
