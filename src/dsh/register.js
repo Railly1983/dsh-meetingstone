@@ -61,6 +61,7 @@ import { providerNameFor } from './adapter.js'
 import { normalizeProjectKey } from '../dispatch/dispatcher.js'
 import { resolveContinuation } from '../context-replay.js'
 import { truncateUtf8 } from '../run-store.js'
+import { validateTaskSpec } from '../taskspec.js'
 
 // 兼容旧引用：归一化实现只在 dispatcher 里维护一份，避免两处逻辑漂移。
 export { normalizeProjectKey }
@@ -78,6 +79,7 @@ export const TOOL_NAMES = Object.freeze({
   GET_TASK: 'meetingstone_get_task',
   LIST_RUNS: 'meetingstone_list_runs',
   CANCEL_TASK: 'meetingstone_cancel_task',
+  GET_RUN_ARTIFACT: 'meetingstone_get_run_artifact',
   CLI_STATUS: 'meetingstone_cli_status',
 })
 
@@ -255,10 +257,12 @@ export const TASK_RESULT_HEAD_BYTES = 1024
 export const TASK_RESULT_TAIL_BYTES = 512
 
 /**
- * 任务记录 → 模型可见视图（Token 审计 2026-11-11）。
+ * 任务记录 → 模型可见视图（Token 审计 2026-11-11 / P0-C）。
  *
- * - 默认只给 `result` 的首 1KiB + 末 512B，并附 `resultBytes`；
- * - `full:true` 才返回全文；
+ * - 有结构化 `summary` 时，默认**只回 summary/status/openIssues 等字段**，不再回原始正文
+ *   （正文用 full:true 或 meetingstone_get_run_artifact 按需取）；
+ * - 没有 summary 时退回首 1KiB + 末 512B 摘要，并附 `resultBytes`；
+ * - `full:true` 才返回完整正文；
  * - 记录里 `output`/`result` 可能同时存在（内存终态用 output、磁盘用 result），
  *   这里统一压成**一个** `result` 字段，绝不重复返回两份正文。
  *
@@ -273,22 +277,35 @@ function taskResultView(record, full) {
   const storedText = typeof source.result === 'string' ? source.result : ''
   const text = liveText || storedText
   const bytes = Buffer.byteLength(text, 'utf8')
-  const preview = full
-    ? { text, truncated: false }
-    : truncateUtf8(text, TASK_RESULT_HEAD_BYTES + TASK_RESULT_TAIL_BYTES, {
-        headBytes: TASK_RESULT_HEAD_BYTES,
-        tailBytes: TASK_RESULT_TAIL_BYTES,
-      })
-  const storedTruncated = source.resultTruncated === true
-  const out = { ...source, result: preview.text, resultBytes: bytes }
+  const summary = typeof source.summary === 'string' ? source.summary.trim() : ''
+  const out = { ...source }
   delete out.output
-  out.resultTruncated = preview.truncated || storedTruncated
-  if (storedTruncated) out.recordResultTruncated = true
+  if (full) {
+    out.result = text
+    out.resultBytes = bytes
+    out.resultTruncated = source.resultTruncated === true
+    delete out.resultOmitted
+  } else if (summary) {
+    // 结构化摘要已经在记录里（落盘时按 8KiB 截断）；不再附带原始正文
+    delete out.result
+    out.resultOmitted = true
+    out.resultBytes = bytes
+    out.resultTruncated = true
+  } else {
+    const preview = truncateUtf8(text, TASK_RESULT_HEAD_BYTES + TASK_RESULT_TAIL_BYTES, {
+      headBytes: TASK_RESULT_HEAD_BYTES,
+      tailBytes: TASK_RESULT_TAIL_BYTES,
+    })
+    out.result = preview.text
+    out.resultBytes = bytes
+    out.resultTruncated = preview.truncated
+  }
+  if (source.resultTruncated === true) out.recordResultTruncated = true
   return out
 }
 
 /**
- * 注册六个工具。
+ * 注册七个工具。
  *
  * @param {object} ctx 宿主 Context（需 `ctx.tools.register`）
  * @param {object} deps
@@ -424,10 +441,49 @@ export function registerTools(ctx, deps) {
       name: TOOL_NAMES.DISPATCH,
       description:
         '按角色把一次任务派发给宿主 provider。默认每个任务在独立 git 工作树里执行（默认并行上限 2/项目、4/全局）；' +
-        'isolation=none 时退回主工作区串行。工作树只隔离文件布局，不是权限沙箱。',
+        'isolation=none 时退回主工作区串行。工作树只隔离文件布局，不是权限沙箱。' +
+        '可以只传 role+task（旧用法），也可以带 title/objective/scope/acceptance/contextPack 等结构化简报；' +
+        '使用任一结构化字段时 title 必填，声明 scope 时必须给 acceptance。简单查询不需要 scope/evidence。',
       parameters: {
         role: { type: 'string', required: true, description: '角色名、别名或 roleId' },
         task: { type: 'string', required: true, description: '任务内容' },
+        title: {
+          type: 'string',
+          description: '短任务名；使用任一结构化字段时必填，用于 Jobs / list_runs 展示',
+        },
+        objective: {
+          type: 'string',
+          description: '要达成的结果；省略时任务正文即目标',
+        },
+        scope: {
+          type: 'object',
+          description: '范围与边界：{ include: string[], exclude: string[] }；声明了 scope 就必须给 acceptance',
+        },
+        acceptance: {
+          type: 'array',
+          description: '验收标准（字符串数组）；声明 scope 时必填，简单查询可省略',
+        },
+        evidence: {
+          type: 'array',
+          description: '需要提交的证据 / 文件 / 测试（字符串数组）',
+        },
+        contextRefs: {
+          type: 'array',
+          description: '上下文包或文件引用（字符串数组）',
+        },
+        roleHint: {
+          type: 'string',
+          description: '建议角色 / 能力提示（仅随简报传递，不改变本次 role 路由）',
+        },
+        outputBudget: {
+          type: 'object',
+          description: '摘要与产物预算：{ summaryTokens?: number, notes?: string }',
+        },
+        contextPack: {
+          type: 'object',
+          description:
+            '最小上下文：{ knownFacts: string[], files: string[], priorResults: [{ summary, artifactRef }], doNotRepeat: string[] }',
+        },
         cwd: { type: 'string', description: '目标目录；隔离模式下由工作树路径覆盖，调用方须先校验在项目内' },
         isolation: {
           type: 'string',
@@ -462,6 +518,18 @@ export function registerTools(ctx, deps) {
         // 1) 按当前会话的项目根取「全局 + 项目覆盖」的注册表
         const effective = await registryFor(exec)
 
+        // 1.2) P0-B：TaskSpec / ContextPack 校验。只拒绝缺了就无法执行/验收的关键字段；
+        //      纯 role+task 调用（structured=false）完全不受影响。
+        const taskSpecResult = validateTaskSpec(args ?? {})
+        if (taskSpecResult.ok !== true) {
+          return {
+            ok: false,
+            code: taskSpecResult.code,
+            message: taskSpecResult.message,
+            fields: taskSpecResult.fields,
+          }
+        }
+
         // 1.5) 上下文重放：找不到/没就绪就如实失败，绝不静默退化成普通派单
         let continuation = null
         if (typeof args?.continuesFrom === 'string' && args.continuesFrom.trim()) {
@@ -487,6 +555,8 @@ export function registerTools(ctx, deps) {
         const input = {
           role: args?.role,
           task: args?.task,
+          ...(taskSpecResult.spec ? { taskSpec: taskSpecResult.spec } : {}),
+          ...(taskSpecResult.contextPack ? { contextPack: taskSpecResult.contextPack } : {}),
           ...(typeof args?.cwd === 'string' ? { cwd: args.cwd } : {}),
           ...(args?.isolation ? { isolation: args.isolation } : {}),
           ...(continuation ? { continuation } : {}),
@@ -530,8 +600,8 @@ export function registerTools(ctx, deps) {
     {
       name: TOOL_NAMES.LIST_RUNS,
       description:
-        '列出当前项目最近的派单记录（新的在前）：childId、角色、通道、模型、状态、耗时、工作树路径/分支、改动文件（changedFiles）、' +
-        '原生 Job id（jobId，若宿主 Jobs 可用）、同项目任务之间的 overlapWarnings 与 200 字预览。' +
+        '列出当前项目最近的派单记录（新的在前）：title、childId、角色、通道、模型、状态、结构化结果摘要（resultStatus/summaryPreview）、' +
+        '耗时、工作树路径/分支、改动文件（changedFiles）、原生 Job id（jobId）、同项目任务之间的 overlapWarnings 与 200 字预览。' +
         '数据来自 `.meetingstone/runs/`，DSH 重启后仍可查；上一个进程遗留的 running 会显示为 interrupted。' +
         '带工作树的记录不会被 100 条/30 天自动清理，用于保护未合并成果的元数据。',
       parameters: {
@@ -550,7 +620,8 @@ export function registerTools(ctx, deps) {
       name: TOOL_NAMES.GET_TASK,
       description:
         '按 childId 查询一次派发：status（running/completed/failed/cancelled/interrupted/unknown）、stopReason、resultBytes、jobId、recordPath、' +
-        '工作树/改动文件/overlapWarnings。默认只回结果首 1KiB + 末 512B（resultBytes 给出原始字节数）；需要全文时传 full:true。' +
+        '工作树/改动文件/overlapWarnings。若结果带结构化 summary，默认只回 summary/resultStatus/openIssues/handoff 等字段（resultOmitted:true）；' +
+        '否则回结果首 1KiB + 末 512B。需要原始全文时传 full:true，或用 meetingstone_get_run_artifact 按范围读取。' +
         '先查本进程内存（最近 20 条），终态再读项目内 `.meetingstone/runs/<childId>.json` 补隔离元数据；' +
         '上一个进程留下的 running 会投影为 interrupted。',
       parameters: {
@@ -619,6 +690,153 @@ export function registerTools(ctx, deps) {
           }
         }
         return taskResultView(withRecordPath(live, exec, id), full)
+      },
+    },
+    {
+      name: TOOL_NAMES.GET_RUN_ARTIFACT,
+      description:
+        '按需读取一次派发的完整结果（项目内 `.meetingstone/runs/<childId>.json`）。默认返回完整文本；' +
+        '可用 headBytes/tailBytes 取首尾，或用 lineFrom/lineTo（1 起、含端点）取行范围。' +
+        '找不到记录 → NOT_FOUND；记录损坏/非法 JSON → CORRUPT；参数冲突 → INVALID_RANGE。' +
+        '这是 get_task 默认摘要之外的"取全文"通道，不会触发宿主任务查询。',
+      parameters: {
+        childId: {
+          type: 'string',
+          required: true,
+          description: 'meetingstone_dispatch 返回的 taskRef.childId',
+        },
+        headBytes: {
+          type: 'number',
+          description: '保留开头字节数；与 tailBytes 一起决定读取窗口（默认全文）',
+        },
+        tailBytes: {
+          type: 'number',
+          description: '保留结尾字节数',
+        },
+        lineFrom: {
+          type: 'number',
+          description: '起始行（1 起，含）；不能与 headBytes/tailBytes 同时使用',
+        },
+        lineTo: {
+          type: 'number',
+          description: '结束行（含）；省略则读到末尾',
+        },
+      },
+      output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
+      async execute(args, exec) {
+        const childId = args?.childId
+        if (typeof childId !== 'string' || !childId.trim()) {
+          return { ok: false, code: 'NOT_FOUND', message: '缺少 childId' }
+        }
+        const id = childId.trim()
+        const lineMode = args?.lineFrom !== undefined || args?.lineTo !== undefined
+        const byteMode = args?.headBytes !== undefined || args?.tailBytes !== undefined
+        if (lineMode && byteMode) {
+          return {
+            ok: false,
+            code: 'INVALID_RANGE',
+            message: 'lineFrom/lineTo 与 headBytes/tailBytes 不能同时使用',
+          }
+        }
+        if (typeof loadPersistedRun !== 'function') {
+          return { ok: false, code: 'UNAVAILABLE', message: '当前插件未启用派单记录' }
+        }
+        const record = await loadPersistedRun(exec, id)
+        if (!record) {
+          return { ok: false, code: 'NOT_FOUND', message: `没有该任务的落盘记录：${id}`, childId: id }
+        }
+        if (record.code === 'RUN_NOT_FOUND') {
+          return { ok: false, code: 'NOT_FOUND', message: `没有该任务的落盘记录：${id}`, childId: id }
+        }
+        if (record.code === 'RUN_CORRUPT') {
+          return {
+            ok: false,
+            code: 'CORRUPT',
+            message: `记录文件不是合法 JSON：${id}`,
+            childId: id,
+          }
+        }
+        if (record.code === 'RUN_ID_INVALID') {
+          return { ok: false, code: 'INVALID_CHILD_ID', message: `childId 不合法：${id}` }
+        }
+        if (record.code === 'RUN_TOO_LARGE') {
+          return {
+            ok: false,
+            code: 'TOO_LARGE',
+            message: `记录文件超过读取上限，拒绝读取：${id}`,
+            childId: id,
+          }
+        }
+        if (typeof record.code === 'string' && record.code.startsWith('RUN_')) {
+          return {
+            ok: false,
+            code: 'READ_FAILED',
+            message: `读取派单记录失败：${record.reason ?? record.code}`,
+            childId: id,
+          }
+        }
+
+        const text = typeof record.result === 'string' ? record.result : ''
+        const totalBytes = Buffer.byteLength(text, 'utf8')
+        /** @param {unknown} value */
+        const asCount = (value) =>
+          typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null
+        /** @param {unknown} value */
+        const asLine = (value) =>
+          typeof value === 'number' && Number.isInteger(value) && value >= 1 ? value : null
+
+        /** @type {{ mode: string, lineFrom?: number, lineTo?: number, lineTotal?: number, headBytes?: number, tailBytes?: number }} */
+        let range = { mode: 'full' }
+        let content = text
+        let truncated = false
+
+        if (lineMode) {
+          const lines = text === '' ? [] : text.split('\n')
+          const lineTotal = lines.length
+          const from = args?.lineFrom === undefined ? 1 : asLine(args.lineFrom)
+          const to = args?.lineTo === undefined ? lineTotal : asLine(args.lineTo)
+          if (from === null || to === null || to < from) {
+            return {
+              ok: false,
+              code: 'INVALID_RANGE',
+              message: 'lineFrom / lineTo 必须是正整数，且 lineTo >= lineFrom',
+            }
+          }
+          content = from > lineTotal ? '' : lines.slice(from - 1, Math.min(to, lineTotal)).join('\n')
+          truncated = from > 1 || to < lineTotal
+          range = { mode: 'lines', lineFrom: from, lineTo: to, lineTotal }
+        } else if (byteMode) {
+          const head = args?.headBytes === undefined ? 0 : asCount(args.headBytes)
+          const tail = args?.tailBytes === undefined ? 0 : asCount(args.tailBytes)
+          if (head === null || tail === null || head + tail === 0) {
+            return {
+              ok: false,
+              code: 'INVALID_RANGE',
+              message: 'headBytes / tailBytes 必须是非负整数，且至少有一个大于 0',
+            }
+          }
+          const cut = truncateUtf8(text, head + tail, { headBytes: head, tailBytes: tail })
+          content = cut.text
+          truncated = cut.truncated
+          range = { mode: 'bytes', headBytes: head, tailBytes: tail }
+        }
+
+        const withPath = withRecordPath(record, exec, id)
+        return {
+          ok: true,
+          childId: id,
+          status: typeof record.status === 'string' ? record.status : 'unknown',
+          ...(typeof record.resultStatus === 'string' ? { resultStatus: record.resultStatus } : {}),
+          resultBytes: totalBytes,
+          bytes: Buffer.byteLength(content, 'utf8'),
+          truncated,
+          range,
+          content,
+          ...(record.resultTruncated === true ? { recordResultTruncated: true } : {}),
+          ...(typeof withPath.recordPath === 'string' && withPath.recordPath
+            ? { recordPath: withPath.recordPath }
+            : {}),
+        }
       },
     },
     {

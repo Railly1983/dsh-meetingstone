@@ -2,6 +2,8 @@
 import { promises as fs } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { composePromptWithContinuation } from '../context-replay.js'
+import { renderTaskBrief, summarizeContextPack, summarizeTaskSpec } from '../taskspec.js'
+import { parseStructuredResult, renderOutputContract, resultRecordFields } from '../result-contract.js'
 /**
  * DSH 接线层 · 适配器（阶段 2）。
  *
@@ -279,6 +281,9 @@ function callOnFinish(holder) {
  * @param {number} args.startedAt
  */
 function buildRunBase({ input, role, provider, childId, startedAt }) {
+  // P0-B：TaskSpec / ContextPack 摘要（截断后落盘，供 list_runs / get_task 展示标题）
+  const taskSpec = summarizeTaskSpec(input?.taskSpec)
+  const contextPack = summarizeContextPack(input?.contextPack)
   return {
     childId,
     projectRoot: typeof input?.context?.projectRoot === 'string' ? input.context.projectRoot : null,
@@ -305,23 +310,29 @@ function buildRunBase({ input, role, provider, childId, startedAt }) {
     worktree:
       input?.worktree && typeof input.worktree === 'object' ? input.worktree : null,
     isolation: input?.isolation === 'none' || input?.isolation === 'worktree' ? input.isolation : null,
+    ...(taskSpec ? { taskSpec } : {}),
+    ...(contextPack ? { contextPack } : {}),
+    ...(taskSpec?.title ? { title: taskSpec.title } : {}),
   }
 }
 
 /**
- * 把角色身份、可选的"上次结果重放块"和任务拼成子 Agent 的提示词。
+ * 把角色身份、可选的 TaskSpec 简报、可选的"上次结果重放块"、任务和输出契约拼成提示词。
  *
  * 为什么要拼：子 Agent 默认不知道"自己是谁"。CLIWorker 时代靠 persona 的 prompt 注入，
  * 我们替代它时必须保留这个语义，否则「沙僧」和「小白」派出去只是同一个裸模型。
  *
- * 重放块必须放在人设之后、任务之前，并且用显式边界标记——旧输出是不可信数据。
+ * 顺序（P0-B/P0-C）：人设 → TaskSpec+ContextPack → 重放块 → 任务正文 → 输出契约。
+ * 简报与重放块都在人设之后、任务之前；旧输出是不可信数据，必须用显式边界隔开。
  *
  * @param {any} role
  * @param {string} task
  * @param {{ text: string } | null} [continuation]
+ * @param {any} [taskSpec] 已校验的结构化简报（可空）
+ * @param {any} [contextPack] 已校验的最小上下文（可空）
  * @returns {string}
  */
-function composePrompt(role, task, continuation = null) {
+function composePrompt(role, task, continuation = null, taskSpec = null, contextPack = null) {
   const name = typeof role?.name === 'string' ? role.name : ''
   const persona =
     typeof role?.prompt === 'string' && role.prompt.trim()
@@ -332,8 +343,10 @@ function composePrompt(role, task, continuation = null) {
   return composePromptWithContinuation({
     personaHead: name ? `你是「${name}」。` : '',
     persona,
+    taskBrief: renderTaskBrief(taskSpec, contextPack),
     continuation: continuation && typeof continuation.text === 'string' ? continuation : null,
     task: String(task ?? ''),
+    outputContract: renderOutputContract(),
   })
 }
 
@@ -942,7 +955,12 @@ export function createDshAdapter(ctx, options = {}) {
       signal: controller.signal,
       request: {
         parent,
-        prompt: [{ type: 'text', text: composePrompt(role, task, input?.continuation) }],
+        prompt: [
+          {
+            type: 'text',
+            text: composePrompt(role, task, input?.continuation, input?.taskSpec, input?.contextPack),
+          },
+        ],
         ...(typeof cwd === 'string' && cwd ? { cwd } : {}),
         // 不传 maxDepth：实现里 `resolveChildDepth(parent, undefined)` 自带默认上限；
         // 传了反而要求 provider 具备 depthLimit 能力。
@@ -1163,6 +1181,8 @@ export function createDshAdapter(ctx, options = {}) {
           output: settledOutput,
           ...(settledDiagnostic !== undefined ? { diagnostic: settledDiagnostic } : {}),
           ...(current.jobId ? { jobId: current.jobId } : {}),
+          // P0-C：容错提取结构化结果（纯文本则 summary=原文），完整 output 仍然落盘
+          ...resultRecordFields(parseStructuredResult(settledOutput)),
           at: now(),
         }
         rememberFinished(childId, settled)

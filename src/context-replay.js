@@ -95,27 +95,35 @@ export function formatContinuation(run) {
 }
 
 /**
- * 把角色人设、重放块、新任务按固定顺序拼起来。
- * 顺序很重要：人设在最前（身份稳定），旧输出居中（参考），新任务在最后（避免被旧内容抢走注意力）。
+ * 把角色人设、TaskSpec 简报、重放块、本次任务、输出契约按固定顺序拼起来。
+ * 顺序很重要：人设在最前（身份稳定），简报说明目标与边界，旧输出居中（参考），
+ * 新任务在最后（避免被旧内容抢走注意力），输出契约收尾（格式约束最后说）。
  *
  * @param {object} input
  * @param {string} [input.personaHead] 例如 `你是「沙僧」。`
  * @param {string} [input.persona] 角色守则
+ * @param {string} [input.taskBrief] TaskSpec + ContextPack 的结构化文本块
  * @param {{ text: string } | null} [input.continuation]
  * @param {string} input.task
+ * @param {string} [input.outputContract] 结构化输出契约
  */
 export function composePromptWithContinuation(input) {
   const head = typeof input.personaHead === 'string' ? input.personaHead.trim() : ''
   const persona = typeof input.persona === 'string' ? input.persona.trim() : ''
+  const brief = typeof input.taskBrief === 'string' ? input.taskBrief.trim() : ''
+  const contract = typeof input.outputContract === 'string' ? input.outputContract.trim() : ''
   const task = String(input.task ?? '')
   const hasContinuation = Boolean(input.continuation && typeof input.continuation.text === 'string')
-  // 既没有人设也没有重放：保持"只发任务正文"，不额外加前缀（避免改变既有调用方看到的文本）
-  if (!head && !persona && !hasContinuation) return task
+  // 既没有人设、简报、重放，也没有契约：保持"只发任务正文"（旧调用方看到的文本不变）
+  if (!head && !persona && !brief && !hasContinuation && !contract) return task
 
+  const hasContext = Boolean(head || persona || brief || hasContinuation)
   const parts = []
   if (head || persona) parts.push([head, persona].filter(Boolean).join(' '))
+  if (brief) parts.push(brief)
   if (hasContinuation) parts.push(input.continuation.text)
-  parts.push(`任务：${task}`)
+  parts.push(hasContext ? `任务：${task}` : task)
+  if (contract) parts.push(contract)
   return parts.join('\n\n')
 }
 

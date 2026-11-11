@@ -123,6 +123,11 @@
 | git 命令超时（建树 30s / 计算改动 10s） | `WORKTREE_TIMEOUT` |
 | 工作树实际路径逃出项目根 | `WORKTREE_PATH_OUTSIDE` |
 | `isolation` 不是 `none`/`worktree` | `INVALID_ISOLATION` |
+| 结构化 TaskSpec 缺关键字段（`title`；或声明了 `scope` 却没有 `acceptance`；或字段类型错误） | `TASKSPEC_INVALID`，`message` 说明缺什么，`fields` 列出字段名 |
+| `meetingstone_get_run_artifact` 找不到记录 | `NOT_FOUND` |
+| 记录文件不是合法 JSON | `CORRUPT` |
+| `lineFrom/lineTo` 与 `headBytes/tailBytes` 同时使用、或范围非法 | `INVALID_RANGE` |
+| 记录文件超过读取上限 | `TOO_LARGE` |
 | 取消/卸载时宿主 `dispose()` 超时 | `ADAPTER_DISPOSE_TIMEOUT`：写终态（`stopConfirmed:false`）并**保留**并发槽位/隔离互斥，等 activation.result 落定后自动释放 |
 | 取消/卸载时宿主 `dispose()` 抛错 | `ADAPTER_DISPOSE_FAILED`：写终态（`stopConfirmed:false`）并**保留**并发槽位/隔离互斥，等 activation.result 落定后自动释放 |
 | 插件已卸载时仍有启动请求 | `ADAPTER_DISPOSED`：拒绝启动；启动中的 activation 在卸载后返回时先 dispose，确认停止才释放占位槽位。dispose 抛错/超时时**保留句柄与槽位**，写 `interrupted + stopConfirmed:false + error` 终态，等 result 落定后再释放；错误码原样透传，不归入 `ADAPTER_FAILED` |
@@ -159,18 +164,97 @@
 - **失败上下文**：`WORKTREE_*` 失败结果保留 `path` / `branch` / `phase` / `residualPath`；
   带工作树的启动失败同样保留工作树路径与分支，便于人工定位残留。
 
-## 7. 工具返回（Token 优化，2026-11-11）
+## 7. 工具返回与任务契约（Token 优化，2026-11-11）
 
 会话上下文是有限预算，以下默认值按审计结论收紧；需要完整内容时必须显式索取。
 
 | 工具 | 默认返回 | 完整/详细模式 |
 | --- | --- | --- |
-| `meetingstone_get_task` | `status` / `stopReason` / `resultBytes` / `jobId` / `recordPath` + **结果首 1KiB + 末 512B**（`resultTruncated:true`） | `full:true` 返回完整 `result`；`output` 与 `result` 相同时只回一份（字段名统一为 `result`） |
+| `meetingstone_get_task` | `status` / `stopReason` / `resultBytes` / `jobId` / `recordPath`；有结构化 `summary` 时只回 summary/resultStatus/openIssues/handoff（`resultOmitted:true`），否则回结果首 1KiB + 末 512B | `full:true` 返回完整 `result`；`output` 与 `result` 相同时只回一份（字段名统一为 `result`） |
+| `meetingstone_get_run_artifact` | 完整结果文本（`.meetingstone/runs/<childId>.json` 的 `result`） | 用 `headBytes`/`tailBytes` 取首尾，或 `lineFrom`/`lineTo`（1 起、含端点）取行范围 |
 | `meetingstone_dispatch` | 成功只回 `ok` / `taskRef`（`childId`、`name`、`provider`、`jobId`）/ `roleId` / `roleName` / `isolation` | 角色全量、prompt、工作树细节一律不回；需要时查 `meetingstone_list_runs` |
+| `meetingstone_list_runs` | 记录索引：`title` / `status` / `resultStatus` / `summaryPreview` / `resultBytes` 等 | 需要正文用 `meetingstone_get_task` 或 `meetingstone_get_run_artifact` |
 | `meetingstone_list_roles` | `roleId` / `name` / `aliases` / `enabled` / `availability` | `verbose:true` 追加 `description` / `channel` / `model` / `hasPrompt` / `source` |
 
 - `meetingstone_get_task` 的 `recordPath` 指向 `.meetingstone/runs/<childId>.json`；`resultBytes` 是原始结果字节数（不是截断后长度）。
 - 上下文重放上限从 64KiB 收紧到 **16KiB**（头 12KiB + 尾 4KiB）。带 `continuesFrom` 的派单会在落盘记录里写 `continuationBytes`（本次实际注入的重放块字节数）；没有重放则**省略该字段**。
+
+### 7.1 TaskSpec（结构化任务简报，P0-B）
+
+`meetingstone_dispatch` 仍接受**纯字符串** `role + task`（旧调用完全不受影响）。额外可选：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `title` | string | 短任务名；**使用任一结构化字段时必填**（Jobs / list_runs 展示） |
+| `objective` | string | 要达成的结果；省略时任务正文即目标 |
+| `scope` | `{ include: string[], exclude: string[] }` | 范围与边界 |
+| `acceptance` | string[] | 验收标准；**声明了 scope 时必填** |
+| `evidence` | string[] | 需要提交的证据 / 文件 / 测试 |
+| `contextRefs` | string[] | 上下文包或文件引用 |
+| `roleHint` | string | 建议角色/能力提示（不改变本次 `role` 路由） |
+| `outputBudget` | `{ summaryTokens?: number, notes?: string }` | 摘要与产物预算；Provider 不支持硬上限时只作为指令 |
+| `contextPack` | 见 §7.2 | 最小上下文 |
+
+校验规则（**只有缺了就无法执行/验收才拒绝**，`TASKSPEC_INVALID`）：
+
+- 结构化模式缺 `title` → 拒绝；
+- 声明了 `scope`（include/exclude 非空）却没有 `acceptance` → 拒绝；
+- 关键字段类型错误（如 `acceptance` 传字符串、`contextPack` 传数组）→ 拒绝；
+- 简单查询只传 `task`，或只带 `title`，一律放行；不强制 `scope`/`evidence`。
+
+### 7.2 ContextPack（最小必要上下文）
+
+```json
+{
+  "knownFacts": ["已确认的技术结论/版本/配置"],
+  "files": ["src/auth/callback.ts", "tests/auth/callback.test.ts"],
+  "priorResults": [{ "summary": "正常路径已通过，取消路径未验证", "artifactRef": ".meetingstone/runs/<childId>.json" }],
+  "doNotRepeat": ["不要重新扫描整个仓库", "不要重复测试正常完成路径"]
+}
+```
+
+- TaskSpec + ContextPack 会渲染成**结构化文本块**，插在角色人设之后、任务正文之前；同时附带「不要重复探索 / 不要复述长文」约束。
+- 不新增任何 AI 调用；不传 `taskSpec`/`contextPack` 时提示词与旧版一致（只多出固定的输出契约，见 §7.3）。
+- 落盘记录里的 `taskSpec` / `contextPack` 是**截断后的摘要**（列表 ≤10 条、单条 ≤200 字符），用于 `list_runs` / `get_task` 展示标题。
+
+### 7.3 结构化结果契约（P0-C）
+
+派单提示词末尾固定包含输出契约，要求子 Agent 在回复最后给出 JSON：
+
+```json
+{
+  "status": "completed | partial | blocked | failed",
+  "summary": "结论摘要（约 300–500 token）",
+  "evidence": [{ "file": "src/auth/callback.ts", "line": 84, "finding": "缺少租户归属校验" }],
+  "artifacts": [".meetingstone/runs/task-123/review.md"],
+  "changedFiles": [],
+  "tests": ["静态检查完成；未运行集成测试"],
+  "openIssues": ["需要确认旧租户兼容逻辑"],
+  "nextAction": "交由沙僧修复后再由悟空复核"
+}
+```
+
+解析规则（`src/result-contract.js`）：
+
+- 支持整段 JSON、```json 代码块、文本中第一个平衡的 `{...}`；
+- 提取不到（纯文本）→ `structuredResult:false`，`summary` = 原文；坏 JSON 同样退回原文；
+- 子 Agent 自报的 `changedFiles` 落到 `reportedChangedFiles`，**不覆盖**记录里由 git 计算的 `changedFiles`（重叠检测依赖后者）；
+- 记录新增：`summary`（≤8KiB，超出按首尾截断，带 `summaryBytes`/`summaryTruncated`）、`resultStatus`、`evidence`、`artifacts`、`resultTests`、`openIssues`、`nextAction`、`handoff`；
+- 完整 `result` 仍然落盘（上限 256KiB），可用 `full:true` 或 `meetingstone_get_run_artifact` 取回。
+
+`handoff` 字段（结论/证据/产物/未决/下一步）由解析结果生成，模板见 [handoff.md](handoff.md)。
+
+### 7.4 按需读取完整结果
+
+`meetingstone_get_run_artifact` 只读项目内 `.meetingstone/runs/<childId>.json`：
+
+| 参数 | 说明 |
+| --- | --- |
+| `childId` | 必填，`meetingstone_dispatch` 返回的 `taskRef.childId` |
+| `headBytes` / `tailBytes` | 取首尾字节窗口；两者不能与行参数同时使用 |
+| `lineFrom` / `lineTo` | 1 起、含端点；省略 `lineTo` 读到末尾 |
+
+返回 `content`（文本）、`bytes`（本次返回字节）、`resultBytes`（原始字节）、`truncated`、`range`、`recordPath`。
 
 ## 8. 宿主原生 Jobs（任务列表）
 

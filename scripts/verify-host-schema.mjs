@@ -115,7 +115,7 @@ const ctx = {
 }
 apply(ctx, {})
 
-assert.equal(tools.length, 6, '工具数量变了，门禁需要同步复核（当前应为 6）')
+assert.equal(tools.length, 7, '工具数量变了，门禁需要同步复核（当前应为 7）')
 for (const tool of tools) {
   checkParameters(tool.name, tool.parameters)
   checkOutputSchema(tool.name, tool.output?.schema)
@@ -145,6 +145,45 @@ assert.deepEqual(
   'isolation 参数必须是 none | worktree',
 )
 assert.equal(isolation.type, 'string')
+
+// 5) P0-B：TaskSpec / ContextPack 字段必须在注册产物里（模型才知道能传结构化简报）
+for (const key of [
+  'title',
+  'objective',
+  'scope',
+  'acceptance',
+  'evidence',
+  'contextRefs',
+  'roleHint',
+  'outputBudget',
+  'contextPack',
+]) {
+  assert.ok(
+    Object.hasOwn(dispatch.parameters.properties, key),
+    `meetingstone_dispatch 缺结构化字段 ${key}`,
+  )
+}
+assert.deepEqual(
+  dispatch.parameters.required,
+  ['role', 'task'],
+  '结构化字段必须全部可选：旧调用 role+task 不能被破坏',
+)
+
+// 6) P0-C：新工具 get_run_artifact 必须存在且 childId 必填
+const artifact = tools.find((t) => t.name === 'meetingstone_get_run_artifact')
+assert.ok(artifact, '缺 meetingstone_get_run_artifact 工具')
+assert.ok(
+  Array.isArray(artifact.parameters.required) &&
+    artifact.parameters.required.includes('childId'),
+  'meetingstone_get_run_artifact 的 childId 必须必填',
+)
+for (const key of ['headBytes', 'tailBytes', 'lineFrom', 'lineTo']) {
+  assert.equal(
+    artifact.parameters.properties[key]?.type,
+    'number',
+    `meetingstone_get_run_artifact.${key} 必须是 number`,
+  )
+}
 
 console.log(`PASS: ${tools.length} 个工具的注册产物符合宿主 / 模型 API 契约`)
 for (const tool of tools) {
