@@ -553,6 +553,25 @@ export function removePatchField(patch, field) {
   return next
 }
 
+/**
+ * 读一个字段的来源层（`global` / `project` / `session` / `default`）。
+ *
+ * `sources` 来自 `resolveEffectiveConfig().sources`。字段不存在或没有来源记录时
+ * 按 `default` 处理——这正是「schema 默认值不等于用户显式偏好」的判定依据。
+ *
+ * @param {any} sources
+ * @param {string} roleId
+ * @param {string} [field] 角色字段或 `channel.<key>`
+ * @returns {'global' | 'project' | 'session' | 'default'}
+ */
+export function fieldSource(sources, roleId, field = 'enabled') {
+  const entry = sources && typeof sources === 'object' ? sources.roles?.[roleId] : null
+  const fields = entry && typeof entry === 'object' ? entry.fields : null
+  if (!fields || !Object.hasOwn(fields, field)) return 'default'
+  const layer = fields[field]
+  return layer === 'global' || layer === 'project' || layer === 'session' ? layer : 'default'
+}
+
 /** @param {any} raw @param {string} field */
 function hasExplicit(raw, field) {
   if (!isPlainObject(raw)) return false
@@ -591,11 +610,15 @@ function diffFieldPaths(before, after) {
  *
  * @param {object} [input]
  * @param {object} [input.global] 全局插件配置（roles/channels/defaultRoleId/dispatchNotes）
+ * @param {object | object[]} [input.globalRaw] 规范化前的全局原始配置；用于判断
+ *   `enabled` 等字段是「用户显式写的」还是「schema 默认值填的」。省略时退回 `global`。
+ *   生产入口（src/index.js）必须在 `Config()` 之前保留原始配置并传入，否则默认值会被
+ *   误标成 `global`，`userPreference` 就无法区分 unset 与 enabled。
  * @param {object} [input.project] 项目配置（roles/roleOverrides/defaultRoleId/dispatchNotes/projectRules）
  * @param {object} [input.session] 会话配置（本模块的 SessionConfig 形状）
  * @returns {{ effective: object, sources: object, errors: any[] }}
  */
-export function resolveEffectiveConfig({ global, project, session } = {}) {
+export function resolveEffectiveConfig({ global, project, session, globalRaw } = {}) {
   /** @type {any[]} */
   const errors = []
   const globalConfig = isPlainObject(global) ? /** @type {any} */ (global) : {}
@@ -618,9 +641,16 @@ export function resolveEffectiveConfig({ global, project, session } = {}) {
   const globalById = new Map(
     createRegistry({ globalRoles: globalRolesRaw }).list().map((role) => [role.roleId, role]),
   )
+  // 来源判定用**原始**配置：Config() 会把 enabled 默认填成 true，直接看规范化结果
+  // 会把所有角色都误标成"显式启用"。
+  const globalSourceRoles = Array.isArray(globalRaw)
+    ? globalRaw
+    : Array.isArray(/** @type {any} */ (globalRaw)?.roles)
+      ? /** @type {any} */ (globalRaw).roles
+      : globalRolesRaw
   /** @type {Map<string, any>} */
   const globalRawById = new Map()
-  for (const raw of globalRolesRaw) {
+  for (const raw of globalSourceRoles) {
     if (isPlainObject(raw) && typeof raw.roleId === 'string' && !globalRawById.has(raw.roleId)) {
       globalRawById.set(raw.roleId, raw)
     }
@@ -644,7 +674,7 @@ export function resolveEffectiveConfig({ global, project, session } = {}) {
   // 2) 先给继承层的每个字段标来源（global / project / default）。
   for (const role of roles) {
     const globalRole = globalById.get(role.roleId)
-    const globalRaw = globalRawById.get(role.roleId)
+    const globalRawRole = globalRawById.get(role.roleId)
     const projectRaw = projectRawById.get(role.roleId)
     const projectPatch = projectOverrides[role.roleId]
     const isNewAtProject = !globalRole && Boolean(projectRaw)
@@ -657,7 +687,7 @@ export function resolveEffectiveConfig({ global, project, session } = {}) {
       if (isNewAtProject) {
         if (hasExplicit(projectRaw, field)) layer = 'project'
       } else if (globalRole) {
-        if (hasExplicit(globalRaw, field)) layer = 'global'
+        if (hasExplicit(globalRawRole, field)) layer = 'global'
         const projectExplicit = hasExplicit(projectRaw, field) || hasExplicit(projectPatch, field)
         if (projectExplicit && !deepEqual(globalRole[field], /** @type {any} */ (role)[field])) {
           layer = 'project'
@@ -671,7 +701,7 @@ export function resolveEffectiveConfig({ global, project, session } = {}) {
       if (isNewAtProject) {
         if (hasExplicitChannel(projectRaw, key)) layer = 'project'
       } else if (globalRole) {
-        if (hasExplicitChannel(globalRaw, key)) layer = 'global'
+        if (hasExplicitChannel(globalRawRole, key)) layer = 'global'
         const projectExplicit =
           hasExplicitChannel(projectRaw, key) || hasExplicitChannel(projectPatch, key)
         if (projectExplicit && !deepEqual(globalRole.channel?.[key], role.channel?.[key])) {

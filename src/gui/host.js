@@ -29,6 +29,7 @@
 
 import { createRequire } from 'node:module'
 import { roleAvailability } from '../dsh/register.js'
+import { deriveRoleView } from './state-model.js'
 import { CLI_SPECS } from '../cli/probe.js'
 import { createSessionRemoteHandlers } from './session-remote.js'
 import { registerSessionStrictRemotes } from './typert.js'
@@ -101,19 +102,41 @@ function normalizeError(value, source, now = Date.now()) {
 }
 
 /**
- * 角色 → 只读视图。`availability` 与 `meetingstone_list_roles` 共用同一实现
- * （src/dsh/register.js 的 roleAvailability），避免两处逻辑漂移。
+ * 角色 → 只读视图。
+ *
+ * 三字段（`userPreference` / `readiness` / `quota`）与三色 `color` 由
+ * `src/gui/state-model.js` 统一派生；`availability` 仍保留为旧字段的兼容投影，
+ * 且继续复用 `roleAvailability` 的判定结果，保证 `meetingstone_list_roles`
+ * 与自动路由看到的值不变。
+ *
  * @param {any} role
  * @param {any} ctx
+ * @param {any} [sources] `resolveEffectiveConfig(...).sources`（用于区分显式 enabled 与默认值）
  */
-function roleView(role, ctx) {
+function roleView(role, ctx, sources = null) {
   const channel = role?.channel
+  let subagents = null
+  try {
+    subagents = ctx?.subagents ?? null // 未 inject 时访问会抛，按"未知"处理
+  } catch {
+    subagents = null
+  }
+  const state = deriveRoleView(role, {
+    subagents,
+    availability: roleAvailability(role, ctx),
+    sources,
+  })
   return {
     roleId: typeof role?.roleId === 'string' ? role.roleId : '',
     name: typeof role?.name === 'string' ? role.name : '',
     aliases: Array.isArray(role?.aliases) ? role.aliases.map(String) : [],
     enabled: role?.enabled !== false,
-    availability: roleAvailability(role, ctx),
+    userPreference: state.userPreference,
+    readiness: state.readiness,
+    readinessReason: state.readinessReason,
+    quota: state.quota,
+    color: state.color,
+    availability: state.availability,
     // 角色引用的通道：设置页「默认模型」用它把默认角色解析到模型。
     channelId: typeof channel?.channelId === 'string' ? channel.channelId : '',
     provider: typeof channel?.provider === 'string' ? channel.provider : '',
@@ -211,6 +234,8 @@ function withTimeout(promise, ms) {
  * @param {any} [options.registry] 角色注册表 `{ list(), errors }`
  * @param {Array<any>} [options.channels] 插件配置里的通道实例表
  * @param {object} [options.config] 插件全局配置（默认角色/调度提示/并发策略）
+ * @param {any} [options.sources] 全局配置的字段来源（`resolveEffectiveConfig().sources`）；
+ *   用于区分「显式 enabled」与「schema 默认 enabled」，缺失时按默认值处理。
  * @param {{ probeAll?: (opts?: any) => Promise<any[]> }} [options.probe] CLI 探测器
  */
 export function createGuiState({
@@ -218,6 +243,7 @@ export function createGuiState({
   registry = null,
   channels = [],
   config = {},
+  sources = null,
   probe = null,
 } = {}) {
   /** @type {ReturnType<typeof normalizeError> | null} */
@@ -253,7 +279,7 @@ export function createGuiState({
       roles = []
     }
     return {
-      roles: Array.isArray(roles) ? roles.map((role) => roleView(role, ctx)) : [],
+      roles: Array.isArray(roles) ? roles.map((role) => roleView(role, ctx, sources)) : [],
       channels: Array.isArray(channels) ? channels.map(channelView) : [],
       lastError: lastError ? { ...lastError } : null,
     }

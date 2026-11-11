@@ -1,0 +1,428 @@
+// @ts-check
+/**
+ * 角色状态模型（P0-S1）单元测试。
+ *
+ * 覆盖：
+ * - `userPreference` 三态：显式 enabled / 显式 disabled / 默认值 -> unset
+ * - `readiness` 三态：配置完整 + 有效通道 + provider 证据；缺证据 -> unknown
+ * - `quota` 四态：V1 默认 unknown；按量付费 not_applicable；拒绝 429/refusal 推断
+ * - 三色派生 3×3×4 全矩阵
+ * - `deriveRoleView` 与旧 `availability` 兼容投影
+ * - 三级继承的每字段来源、恢复继承、会话不污染全局/项目
+ * - 旧配置零迁移（不要求新增字段、不修改入参）
+ */
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+import { PROVIDER_BY_KIND } from '../src/dsh/adapter.js'
+import { normalizeConfig } from '../src/config.js'
+import { createGuiState } from '../src/gui/host.js'
+import { createRegistry } from '../src/roles/registry.js'
+import {
+  DEFAULT_PROVIDER_BY_KIND,
+  QUOTA,
+  READINESS,
+  READINESS_REASON,
+  ROLE_COLOR,
+  STATE_MODEL_VALUES,
+  USER_PREFERENCE,
+  deriveQuota,
+  deriveReadiness,
+  deriveRoleColor,
+  deriveRoleView,
+  deriveUserPreference,
+  inspectReadiness,
+} from '../src/gui/state-model.js'
+import { fieldSource, resolveEffectiveConfig } from '../src/session/config.js'
+import { createSessionOverrideStore } from '../src/session/store.js'
+
+const ROOT = 'D:/proj'
+
+/** 一份最小的有效角色。 */
+function roleA(overrides = {}) {
+  return {
+    roleId: 'role-a',
+    name: 'A',
+    channel: { kind: 'acp-cli', provider: 'acp' },
+    ...overrides,
+  }
+}
+
+/** 构造 sources：fields 里给了什么就标什么。 */
+function sourcesFor(fields = {}) {
+  return { roles: { 'role-a': { layer: 'global', fields } } }
+}
+
+/** 内存文件系统 + 可注入 deps（与 tests/session-config.test.mjs 同款）。 */
+function memoryFs(initial = {}) {
+  const files = new Map(Object.entries(initial))
+  /** @type {{ path: string, text: string }[]} */
+  const writes = []
+  return {
+    files,
+    writes,
+    deps: {
+      readText: (/** @type {string} */ path) => {
+        if (!files.has(path)) {
+          const error = /** @type {any} */ (new Error('ENOENT'))
+          error.code = 'ENOENT'
+          throw error
+        }
+        return /** @type {string} */ (files.get(path))
+      },
+      writeText: async (/** @type {string} */ path, /** @type {string} */ text) => {
+        files.set(path, text)
+        writes.push({ path, text })
+      },
+      renameFile: async (/** @type {string} */ from, /** @type {string} */ to) => {
+        const text = files.get(from)
+        files.delete(from)
+        files.set(to, text)
+      },
+      removeFile: async (/** @type {string} */ path) => {
+        files.delete(path)
+      },
+      ensureDir: async () => {},
+      now: () => 1_700_000_000_000,
+    },
+  }
+}
+
+test('枚举固定：三字段 + 三色，旧 availability 取值不变', () => {
+  assert.deepEqual(STATE_MODEL_VALUES.userPreference, ['unset', 'enabled', 'disabled'])
+  assert.deepEqual(STATE_MODEL_VALUES.readiness, ['ready', 'blocked', 'unknown'])
+  assert.deepEqual(STATE_MODEL_VALUES.quota, ['available', 'exhausted', 'unknown', 'not_applicable'])
+  assert.deepEqual(Object.values(ROLE_COLOR), ['gray', 'yellow', 'green'])
+  assert.deepEqual(DEFAULT_PROVIDER_BY_KIND, PROVIDER_BY_KIND, '状态模型与适配器的 provider 映射不得漂移')
+})
+
+test('userPreference：只有显式 enabled 才算偏好，默认值映射 unset', () => {
+  // 没有 sources：enabled=true 可能是 schema 默认值，不能当偏好
+  assert.equal(deriveUserPreference(roleA({ enabled: true })), USER_PREFERENCE.UNSET)
+  // enabled=false 只可能来自显式配置
+  assert.equal(deriveUserPreference(roleA({ enabled: false })), USER_PREFERENCE.DISABLED)
+
+  assert.equal(
+    deriveUserPreference(roleA({ enabled: true }), { sources: sourcesFor({ enabled: 'default' }) }),
+    USER_PREFERENCE.UNSET,
+  )
+  assert.equal(
+    deriveUserPreference(roleA({ enabled: true }), { sources: sourcesFor({ enabled: 'global' }) }),
+    USER_PREFERENCE.ENABLED,
+  )
+  assert.equal(
+    deriveUserPreference(roleA({ enabled: true }), { sources: sourcesFor({ enabled: 'project' }) }),
+    USER_PREFERENCE.ENABLED,
+  )
+  assert.equal(
+    deriveUserPreference(roleA({ enabled: false }), { sources: sourcesFor({ enabled: 'session' }) }),
+    USER_PREFERENCE.DISABLED,
+  )
+  // sources 里根本没有这个角色 -> 按默认值处理
+  assert.equal(
+    deriveUserPreference(roleA({ enabled: true }), { sources: { roles: {} } }),
+    USER_PREFERENCE.UNSET,
+  )
+})
+
+test('readiness：配置完整 + 有效通道 + provider 可用才 ready，缺证据不猜', () => {
+  assert.equal(deriveReadiness(roleA(), { isProviderAvailable: () => true }), READINESS.READY)
+  assert.equal(deriveReadiness(roleA(), { isProviderAvailable: () => false }), READINESS.BLOCKED)
+  assert.equal(deriveReadiness(roleA(), {}), READINESS.UNKNOWN)
+
+  const unavailable = inspectReadiness(roleA(), { subagents: { getProvider: () => null } })
+  assert.equal(unavailable.readiness, READINESS.BLOCKED)
+  assert.equal(unavailable.reason, READINESS_REASON.PROVIDER_UNAVAILABLE)
+
+  const threw = inspectReadiness(roleA(), {
+    subagents: {
+      getProvider() {
+        throw new Error('not injected')
+      },
+    },
+  })
+  assert.equal(threw.readiness, READINESS.UNKNOWN)
+  assert.equal(threw.reason, READINESS_REASON.EVIDENCE_MISSING)
+
+  // 旧 availability 只作为 provider 证据；disabled 不污染 readiness
+  assert.equal(deriveReadiness(roleA({ enabled: false }), { availability: 'available' }), READINESS.READY)
+  assert.equal(deriveReadiness(roleA(), { availability: 'unknown' }), READINESS.UNKNOWN)
+  assert.equal(deriveReadiness(roleA(), { availability: 'provider-unavailable' }), READINESS.BLOCKED)
+
+  // 配置不完整 -> blocked
+  assert.equal(
+    inspectReadiness({ roleId: 'role-a', name: 'A' }, {}).reason,
+    READINESS_REASON.CHANNEL_MISSING,
+  )
+  assert.equal(
+    inspectReadiness(roleA({ channel: { kind: 'bogus' } }), {}).reason,
+    READINESS_REASON.CHANNEL_KIND_INVALID,
+  )
+  assert.equal(inspectReadiness({ name: 'A', channel: { kind: 'in-process' } }, {}).readiness, READINESS.BLOCKED)
+  assert.equal(inspectReadiness({ roleId: 'role-a', channel: { kind: 'in-process' } }, {}).readiness, READINESS.BLOCKED)
+
+  // 解析歧义：即使 provider 可用也不能 ready
+  assert.equal(
+    deriveReadiness(roleA({ ambiguous: true }), { isProviderAvailable: () => true }),
+    READINESS.BLOCKED,
+  )
+
+  // in-process 用宿主默认 provider 名 spawn
+  assert.equal(
+    deriveReadiness(
+      { roleId: 'role-b', name: 'B', channel: { kind: 'in-process' } },
+      { isProviderAvailable: (name) => name === 'spawn' },
+    ),
+    READINESS.READY,
+  )
+})
+
+test('quota：V1 默认 unknown；按量付费 not_applicable；拒绝失败信号推断', () => {
+  assert.equal(deriveQuota(roleA()), QUOTA.UNKNOWN)
+  assert.equal(deriveQuota(roleA({ billingMode: 'pay-as-you-go' })), QUOTA.NOT_APPLICABLE)
+  assert.equal(deriveQuota(roleA(), { billingMode: 'pay-as-you-go' }), QUOTA.NOT_APPLICABLE)
+
+  for (const quota of Object.values(QUOTA)) {
+    assert.equal(deriveQuota(roleA(), { quota, quotaSource: 'meter' }), quota)
+  }
+
+  // 429 / refusal / failureClass=quota 只是失败分类，不得变成 exhausted
+  assert.equal(deriveQuota(roleA(), { failureClass: 'quota' }), QUOTA.UNKNOWN)
+  assert.equal(deriveQuota(roleA(), { lastFailure: { failureClass: 'quota', stopReason: 'refusal' } }), QUOTA.UNKNOWN)
+  assert.equal(deriveQuota(roleA(), { lastError: 'HTTP 429 rate limit' }), QUOTA.UNKNOWN)
+  assert.equal(deriveQuota(roleA(), { quota: 'exhausted', quotaSource: 'failure' }), QUOTA.UNKNOWN)
+  assert.equal(deriveQuota(roleA(), { quota: 'exhausted', quotaSource: 'inferred' }), QUOTA.UNKNOWN)
+  // 显式注入的额度事实可采纳（生产 V1 不注入，默认仍是 unknown）
+  assert.equal(deriveQuota(roleA(), { quota: 'exhausted' }), QUOTA.EXHAUSTED)
+})
+
+test('三色矩阵：3 偏好 × 3 就绪 × 4 额度', () => {
+  const expected = (pref, readiness, quota) => {
+    if (pref === USER_PREFERENCE.DISABLED || readiness !== READINESS.READY) return ROLE_COLOR.GRAY
+    if (quota === QUOTA.EXHAUSTED) return ROLE_COLOR.YELLOW
+    return ROLE_COLOR.GREEN
+  }
+
+  for (const userPreference of Object.values(USER_PREFERENCE)) {
+    for (const readiness of Object.values(READINESS)) {
+      for (const quota of Object.values(QUOTA)) {
+        assert.equal(
+          deriveRoleColor({ userPreference, readiness, quota }),
+          expected(userPreference, readiness, quota),
+          `${userPreference}/${readiness}/${quota}`,
+        )
+      }
+    }
+  }
+
+  // 关键边界再单独钉一次
+  assert.equal(
+    deriveRoleColor({ userPreference: USER_PREFERENCE.UNSET, readiness: READINESS.READY, quota: QUOTA.UNKNOWN }),
+    ROLE_COLOR.GREEN,
+  )
+  assert.equal(
+    deriveRoleColor({ userPreference: USER_PREFERENCE.ENABLED, readiness: READINESS.READY, quota: QUOTA.EXHAUSTED }),
+    ROLE_COLOR.YELLOW,
+  )
+  assert.equal(
+    deriveRoleColor({ userPreference: USER_PREFERENCE.DISABLED, readiness: READINESS.READY, quota: QUOTA.AVAILABLE }),
+    ROLE_COLOR.GRAY,
+  )
+})
+
+test('deriveRoleView：输出三字段 + 颜色 + 旧 availability，且是无损 JSON', () => {
+  const role = roleA({ enabled: true })
+  const view = deriveRoleView(role, {
+    sources: sourcesFor({ enabled: 'global' }),
+    isProviderAvailable: () => true,
+  })
+  assert.deepEqual(view, {
+    roleId: 'role-a',
+    name: 'A',
+    userPreference: USER_PREFERENCE.ENABLED,
+    readiness: READINESS.READY,
+    readinessReason: READINESS_REASON.AVAILABLE,
+    quota: QUOTA.UNKNOWN,
+    color: ROLE_COLOR.GREEN,
+    availability: 'available',
+  })
+  assert.deepEqual(JSON.parse(JSON.stringify(view)), view, '不得夹带 undefined/函数')
+
+  // 显式禁用：灰 + 旧 availability=disabled
+  const disabled = deriveRoleView(roleA({ enabled: false }), {
+    availability: 'disabled',
+    isProviderAvailable: () => true,
+  })
+  assert.equal(disabled.userPreference, USER_PREFERENCE.DISABLED)
+  assert.equal(disabled.color, ROLE_COLOR.GRAY)
+  assert.equal(disabled.availability, 'disabled')
+
+  // ready + 明确的额度耗尽 -> 黄
+  const yellow = deriveRoleView(roleA(), {
+    isProviderAvailable: () => true,
+    quota: 'exhausted',
+    quotaSource: 'meter',
+  })
+  assert.equal(yellow.color, ROLE_COLOR.YELLOW)
+  assert.equal(yellow.quota, QUOTA.EXHAUSTED)
+
+  // 配置不完整 -> 灰，availability 不得投影成 available
+  const incomplete = deriveRoleView({ roleId: 'role-a', name: 'A' }, { availability: 'available' })
+  assert.equal(incomplete.readiness, READINESS.BLOCKED)
+  assert.equal(incomplete.color, ROLE_COLOR.GRAY)
+  assert.equal(incomplete.availability, 'unknown', 'blocked 不能借旧 availability 变成 available')
+})
+
+test('sources：规范化后的 enabled 默认值不得被当成显式偏好', () => {
+  const raw = { roles: [roleA()] }
+  const cfg = normalizeConfig(raw)
+  assert.equal(cfg.roles[0].enabled, true, 'schema 默认值确实会被填成 true')
+
+  // 只看规范化结果 -> 会误标成 global（说明为什么生产必须传 globalRaw）
+  const withoutRaw = resolveEffectiveConfig({ global: cfg })
+  assert.equal(fieldSource(withoutRaw.sources, 'role-a', 'enabled'), 'global')
+
+  // 传原始配置 -> 正确标成 default
+  const withRaw = resolveEffectiveConfig({ global: cfg, globalRaw: raw })
+  assert.equal(fieldSource(withRaw.sources, 'role-a', 'enabled'), 'default')
+  const view = deriveRoleView(withRaw.effective.roles[0], { sources: withRaw.sources })
+  assert.equal(view.userPreference, USER_PREFERENCE.UNSET)
+})
+
+test('三级继承：每字段标注 global/project/session/default，恢复继承后回落', () => {
+  const globalRaw = {
+    roles: [
+      {
+        roleId: 'role-a',
+        name: 'A',
+        description: '全局描述',
+        enabled: true,
+        channel: { kind: 'acp-cli', provider: 'acp', model: 'm-global' },
+      },
+    ],
+  }
+  const global = normalizeConfig(globalRaw)
+  const project = {
+    version: 1,
+    roles: [],
+    roleOverrides: { 'role-a': { description: '项目描述', enabled: false } },
+  }
+  const session = {
+    version: 1,
+    roleOverrides: { 'role-a': { channel: { model: 'm-session' }, enabled: true } },
+  }
+
+  const globalBefore = JSON.stringify(globalRaw)
+  const resolved = resolveEffectiveConfig({ global, globalRaw: globalRaw, project, session })
+  const fields = resolved.sources.roles['role-a'].fields
+  assert.deepEqual(fields, {
+    name: 'global',
+    aliases: 'default',
+    description: 'project',
+    fallbackRoleId: 'default',
+    timeoutMs: 'default',
+    enabled: 'session',
+    'channel.kind': 'global',
+    'channel.provider': 'global',
+    'channel.model': 'session',
+  })
+  const role = resolved.effective.roles.find((item) => item.roleId === 'role-a')
+  assert.equal(role.enabled, true, 'session 显式启用覆盖 project 的禁用')
+  assert.equal(deriveUserPreference(role, { sources: resolved.sources }), USER_PREFERENCE.ENABLED)
+
+  // 会话层撤回（恢复继承）后：enabled 回到 project，model 回到 global
+  const restored = resolveEffectiveConfig({ global, globalRaw: globalRaw, project })
+  const restoredRole = restored.effective.roles.find((item) => item.roleId === 'role-a')
+  assert.equal(fieldSource(restored.sources, 'role-a', 'enabled'), 'project')
+  assert.equal(fieldSource(restored.sources, 'role-a', 'channel.model'), 'global')
+  assert.equal(deriveUserPreference(restoredRole, { sources: restored.sources }), USER_PREFERENCE.DISABLED)
+
+  // 三层解析不得改写任何入参
+  assert.equal(JSON.stringify(globalRaw), globalBefore)
+  assert.deepEqual(project.roleOverrides['role-a'], { description: '项目描述', enabled: false })
+  assert.deepEqual(session.roleOverrides['role-a'], { channel: { model: 'm-session' }, enabled: true })
+})
+
+test('恢复继承（store.clearOverride）后会话文件不残留、来源回到继承层', async () => {
+  const fs = memoryFs()
+  const store = createSessionOverrideStore(fs.deps)
+  const globalRaw = { roles: [roleA({ enabled: true })] }
+  const global = normalizeConfig(globalRaw)
+  const inherited = resolveEffectiveConfig({ global, globalRaw }).effective.roles[0]
+
+  const written = await store.setOverride(ROOT, 'sess-a', {
+    roleId: 'role-a',
+    patch: { enabled: false },
+    inherited,
+  })
+  assert.equal(written.written, true)
+  assert.deepEqual(written.config.roleOverrides['role-a'], { enabled: false }, '会话层只存差异')
+
+  const withSession = resolveEffectiveConfig({ global, globalRaw, session: written.config })
+  assert.equal(fieldSource(withSession.sources, 'role-a', 'enabled'), 'session')
+  assert.equal(
+    deriveUserPreference(withSession.effective.roles[0], { sources: withSession.sources }),
+    USER_PREFERENCE.DISABLED,
+  )
+
+  const cleared = await store.clearOverride(ROOT, 'sess-a', { roleId: 'role-a', field: 'enabled' })
+  assert.deepEqual(cleared.config.roleOverrides, {}, '恢复继承后角色条目删除')
+
+  const after = resolveEffectiveConfig({ global, globalRaw, session: cleared.config })
+  assert.equal(fieldSource(after.sources, 'role-a', 'enabled'), 'global')
+  assert.equal(
+    deriveUserPreference(after.effective.roles[0], { sources: after.sources }),
+    USER_PREFERENCE.ENABLED,
+  )
+  // 全局配置对象没有被会话写入污染
+  assert.deepEqual(globalRaw.roles[0], roleA({ enabled: true }))
+})
+
+test('GUI 数据层：list 快照带三字段与颜色，旧 availability 保留', () => {
+  const raw = { roles: [roleA()] }
+  const cfg = normalizeConfig(raw)
+  const resolved = resolveEffectiveConfig({ global: cfg, globalRaw: raw })
+  const registry = createRegistry({ globalRoles: resolved.effective.roles })
+  const gui = createGuiState({
+    ctx: { subagents: { getProvider: () => ({}) } },
+    registry,
+    channels: [],
+    sources: resolved.sources,
+  })
+
+  const view = gui.snapshot().roles[0]
+  assert.equal(view.userPreference, USER_PREFERENCE.UNSET, '默认 enabled 不得显示成用户偏好')
+  assert.equal(view.readiness, READINESS.READY)
+  assert.equal(view.quota, QUOTA.UNKNOWN)
+  assert.equal(view.color, ROLE_COLOR.GREEN)
+  assert.equal(view.availability, 'available', '旧字段保持原值域，派单/路由不受影响')
+  assert.equal(typeof view.readinessReason, 'string')
+  // 快照必须能无损 JSON 往返（Remote 返回值约定）
+  assert.deepEqual(JSON.parse(JSON.stringify(gui.snapshot())), gui.snapshot())
+})
+
+test('旧配置零迁移：不要求新增字段、不写回、不改入参', () => {
+  const legacy = {
+    roles: [
+      {
+        roleId: 'role-legacy',
+        name: '旧角色',
+        channel: { kind: 'acp-cli', provider: 'acp' },
+      },
+    ],
+  }
+  const before = JSON.stringify(legacy)
+  const resolved = resolveEffectiveConfig({ global: legacy })
+  const role = resolved.effective.roles[0]
+
+  assert.equal(Object.hasOwn(role, 'userPreference'), false, '生效角色不注入新字段')
+  assert.equal(Object.hasOwn(role, 'readiness'), false)
+  assert.equal(Object.hasOwn(role, 'quota'), false)
+
+  const view = deriveRoleView(role, { sources: resolved.sources, availability: 'available' })
+  assert.equal(view.userPreference, USER_PREFERENCE.UNSET)
+  assert.equal(view.readiness, READINESS.READY)
+  assert.equal(view.quota, QUOTA.UNKNOWN)
+  assert.equal(view.availability, 'available')
+  assert.equal(JSON.stringify(legacy), before, '解析/派生不得修改旧配置')
+})

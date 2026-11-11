@@ -16,6 +16,7 @@ import { createSessionGuiApi, SESSION_GUI_ERRORS } from '../src/gui/session.js'
 import { createSessionRootResolver } from '../src/gui/session-root.js'
 import { createSessionOverrideStore } from '../src/session/store.js'
 import { createProjectConfigStore } from '../src/project/load.js'
+import { normalizeConfig } from '../src/config.js'
 
 const ROOT = 'D:/proj'
 
@@ -101,6 +102,20 @@ test('getSessionConfig：返回 生效角色表 + 覆盖 + 字段级来源', () 
   assert.deepEqual(view.overrides, {})
   assert.equal(view.sources.roles['role-sashi'].layer, 'global')
   assert.equal(view.sources.roles['role-sashi'].fields['channel.model'], 'global')
+})
+
+test('getSessionConfig：globalRaw 让默认 enabled 保持 default，不误标 global', () => {
+  const raw = { roles: GLOBAL_ROLES }
+  const cfg = normalizeConfig(raw)
+  const api = createSessionGuiApi({
+    cfg,
+    globalRaw: raw,
+    projectStore: { get: () => ({ config: {}, errors: [] }) },
+    sessionStore: createSessionOverrideStore(memorySessionFs().deps),
+    resolveProjectRoot: () => ROOT,
+  })
+  const view = api.getSessionConfig('sess-1')
+  assert.equal(view.sources.roles['role-sashi'].fields.enabled, 'default')
 })
 
 test('setSessionOverride：只写差异，继承层不变；来源标 session', async () => {
