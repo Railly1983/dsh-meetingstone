@@ -53,6 +53,7 @@ npm run verify                                              # 1) 门禁，必须
 | [架构](docs/architecture.md) | 分层与数据流、设计不变量 |
 | [配置参考](docs/configuration.md) | 全部字段、合并规则、错误码 |
 | [协作效率规范](docs/efficiency.md) | 派单简报、输出、收口、失败标注的协作约定（纯提示词，非配置） |
+| [统一任务/结果协议](docs/task-protocol.md) | 派单四件（名称/目标/范围/验收）、回执四件（状态/结论/证据/报告路径）、六条规则与工具字段映射 |
 | [GUI 只读配置页（0.2.0）](docs/gui-0.2.0.md) | 面板注册、会话角色覆盖、三个原生面板职责与命名规则 |
 | [Token 统计口径核查](docs/audit/token-stats.md) | Subagents 面板 token 的公式、fork 继承、可信边界与替代口径 |
 | [P0-A 真实 A/B 实测](docs/plan/2026-11-11-p0a-ab.md) | dispatch / get_task / list_roles 的真实回执字节对照与 Token 可得性 |

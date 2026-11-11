@@ -326,43 +326,38 @@ routingRules:
 - `meetingstone_get_task` 鐨?`recordPath` 鎸囧悜 `.meetingstone/runs/<childId>.json`锛沗resultBytes` 鏄師濮嬬粨鏋滃瓧鑺傛暟锛堜笉鏄埅鏂悗闀垮害锛夈€?
 - 涓婁笅鏂囬噸鏀句笂闄愪粠 64KiB 鏀剁揣鍒?**16KiB**锛堝ご 12KiB + 灏?4KiB锛夈€傚甫 `continuesFrom` 鐨勬淳鍗曚細鍦ㄨ惤鐩樿褰曢噷鍐?`continuationBytes`锛堟湰娆″疄闄呮敞鍏ョ殑閲嶆斁鍧楀瓧鑺傛暟锛夛紱娌℃湁閲嶆斁鍒?*鐪佺暐璇ュ瓧娈?*銆?
 
-### 7.1 TaskSpec锛堢粨鏋勫寲浠诲姟绠€鎶ワ紝P0-B锛?
+### 7.1 TaskSpec（结构化任务简报，P0-B）
 
-`meetingstone_dispatch` 浠嶆帴鍙?*绾瓧绗︿覆** `role + task`锛堟棫璋冪敤瀹屽叏涓嶅彈褰卞搷锛夈€傞澶栧彲閫夛細
+协议与示例见 [task-protocol.md](task-protocol.md)。`meetingstone_dispatch` 仍接受**纯字符串** `role + task`（旧调用不受影响）；以下字段均可选，传任一即进入结构化模式。
 
-| 瀛楁 | 绫诲瀷 | 璇存槑 |
+| 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `title` | string | 鐭换鍔″悕锛?*浣跨敤浠讳竴缁撴瀯鍖栧瓧娈垫椂蹇呭～**锛圝obs / list_runs 灞曠ず锛?|
-| `objective` | string | 瑕佽揪鎴愮殑缁撴灉锛涚渷鐣ユ椂浠诲姟姝ｆ枃鍗崇洰鏍?|
-| `scope` | `{ include: string[], exclude: string[] }` | 鑼冨洿涓庤竟鐣?|
-| `acceptance` | string[] | 楠屾敹鏍囧噯锛?*澹版槑浜?scope 鏃跺繀濉?* |
-| `evidence` | string[] | 闇€瑕佹彁浜ょ殑璇佹嵁 / 鏂囦欢 / 娴嬭瘯 |
-| `contextRefs` | string[] | 涓婁笅鏂囧寘鎴栨枃浠跺紩鐢?|
-| `roleHint` | string | 寤鸿瑙掕壊/鑳藉姏鎻愮ず锛堜笉鏀瑰彉鏈 `role` 璺敱锛?|
-| `outputBudget` | `{ summaryTokens?: number, notes?: string }` | 鎽樿涓庝骇鐗╅绠楋紱Provider 涓嶆敮鎸佺‖涓婇檺鏃跺彧浣滀负鎸囦护 |
-| `contextPack` | 瑙?搂7.2 | 鏈€灏忎笂涓嬫枃 |
+| `title` | string | 短任务名；**使用任一结构化字段时必填**（Jobs / list_runs 展示） |
+| `objective` | string | 要达成的结果；省略时任务正文即目标 |
+| `scope` | `{ include: string[], exclude: string[] }` | 范围与边界 |
+| `acceptance` | string[] | 验收标准；**声明了 scope 时必填** |
+| `evidence` | string[] | 需要提交的证据 / 文件 / 测试 |
+| `contextRefs` | string[] | 上下文包或文件引用 |
+| `roleHint` | string | 建议角色/能力提示（不改变本次 `role` 路由） |
+| `outputBudget` | `{ summaryTokens?: number, notes?: string }` | 摘要与产物预算；Provider 不支持硬上限时只作为指令 |
+| `contextPack` | 见 §7.2 | 最小上下文 |
 
-鏍￠獙瑙勫垯锛?*鍙湁缂轰簡灏辨棤娉曟墽琛?楠屾敹鎵嶆嫆缁?*锛宍TASKSPEC_INVALID`锛夛細
+> `evidence` / `contextRefs` / `contextPack` / `outputBudget` / `roleHint` 属于**可选增强**，不传不影响调用。
 
-- 缁撴瀯鍖栨ā寮忕己 `title` 鈫?鎷掔粷锛?
-- 澹版槑浜?`scope`锛坕nclude/exclude 闈炵┖锛夊嵈娌℃湁 `acceptance` 鈫?鎷掔粷锛?
-- 鍏抽敭瀛楁绫诲瀷閿欒锛堝 `acceptance` 浼犲瓧绗︿覆銆乣contextPack` 浼犳暟缁勶級鈫?鎷掔粷锛?
-- 绠€鍗曟煡璇㈠彧浼?`task`锛屾垨鍙甫 `title`锛屼竴寰嬫斁琛岋紱涓嶅己鍒?`scope`/`evidence`銆?
+校验规则（`TASKSPEC_INVALID`，完整清单见 [task-protocol.md §5](task-protocol.md#5-校验边界)）：
 
-### 7.2 ContextPack锛堟渶灏忓繀瑕佷笂涓嬫枃锛?
+- 结构化模式缺 `title` → 拒绝；
+- 声明了 `scope`（include/exclude 非空）却没有 `acceptance` → 拒绝；
+- 关键字段类型错误（如 `acceptance` 传字符串、`contextPack` 传数组）→ 拒绝；
+- 简单查询只传 `task`，或只带 `title`，一律放行；不强制 `scope`/`evidence`。
 
-```json
-{
-  "knownFacts": ["宸茬‘璁ょ殑鎶€鏈粨璁?鐗堟湰/閰嶇疆"],
-  "files": ["src/auth/callback.ts", "tests/auth/callback.test.ts"],
-  "priorResults": [{ "summary": "姝ｅ父璺緞宸查€氳繃锛屽彇娑堣矾寰勬湭楠岃瘉", "artifactRef": ".meetingstone/runs/<childId>.json" }],
-  "doNotRepeat": ["涓嶈閲嶆柊鎵弿鏁翠釜浠撳簱", "涓嶈閲嶅娴嬭瘯姝ｅ父瀹屾垚璺緞"]
-}
-```
+### 7.2 ContextPack（最小必要上下文）
 
-- TaskSpec + ContextPack 浼氭覆鏌撴垚**缁撴瀯鍖栨枃鏈潡**锛屾彃鍦ㄨ鑹蹭汉璁句箣鍚庛€佷换鍔℃鏂囦箣鍓嶏紱鍚屾椂闄勫甫銆屼笉瑕侀噸澶嶆帰绱?/ 涓嶈澶嶈堪闀挎枃銆嶇害鏉熴€?
-- 涓嶆柊澧炰换浣?AI 璋冪敤锛涗笉浼?`taskSpec`/`contextPack` 鏃舵彁绀鸿瘝涓庢棫鐗堜竴鑷达紙鍙鍑哄浐瀹氱殑杈撳嚭濂戠害锛岃 搂7.3锛夈€?
-- 钀界洏璁板綍閲岀殑 `taskSpec` / `contextPack` 鏄?*鎴柇鍚庣殑鎽樿**锛堝垪琛?鈮?0 鏉°€佸崟鏉?鈮?00 瀛楃锛夛紝鐢ㄤ簬 `list_runs` / `get_task` 灞曠ず鏍囬銆?
+形状为 `{ knownFacts[], files[], priorResults[{ summary, artifactRef }], doNotRepeat[] }`，示例与省略规则见 [task-protocol.md](task-protocol.md)。`doNotRepeat` 是保护字段，落盘摘要时原样保留。
+
+- TaskSpec + ContextPack 会渲染成**结构化文本块**，插在人设之后、任务正文之前；同时附带「不要重复探索 / 不要复述长文」约束。
+- 不新增任何 AI 调用；不传 `taskSpec`/`contextPack` 时提示词与旧版一致（只多出固定的输出契约，见 §7.3）。
+- 落盘记录里的 `taskSpec` / `contextPack` 是**截断后的摘要**（列表 ≤10 条、单条 ≤200 字符），用于 `list_runs` / `get_task` 展示标题。
 
 ### 7.3 缁撴瀯鍖栫粨鏋滃绾︼紙P0-C锛?
 
@@ -389,7 +384,7 @@ routingRules:
 - 璁板綍鏂板锛歚summary`锛堚墹8KiB锛岃秴鍑烘寜棣栧熬鎴柇锛屽甫 `summaryBytes`/`summaryTruncated`锛夈€乣resultStatus`銆乣evidence`銆乣artifacts`銆乣resultTests`銆乣openIssues`銆乣nextAction`銆乣handoff`锛?
 - 瀹屾暣 `result` 浠嶇劧钀界洏锛堜笂闄?256KiB锛夛紝鍙敤 `full:true` 鎴?`meetingstone_get_run_artifact` 鍙栧洖銆?
 
-`handoff` 瀛楁锛堢粨璁?璇佹嵁/浜х墿/鏈喅/涓嬩竴姝ワ級鐢辫В鏋愮粨鏋滅敓鎴愶紝妯℃澘瑙?[handoff.md](handoff.md)銆?
+`handoff` 瀛楁锛堢粨璁?璇佹嵁/浜х墿/鏈喅/涓嬩竴姝ワ級鐢辫В鏋愮粨鏋滅敓鎴愶紝妯℃澘瑙?[handoff.md](handoff.md)銆?；协议总纲见 [task-protocol.md](task-protocol.md)。
 
 ### 7.4 鎸夐渶璇诲彇瀹屾暣缁撴灉
 
