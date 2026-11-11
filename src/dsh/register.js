@@ -667,7 +667,8 @@ export function registerTools(ctx, deps) {
       name: TOOL_NAMES.LIST_RUNS,
       description:
         '列出当前项目最近的派单记录（新的在前）：title、childId、角色、通道、模型、状态、结构化结果摘要（resultStatus/summaryPreview）、' +
-        '耗时、工作树路径/分支、改动文件（changedFiles）、原生 Job id（jobId）、同项目任务之间的 overlapWarnings 与 200 字预览。' +
+        '失败分类（failureClass）与给主控的下一步建议（hint）、耗时、工作树路径/分支、改动文件（changedFiles）、原生 Job id（jobId）、' +
+        '同项目任务之间的 overlapWarnings 与 200 字预览。' +
         '数据来自 `.meetingstone/runs/`，DSH 重启后仍可查；上一个进程遗留的 running 会显示为 interrupted。' +
         '带工作树的记录不会被 100 条/30 天自动清理，用于保护未合并成果的元数据。',
       parameters: {
@@ -685,7 +686,8 @@ export function registerTools(ctx, deps) {
     {
       name: TOOL_NAMES.GET_TASK,
       description:
-        '按 childId 查询一次派发：status（running/completed/failed/cancelled/interrupted/unknown）、stopReason、resultBytes、jobId、recordPath、' +
+        '按 childId 查询一次派发：status（running/completed/failed/cancelled/interrupted/unknown）、stopReason、失败分类（failureClass）与' +
+        '下一步建议（hint）、resultBytes、jobId、recordPath、' +
         '工作树/改动文件/overlapWarnings。若结果带结构化 summary，默认只回 summary/resultStatus/openIssues/handoff 等字段（resultOmitted:true）；' +
         '否则回结果首 1KiB + 末 512B。需要原始全文时传 full:true，或用 meetingstone_get_run_artifact 按范围读取。' +
         '先查本进程内存（最近 20 条），终态再读项目内 `.meetingstone/runs/<childId>.json` 补隔离元数据；' +

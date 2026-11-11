@@ -54,17 +54,37 @@
 
 ## 4. 失败：先分类，再决定
 
-失败不是"再试一次"就完了。先标注属于哪一类，再按类给建议。建议由主导者拍板，**不自动执行**：
+失败不是"再试一次"就完了。插件会把失败归入下表的**白名单**，落盘 `failureClass` 并给出一句
+`hint`；主控据此决定等、换角色还是先查日志。建议由主导者拍板，**不自动执行**：
 
-| 类别 | 典型表现 | 建议 |
+| `failureClass` | 典型表现 | 建议（`hint` 摘要） |
 | --- | --- | --- |
-| 429 / 限流 | provider 返回 429、配额耗尽 | **等待**后重试；或**换模型 / 换通道** |
-| 超时 | 超过 `timeoutMs`、长时间无终态 | 缩小范围重装；或换更快的模型 |
-| refusal / 拒答 | 模型明确拒绝执行 | 改写派单（补目标 / 范围）；或换模型 |
-| 宿主容量满 | `ACTIVATION_LIMIT_REACHED`（共享池默认 8） | **等待**现有任务结束再派；不要排队、不要盲目重试 |
+| `quota` | Codex `category: limit`、ACP 429、`refusal` 且**空输出** | 等待额度重置，或改派其他 provider 的角色；不要原样重派 |
+| `auth` | 401、无效 API key、登录失效 | 先检查该 provider 的登录 / API key，再重新派单 |
+| `permission` | 403、`EACCES` / `EPERM`、权限被拒 | 确认工作目录与命令权限（沙箱 / 审批）后重派 |
+| `timeout` | 超过 `timeoutMs`、`ETIMEDOUT`、deadline exceeded | 缩小范围或拆子任务后重派 |
+| `refusal` | 安全拒答，且**有输出**（非额度） | 改写任务措辞或换模型 / 角色；必要时人工确认 |
+| `crash` | 进程异常、非零退出、被信号杀死 | 查 provider 日志与退出码后换角色重派，保留现场 |
+| `network` | `ECONNRESET`、DNS、502/503/504 | 检查到 provider 的连通性后再重试，别当成额度问题 |
+| `unknown` | 已失败但无法归入以上类别 | 先读 `diagnostic` 与 provider 日志，再决定是否重派 |
 
-> 宿主容量满时没有等待 / 队列机制，插件原样透传错误码（见 [配置参考](configuration.md) §5）。
-> 这里的"等待 / 换模型"是给人 / 主导者的处置建议，不是系统自动冷却、自动切换。
+判定顺序固定（先 `quota`，再 `auth` → `permission` → `timeout` → `network` → `refusal` →
+`crash`，兜底 `unknown`）。**成功任务不会带分类**：`status=completed` 且
+`stopReason=completed` 的记录 `failureClass`/`hint` 为 `null`；`cancelled` / `interrupted`
+是主动取消或卸载，也不算失败。真实故障的区分要点：
+
+- Codex 额度耗尽：`stopReason: error` + 诊断含 `category: limit` → `quota`；
+- CodeBuddy hy4 的 429：ACP 只回 `stopReason: refusal` + 空输出 → 按需求归 `quota`；
+- 安全拒答与额度不同：`refusal` **有输出**且不含限流特征才是 `refusal`。
+
+落盘位置：run 记录（`.meetingstone/runs/<childId>.json`）的 `failureClass` / `hint`；
+`meetingstone_get_task` 与 `meetingstone_list_runs` 默认展示这两个字段。旧记录没有字段，
+读取时按 `stopReason` / `diagnostic` / `error` 现算，不需要迁移。
+
+> **明确不做**：自动重试、冷却计时器、自动切模型 / 切角色。额度要等重置、认证要换 key、
+> 权限可能要改沙箱或审批——这些都需要人或主控拍板；插件自动重试只会把同一个错误再烧一遍
+> 额度，并让真实原因淹没在重试日志里。宿主容量满时同样没有等待 / 队列机制，插件原样透传
+> `ACTIVATION_LIMIT_REACHED`（见 [配置参考](configuration.md) §5），是否等、是否换人由主控决定。
 
 ## 反例：什么算浪费
 

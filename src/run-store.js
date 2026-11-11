@@ -16,6 +16,7 @@
  */
 import { promises as fs } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { classifyFailure, hintForFailure, isFailureClass } from './dispatch/failure.js'
 import { summarizeContextPack, summarizeTaskSpec } from './taskspec.js'
 
 /** 相对项目根的默认目录。 */
@@ -24,6 +25,8 @@ export const RUNS_RELATIVE_DIR = '.meetingstone/runs'
 export const MAX_RESULT_BYTES = 256 * 1024
 /** 单条错误信息上限。 */
 export const MAX_ERROR_BYTES = 16 * 1024
+/** 失败分类建议（hint）的落盘上限；一句话建议，正常远小于此值。 */
+export const MAX_HINT_BYTES = 1024
 /**
  * 单条记录里 `changedFiles` 的条数上限。
  * 为什么要设：大型仓库一次改动上万文件时，记录能涨到 1.5MB+，读取侧拒绝后
@@ -509,6 +512,40 @@ export function createRunStore(options) {
   }
 
   /**
+   * P1-A 失败分类字段（白名单 + 旧记录兼容）。
+   *
+   * - 记录里已有合法 `failureClass`：信任它；`hint` 缺失时按类别补一句（旧版本记录）。
+   * - 没有分类（旧记录 / 调用方未提供）：用 stopReason/diagnostic/error/result 现算。
+   *   取消/成功的记录会得到 `{ failureClass: null, hint: null }`，不会被误判为失败。
+   *
+   * @param {any} record
+   * @returns {{ failureClass: string | null, hint: string | null }}
+   */
+  function failureFieldsFor(record) {
+    if (isFailureClass(record?.failureClass)) {
+      const stored = record.failureClass
+      const hint =
+        typeof record?.hint === 'string' && record.hint.trim()
+          ? truncateUtf8(record.hint, MAX_HINT_BYTES).text
+          : hintForFailure(stored, typeof record?.provider === 'string' ? record.provider : null)
+      return { failureClass: stored, hint }
+    }
+    const classified = classifyFailure({
+      status: record?.status,
+      stopReason: record?.stopReason,
+      diagnostic: record?.diagnostic,
+      error: record?.error,
+      // 某些路径只有 result（磁盘字段名），用它判断 refusal 是否空输出
+      output: record?.result,
+      provider: record?.provider,
+    })
+    return {
+      failureClass: classified.failureClass,
+      hint: classified.hint ? truncateUtf8(classified.hint, MAX_HINT_BYTES).text : null,
+    }
+  }
+
+  /**
    * 把调用方给的记录规范化成落盘形状（白名单字段，避免意外写入敏感内容）。
    * @param {any} record
    */
@@ -550,6 +587,8 @@ export function createRunStore(options) {
       diagnostic: record.diagnostic
         ? truncateUtf8(record.diagnostic, MAX_ERROR_BYTES).text
         : null,
+      // P1-A：失败分类与给主控的一句话建议（成功/取消为 null；旧记录读取时现算）
+      ...failureFieldsFor(record),
       createdAt: record.createdAt ?? now(),
       startedAt: record.startedAt ?? null,
       finishedAt: record.finishedAt ?? null,
@@ -846,7 +885,7 @@ export function createRunStore(options) {
     // 单条查询也要给出重叠预警：需要同项目的其他记录一起比较。
     // 没有工作树的旧记录不必多读一遍目录。
     if (!record.worktree) {
-      return { ...record, overlapWarnings: [] }
+      return { ...record, ...failureFieldsFor(record), overlapWarnings: [] }
     }
     const all = await readRecords()
     // 读取侧同样应用条数/字节上限：避免 get_task 返回 MB 级 overlap（F4）。
@@ -857,6 +896,7 @@ export function createRunStore(options) {
     )
     return {
       ...record,
+      ...failureFieldsFor(record),
       overlapWarnings: overlap.overlapWarnings,
       overlapTruncated: overlap.overlapTruncated,
       overlapTotal: overlap.overlapTotal,
@@ -879,6 +919,7 @@ export function createRunStore(options) {
         parsed.overlapTruncated,
         parsed.overlapTotal,
       )
+      const failure = failureFieldsFor(parsed)
       return {
         childId: parsed.childId ?? 'unknown',
         runtimeId: parsed.runtimeId ?? null,
@@ -899,6 +940,9 @@ export function createRunStore(options) {
         stopConfirmed: typeof parsed.stopConfirmed === 'boolean' ? parsed.stopConfirmed : null,
         // 诊断摘要：同样只取前 200 字符（与 preview 一致），避免列表膨胀
         diagnostic: typeof parsed.diagnostic === 'string' ? parsed.diagnostic.slice(0, 200) : '',
+        // P1-A：失败分类与建议（成功/取消为 null），列表默认可见，主控不必再翻全文
+        failureClass: failure.failureClass,
+        hint: failure.hint,
         createdAt: parsed.createdAt ?? null,
         finishedAt: parsed.finishedAt ?? null,
         resultBytes: parsed.resultBytes ?? 0,

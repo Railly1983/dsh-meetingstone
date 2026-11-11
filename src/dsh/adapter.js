@@ -2,6 +2,7 @@
 import { promises as fs } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { composePromptWithContinuation } from '../context-replay.js'
+import { classifyFailure } from '../dispatch/failure.js'
 import { renderTaskBrief, summarizeContextPack, summarizeTaskSpec } from '../taskspec.js'
 import { parseStructuredResult, renderOutputContract, resultRecordFields } from '../result-contract.js'
 /**
@@ -1263,13 +1264,26 @@ export function createDshAdapter(ctx, options = {}) {
               value?.stopReason === 'refusal' && !settledOutput
               ? 'ACP refusal without output：可能是额度/频率限制（429）或模型拒绝；请检查 provider 日志或切换模型'
               : undefined
+        const settledStopReason = value?.stopReason ?? 'completed'
+        // P1-A：失败快分类。completed 不是失败 → null；refusal/error 等如实分类。
+        // 只写分类与建议，不在这里重试/换模型（处置由主控决定）。
+        const failure = classifyFailure({
+          status: 'completed',
+          stopReason: settledStopReason,
+          diagnostic: settledDiagnostic,
+          output: settledOutput,
+          provider: current.runBase?.provider ?? null,
+        })
         const settled = {
           status: 'completed',
-          stopReason: value?.stopReason ?? 'completed',
+          stopReason: settledStopReason,
           // 子 Agent 已正常结束；宿主返回了终态，视为进程已确认停止
           stopConfirmed: true,
           output: settledOutput,
           ...(settledDiagnostic !== undefined ? { diagnostic: settledDiagnostic } : {}),
+          ...(failure.failureClass
+            ? { failureClass: failure.failureClass, hint: failure.hint }
+            : {}),
           ...(current.jobId ? { jobId: current.jobId } : {}),
           // P0-C：容错提取结构化结果（纯文本则 summary=原文），完整 output 仍然落盘
           ...resultRecordFields(parseStructuredResult(settledOutput)),
@@ -1299,6 +1313,14 @@ export function createDshAdapter(ctx, options = {}) {
           return
         }
         if (!claimSettlement(current)) return
+        const failure = classifyFailure({
+          status: 'failed',
+          stopReason: 'error',
+          diagnostic: errorMessage(err),
+          error: { code: 'ADAPTER_ERROR', message: errorMessage(err) },
+          output: '',
+          provider: current.runBase?.provider ?? null,
+        })
         const settled = {
           status: 'failed',
           stopReason: 'error',
@@ -1306,6 +1328,9 @@ export function createDshAdapter(ctx, options = {}) {
           stopConfirmed: true,
           output: '',
           diagnostic: errorMessage(err),
+          ...(failure.failureClass
+            ? { failureClass: failure.failureClass, hint: failure.hint }
+            : {}),
           ...(current.jobId ? { jobId: current.jobId } : {}),
           at: now(),
         }
