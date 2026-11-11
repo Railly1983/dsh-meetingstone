@@ -182,6 +182,49 @@ function limitsView(limits) {
   }
 }
 
+/**
+ * CLI「偏好 × preflight」派生状态 → JSON-safe 的只读视图（P0-S2）。
+ *
+ * 与 `cliView` 的差别：多了 `userPreference` / `enabled` / `ready` /
+ * `blockedReason` / `manualSteps` / `retryable` / `login` / `hostIntegration`。
+ * 这些字段只来自 `src/cli/preferences.js` 与 `src/cli/preflight.js` 的派生，
+ * 不会在这里二次猜测。
+ *
+ * @param {any} state
+ */
+function cliStateView(state) {
+  const source = state && typeof state === 'object' ? state : {}
+  const cli = typeof source.cli === 'string' ? source.cli : ''
+  const spec = /** @type {Record<string, any>} */ (CLI_SPECS)[cli]
+  return {
+    cli,
+    label: typeof spec?.label === 'string' ? spec.label : cli,
+    category: 'external',
+    userPreference:
+      source.userPreference === 'enabled' || source.userPreference === 'disabled'
+        ? source.userPreference
+        : 'unset',
+    enabled: source.enabled === true,
+    ready: source.ready === 'ready' || source.ready === 'blocked' ? source.ready : 'unknown',
+    blockedReason: typeof source.blockedReason === 'string' ? source.blockedReason : null,
+    manualSteps: Array.isArray(source.manualSteps) ? source.manualSteps.map(String).slice(0, 6) : [],
+    retryable: source.retryable === true,
+    autoFix: false,
+    installed: source.installed === true,
+    path: typeof source.path === 'string' ? source.path : '',
+    version: typeof source.version === 'string' ? source.version : '',
+    source: typeof source.source === 'string' ? source.source : '',
+    login: source.login === true || source.login === false ? source.login : 'unknown',
+    hostIntegration:
+      source.hostIntegration === true || source.hostIntegration === false
+        ? source.hostIntegration
+        : 'unknown',
+    firstDetection: source.firstDetection === true,
+    notes: Array.isArray(source.notes) ? source.notes.map(String).slice(0, 8) : [],
+    checkedAt: typeof source.checkedAt === 'number' ? new Date(source.checkedAt).toISOString() : null,
+  }
+}
+
 /** CLI 探测结果 → JSON-safe 的只读视图。 */
 function cliView(result) {
   const source = result && typeof result === 'object' ? result : {}
@@ -237,6 +280,8 @@ function withTimeout(promise, ms) {
  * @param {any} [options.sources] 全局配置的字段来源（`resolveEffectiveConfig().sources`）；
  *   用于区分「显式 enabled」与「schema 默认 enabled」，缺失时按默认值处理。
  * @param {{ probeAll?: (opts?: any) => Promise<any[]> }} [options.probe] CLI 探测器
+ * @param {() => Promise<any[]>} [options.cliStates] P0-S2：返回已合并偏好 + preflight 的
+ *   CLI 状态（由 `src/gui/config-api.js` 提供）。提供时优先于 `probe.probeAll()`。
  */
 export function createGuiState({
   ctx = null,
@@ -245,6 +290,7 @@ export function createGuiState({
   config = {},
   sources = null,
   probe = null,
+  cliStates = null,
 } = {}) {
   /** @type {ReturnType<typeof normalizeError> | null} */
   let lastError = initialLastError(registry)
@@ -287,11 +333,17 @@ export function createGuiState({
 
   /**
    * 全局配置视图。只投影插件自己的 `cfg`，不推断、不补造字段。
-   * @param {any[] | null} cli
+   *
+   * `cliStates`（P0-S2）提供时，`cli` 改为「偏好 + preflight」视图，并额外给出
+   * `cliPreferences`（显式偏好投影）。未提供时保持旧形状，避免破坏旧消费者。
+   *
+   * @param {any[] | null} cli 原始 probe 结果（旧路径）
    * @param {string | null} cliError
+   * @param {any[] | null} [states] 已合并偏好 + preflight 的 CLI 状态
    */
-  function globalView(cli, cliError) {
+  function globalView(cli, cliError, states = null) {
     const source = config && typeof config === 'object' ? config : {}
+    const usingStates = Array.isArray(states)
     return {
       defaultRoleId: typeof source.defaultRoleId === 'string' ? source.defaultRoleId : '',
       dispatchNotes: typeof source.dispatchNotes === 'string' ? source.dispatchNotes : '',
@@ -301,7 +353,20 @@ export function createGuiState({
           : '.meetingstone.json',
       limits: limitsView(source.limits),
       channels: Array.isArray(channels) ? channels.map(channelDetailView) : [],
-      cli: Array.isArray(cli) ? cli.map(cliView) : null,
+      cli: usingStates ? states.map(cliStateView) : Array.isArray(cli) ? cli.map(cliView) : null,
+      // 只有新路径才追加，旧快照的 deepEqual 契约保持不变。
+      ...(usingStates
+        ? {
+            cliPreferences: Object.fromEntries(
+              states.map((state) => [
+                String(state?.cli ?? ''),
+                state?.userPreference === 'enabled' || state?.userPreference === 'disabled'
+                  ? state.userPreference
+                  : 'unset',
+              ]),
+            ),
+          }
+        : {}),
       cliError: cliError ?? null,
     }
   }
@@ -315,7 +380,17 @@ export function createGuiState({
   async function fullSnapshot() {
     let cli = null
     let cliError = null
-    if (probe && typeof probe.probeAll === 'function') {
+    let states = null
+    if (typeof cliStates === 'function') {
+      // P0-S2 路径：偏好 + preflight 一次算完，避免再单独 probe 一遍。
+      try {
+        const results = await withTimeout(cliStates(), CLI_PROBE_TIMEOUT_MS)
+        if (Array.isArray(results)) states = results
+        else cliError = 'CLI_PREFLIGHT_TIMEOUT'
+      } catch (error) {
+        cliError = error instanceof Error ? error.message : String(error)
+      }
+    } else if (probe && typeof probe.probeAll === 'function') {
       try {
         const results = await withTimeout(probe.probeAll(), CLI_PROBE_TIMEOUT_MS)
         if (Array.isArray(results)) cli = results
@@ -324,7 +399,7 @@ export function createGuiState({
         cliError = error instanceof Error ? error.message : String(error)
       }
     }
-    return { ...snapshot(), global: globalView(cli, cliError) }
+    return { ...snapshot(), global: globalView(cli, cliError, states) }
   }
 
   return { snapshot, fullSnapshot, recordError, recordDispatch }

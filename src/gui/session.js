@@ -1,5 +1,5 @@
 // @ts-check
-import { resolveEffectiveConfig, normalizeFieldPath } from '../session/config.js'
+import { SESSION_CONFIG_ERRORS, resolveEffectiveConfig, normalizeFieldPath } from '../session/config.js'
 import { isValidRoleId } from '../roles/ids.js'
 import { isValidSessionId } from '../session/store.js'
 
@@ -76,7 +76,7 @@ export function createSessionGuiApi({ cfg, globalRaw, projectStore, sessionStore
   /**
    * 读取当前会话的角色配置视图。
    * @param {string} sessionId
-   * @returns {{ effective: any, overrides: Record<string, any>, sources: any }}
+   * @returns {{ effective: any, overrides: Record<string, any>, sources: any, warnings: any[] }}
    */
   function getSessionConfig(sessionId) {
     const { resolved, sessionLoaded } = resolveView(sessionId)
@@ -84,6 +84,34 @@ export function createSessionGuiApi({ cfg, globalRaw, projectStore, sessionStore
       effective: resolved.effective,
       overrides: sessionLoaded.config.roleOverrides ?? {},
       sources: resolved.sources,
+      // 读取层的非致命告警（未知字段、坏字段等）；不改变 effective 的降级语义。
+      warnings: Array.isArray(sessionLoaded.errors) ? sessionLoaded.errors : [],
+    }
+  }
+
+  /**
+   * 给 store 的结果补一层稳定元数据：
+   * - `scope`：本次是字段级还是整角色
+   * - `idempotent`：没有真正落盘（重复设置/重复恢复）
+   * - `code`：首个错误码（成功且无错误时为 null），便于 Remote 调用方直接分支
+   *
+   * @param {any} result
+   * @param {'field' | 'role'} scope
+   */
+  function withResultMeta(result, scope) {
+    const errors = Array.isArray(result?.errors) ? result.errors : []
+    // 写被拒绝时优先报 CORRUPT：调用方最需要知道的是「文件坏了，先修/删」，
+    // 而不是最外层的 JSON 解析细节。
+    const corrupt = errors.find((error) => error?.code === SESSION_CONFIG_ERRORS.CORRUPT)
+    const firstCode = typeof errors[0]?.code === 'string' ? errors[0].code : null
+    return {
+      ...result,
+      scope,
+      idempotent: result?.written !== true,
+      code:
+        typeof result?.code === 'string' && result.code
+          ? result.code
+          : corrupt?.code ?? firstCode,
     }
   }
 
@@ -123,15 +151,30 @@ export function createSessionGuiApi({ cfg, globalRaw, projectStore, sessionStore
         ? { channel: { [fieldPath.slice('channel.'.length)]: value } }
         : { [fieldPath]: value }
 
-    return sessionStore.setOverride(projectRoot, sessionId, { roleId, patch, inherited: inheritedRole })
+    // 注意：本函数**不是 async**。参数/白名单错误必须同步 throw（Remote 层才能
+    // 统一转成 RemoteError）；只有落盘是异步的。
+    return Promise.resolve(
+      sessionStore.setOverride(projectRoot, sessionId, {
+        roleId,
+        patch,
+        inherited: inheritedRole,
+      }),
+    ).then((result) => withResultMeta(result, 'field'))
   }
 
   /**
    * 恢复一个字段（或全部）的继承。field 省略 → 整角色恢复继承。
+   *
+   * ⚠️ 「省略 field」的坑（Host 把缺失当缺失）：
+   * 这里把 `undefined` / `null` 统一归一化为「整角色」，并且**显式传**
+   * `{ roleId, field: undefined }`。不要依赖对象字面量里省略键的隐式语义，
+   * 也不要把 `undefined` 序列化成缺参——strict Remote 的第三参是可选的，
+   * 两种写法在 Host 侧必须落到同一个分支。
+   *
    * @param {string} sessionId
    * @param {string} roleId
-   * @param {string | undefined} field
-   * @returns {any} sessionStore.clearOverride 的结果
+   * @param {string | null | undefined} field
+   * @returns {any} sessionStore.clearOverride 的结果（带 scope/idempotent/code）
    */
   function clearSessionOverride(sessionId, roleId, field) {
     if (!isValidSessionId(sessionId)) {
@@ -140,8 +183,11 @@ export function createSessionGuiApi({ cfg, globalRaw, projectStore, sessionStore
     if (!isValidRoleId(roleId)) {
       throw guiError(SESSION_GUI_ERRORS.INVALID_ROLE_ID, `角色 id 不合法：${roleId}`)
     }
-    if (field !== undefined && field !== null) {
-      const fieldPath = normalizeFieldPath(field)
+
+    const hasField = field !== undefined && field !== null
+    let fieldPath
+    if (hasField) {
+      fieldPath = normalizeFieldPath(field)
       if (!fieldPath) {
         throw guiError(
           SESSION_GUI_ERRORS.INVALID_FIELD,
@@ -151,7 +197,13 @@ export function createSessionGuiApi({ cfg, globalRaw, projectStore, sessionStore
     }
 
     const { projectRoot } = resolveView(sessionId)
-    return sessionStore.clearOverride(projectRoot, sessionId, { roleId, field })
+    // 显式传 field 键（即使值为 undefined）：语义是「清整个角色覆盖」。
+    return Promise.resolve(
+      sessionStore.clearOverride(projectRoot, sessionId, {
+        roleId,
+        field: fieldPath,
+      }),
+    ).then((result) => withResultMeta(result, hasField ? 'field' : 'role'))
   }
 
   return { getSessionConfig, setSessionOverride, clearSessionOverride }

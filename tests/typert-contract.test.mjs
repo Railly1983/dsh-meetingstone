@@ -92,8 +92,24 @@ test('参数校验：zod 在边界拒绝空串/错误类型，接受合法值', 
   assert.doesNotThrow(() =>
     view.parse({ effective: { roles: [] }, overrides: {}, sources: { roles: {} } }),
   )
+  // P0-S2：warnings 必须能穿过 strict result codec（zod 默认会剥未知键）。
+  assert.deepEqual(
+    view.parse({
+      effective: { roles: [] },
+      overrides: {},
+      sources: { roles: {} },
+      warnings: [{ code: 'SESSION_CONFIG_INVALID_JSON', message: 'bad' }],
+    }).warnings,
+    [{ code: 'SESSION_CONFIG_INVALID_JSON', message: 'bad' }],
+  )
+
   const override = byMethod.setSessionOverride.result.create()
   assert.doesNotThrow(() => override.parse({ ok: true, written: true, patch: {} }))
+  // P0-S2：scope/idempotent/code 也必须能穿过 strict result codec。
+  assert.deepEqual(
+    override.parse({ ok: true, written: false, idempotent: true, scope: 'field', code: null }),
+    { ok: true, written: false, idempotent: true, scope: 'field', code: null },
+  )
 })
 
 test('非 strict / 空壳 create 被拒绝（不允许退回 src-json 绕过）', () => {

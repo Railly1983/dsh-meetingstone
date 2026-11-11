@@ -53,10 +53,12 @@ export function createSessionRemoteHandlers(sessionApi, options = {}) {
     /**
      * @param {string} sessionId
      * @param {string} roleId
-     * @param {string | undefined} field
+     * @param {string | null | undefined} field
      */
     clearSessionOverride(sessionId, roleId, field) {
-      return call(() => sessionApi.clearSessionOverride(sessionId, roleId, field))
+      // `field` 省略 = 整角色恢复继承。显式把 null 归一化为 undefined，
+      // 不把两种写法漏给业务层（Host 的 strict 第三参是可选的）。
+      return call(() => sessionApi.clearSessionOverride(sessionId, roleId, field === null ? undefined : field))
     },
   }
 }

@@ -10,11 +10,16 @@
  * - 任何资源都挂在 ctx.effect() 上，dispose 必须幂等且串行等待
  * - 本项目**不提供只读通道**：宿主 subagent spec 没有权限字段，做不到绝对只读就明说
  */
-import { Config } from './config.js'
+import { Config, normalizeConfig } from './config.js'
 import { createRegistry } from './roles/registry.js'
 import { createDispatcher } from './dispatch/dispatcher.js'
 import { createProbe } from './cli/probe.js'
 import { createDefaultResolvers, runCommand } from './cli/resolvers.js'
+import { createPreflight } from './cli/preflight.js'
+import { CLI_PROVIDER } from './cli/preferences.js'
+import { createGlobalConfigWriter } from './config/global-writer.js'
+import { createNodeProjectConfigWriter } from './project/write.js'
+import { createConfigGuiApi } from './gui/config-api.js'
 import { createDshAdapter } from './dsh/adapter.js'
 import { inject as toolsInject, registerTools } from './dsh/register.js'
 import { createRequire } from 'node:module'
@@ -85,7 +90,9 @@ export function apply(ctx, config = {}) {
   // 让工具仍然可用（角色表为空时 list_roles 会如实返回空，而不是插件消失）。
   let cfg
   try {
-    cfg = Config(/** @type {any} */ (config) ?? {})
+    // normalizeConfig 会先容错清洗 cliPreferences（非法项按 unset 丢弃），
+    // 避免一个手写错的 CLI 偏好把整个角色表拖回默认值。
+    cfg = normalizeConfig(/** @type {any} */ (config) ?? {})
   } catch (err) {
     cfg = Config({})
     const line = `[${name}] config invalid, falling back to defaults: ${
@@ -133,6 +140,62 @@ export function apply(ctx, config = {}) {
     runner: runCommand,
   })
 
+  /**
+   * P0-S2：外部 CLI 的 preflight。宿主集成证据来自 `ctx.subagents.getProvider`
+   * （与派单/可用性判定同源）；登录状态当前没有可靠探测源，保持 `unknown`，
+   * 不伪造 ready。所有检查只读，不做自动安装/登录/改权限。
+   */
+  const preflight = createPreflight({
+    probe,
+    hostIntegration: (cli) => {
+      const provider = /** @type {Record<string, string>} */ (CLI_PROVIDER)[cli]
+      if (!provider) return undefined
+      let subagents = null
+      try {
+        subagents = ctx.subagents ?? null
+      } catch {
+        return undefined
+      }
+      if (!subagents || typeof subagents.getProvider !== 'function') return undefined
+      try {
+        return Boolean(subagents.getProvider(provider))
+      } catch {
+        return undefined
+      }
+    },
+  })
+
+  /** 全局配置写入（profile patch；经官方 configEditor.edit）。 */
+  const globalWriter = createGlobalConfigWriter({
+    getConfigEditor: () => {
+      try {
+        return typeof ctx.get === 'function' ? ctx.get('configEditor') : undefined
+      } catch {
+        return undefined
+      }
+    },
+    getEntry: () => {
+      try {
+        return ctx.fiber?.entry
+      } catch {
+        return undefined
+      }
+    },
+    log: (level, line) => {
+      if (typeof ctx.logger?.[level] === 'function') ctx.logger[level](line)
+      else if (level === 'error') console.error(line)
+      else console.log(line)
+    },
+  })
+
+  /** 项目配置写入（`.meetingstone.json`；白名单字段 + 保留未知字段）。 */
+  const projectWriter = createNodeProjectConfigWriter({
+    onWrite: (path) => projectStore.invalidate(path),
+  })
+
+  /** P0-S2 配置写 API（Host 侧；strict Remote 端点由 U1 接线）。 */
+  const configApi = createConfigGuiApi({ cfg, globalWriter, projectWriter, preflight })
+
   // GUI 只读数据（Host half）：与工具共用同一份 registry / channels / cfg，不另建数据源。
   // 最近错误由注册表错误初始化，随后由项目配置加载、派单失败、落盘失败更新。
   //
@@ -151,6 +214,8 @@ export function apply(ctx, config = {}) {
       limits: cfg.limits,
     },
     probe,
+    // P0-S2：设置页拿「偏好 + preflight」状态，而不是裸 probe 结果。
+    cliStates: () => configApi.listCliStates(),
   })
 
   /**

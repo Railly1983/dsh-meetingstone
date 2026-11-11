@@ -106,6 +106,8 @@ export function createSessionRemoteSpec(zod) {
       effective: z.unknown(),
       overrides: z.record(z.string(), z.unknown()),
       sources: z.unknown(),
+      // P0-S2：读取层非致命告警（未知字段/坏字段）。可选，旧 Host 不返回也兼容。
+      warnings: z.array(z.unknown()).optional(),
     })
 
   const overrideResult = () =>
@@ -118,6 +120,10 @@ export function createSessionRemoteSpec(zod) {
       patch: z.unknown().optional(),
       path: z.string().optional(),
       config: z.unknown().optional(),
+      // P0-S2：写结果元数据（字段级/整角色、是否幂等、首个错误码）。
+      scope: z.enum(['field', 'role']).optional(),
+      idempotent: z.boolean().optional(),
+      code: z.string().nullable().optional(),
     })
 
   return {

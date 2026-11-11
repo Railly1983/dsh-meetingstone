@@ -60,6 +60,63 @@ export const PROBE_SOURCES = Object.freeze({
   MANUAL: 'manual',
 })
 
+/**
+ * 探测/预检的失败分类（P0-S2）。
+ *
+ * **只根据真实证据分类**：`--version` 的退出码、stderr、spawn 错误码。
+ * 没有证据时给 `startup-failed` 或 `unknown`，不猜「未登录」之类的结论。
+ */
+export const PROBE_FAILURES = Object.freeze({
+  NOT_INSTALLED: 'not-installed',
+  LOGIN_REQUIRED: 'login-required',
+  PERMISSION_DENIED: 'permission-denied',
+  PATH_INVALID: 'path-invalid',
+  STARTUP_FAILED: 'startup-failed',
+  UNKNOWN_CLI: 'unknown-cli',
+})
+
+/** `--version` 输出里能证明「需要登录/授权」的线索。 */
+const LOGIN_RE =
+  /(login|log in|sign in|sign-in|authenticat|unauthorized|forbidden|not logged|invalid (?:api )?key|api key|token (?:expired|invalid)|401|403)/i
+/** 权限不足（ACL / EACCES / EPERM）的线索。 */
+const PERMISSION_RE = /(permission denied|access is denied|access denied|not permitted|eacces|eperm)/i
+/** 路径异常（文件不存在/被移动）的线索。 */
+const PATH_RE = /(enoent|no such file|not found|cannot find|does not exist)/i
+
+/**
+ * 按文本线索分类失败原因（顺序固定：权限 → 登录 → 路径 → 启动失败）。
+ * @param {unknown} text
+ * @returns {string}
+ */
+function classifyProbeText(text) {
+  const value = String(text ?? '')
+  if (PERMISSION_RE.test(value)) return PROBE_FAILURES.PERMISSION_DENIED
+  if (LOGIN_RE.test(value)) return PROBE_FAILURES.LOGIN_REQUIRED
+  if (PATH_RE.test(value)) return PROBE_FAILURES.PATH_INVALID
+  return PROBE_FAILURES.STARTUP_FAILED
+}
+
+/**
+ * 把一次 `--version` 的运行结果分类。
+ * @param {{ code?: number, stdout?: string, stderr?: string } | null | undefined} run
+ * @returns {string}
+ */
+export function classifyProbeFailure(run) {
+  return classifyProbeText(`${run?.stdout ?? ''}\n${run?.stderr ?? ''}`)
+}
+
+/**
+ * 把 runner 抛出的异常分类（ENOENT / EACCES 等优先于文本）。
+ * @param {unknown} error
+ * @returns {string}
+ */
+export function classifyProbeError(error) {
+  const code = /** @type {any} */ (error)?.code
+  if (code === 'EACCES' || code === 'EPERM') return PROBE_FAILURES.PERMISSION_DENIED
+  if (code === 'ENOENT') return PROBE_FAILURES.PATH_INVALID
+  return classifyProbeText(error instanceof Error ? error.message : String(error))
+}
+
 /** 探测结果默认缓存时长：5 分钟（商店应用升级后要能较快反映）。 */
 export const DEFAULT_TTL_MS = 5 * 60 * 1000
 
@@ -76,6 +133,8 @@ export const DEFAULT_TTL_MS = 5 * 60 * 1000
  * @property {string | null} path
  * @property {string | null} version
  * @property {string | null} source
+ * @property {boolean} ready 探测级「可启动」：`--version` 成功且版本可解析。**不代表已登录**
+ * @property {string | null} blockedReason 探测级失败分类（`PROBE_FAILURES`）；成功为 null
  * @property {string[]} notes 人类可读的探测备注（失败原因、多候选等）
  * @property {number} checkedAt
  */
@@ -128,6 +187,8 @@ export function createProbe(deps = {}) {
         path: null,
         version: null,
         source: null,
+        ready: false,
+        blockedReason: PROBE_FAILURES.UNKNOWN_CLI,
         notes: [`未知的 CLI：${cli}`],
         checkedAt: now(),
       }
@@ -142,6 +203,8 @@ export function createProbe(deps = {}) {
     const notes = []
     /** @type {ProbeCandidate[]} */
     const candidates = []
+    /** 首个可归因的失败分类；多个候选时保留最先出现的原因。 @type {string | null} */
+    let failureReason = null
 
     // 1. 多源枚举候选（resolver 顺序即优先级）
     for (const resolve of resolvers) {
@@ -176,15 +239,18 @@ export function createProbe(deps = {}) {
         run = await runner(candidate.path, spec.versionArgs)
       } catch (err) {
         notes.push(`${candidate.source} 候选执行失败：${err instanceof Error ? err.message : String(err)}`)
+        failureReason ??= classifyProbeError(err)
         continue
       }
       if (!run || run.code !== 0) {
         notes.push(`${candidate.source} 候选退出码非 0（${run?.code ?? 'n/a'}），跳过`)
+        failureReason ??= classifyProbeFailure(run)
         continue
       }
       const version = parseVersion(cli, `${run.stdout ?? ''}\n${run.stderr ?? ''}`)
       if (!version) {
         notes.push(`${candidate.source} 候选版本输出无法解析，跳过`)
+        failureReason ??= PROBE_FAILURES.STARTUP_FAILED
         continue
       }
       const value = /** @type {ProbeResult} */ ({
@@ -193,6 +259,8 @@ export function createProbe(deps = {}) {
         path: candidate.path,
         version,
         source: candidate.source,
+        ready: true,
+        blockedReason: null,
         notes,
         checkedAt: now(),
       })
@@ -208,6 +276,9 @@ export function createProbe(deps = {}) {
       path: null,
       version: null,
       source: null,
+      ready: false,
+      // 没有候选 = 未安装；有候选但都失败 = 保留首个可归因原因（权限/登录/路径/启动）。
+      blockedReason: failureReason ?? (unique.length === 0 ? PROBE_FAILURES.NOT_INSTALLED : PROBE_FAILURES.STARTUP_FAILED),
       notes,
       checkedAt: now(),
     })
