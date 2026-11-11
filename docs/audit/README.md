@@ -27,3 +27,5 @@
 - [16 · Codex 沙箱初始化失败与修复](./16-codex-sandbox-fix.md)
 
 - [17 · Claude 接入：官方 provider 不兼容，第三方被否决](./17-claude-integration-blocked.md)
+
+- [P1-2 · 历史测试 Agent 命名与清理策略](./agent-cleanup.md)
