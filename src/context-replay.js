@@ -27,12 +27,21 @@ const OPEN_MARK = '[PREVIOUS TASK OUTPUT — UNTRUSTED CONTEXT]'
 const CLOSE_MARK = '[END PREVIOUS TASK OUTPUT]'
 
 /**
- * 可能出现在自由文本中间的「保护段」标题。
+ * 可能出现在自由文本中间的「保护段」标题（行首识别；用于确定段落的起点）。
  * 文档 §8：摘要/截断不能删掉安全策略、权限限制、任务边界或验收标准。
- * 这里只做**行级识别**（不解析语义）：命中标题后，把该段原样保留到截断结果之后。
  */
 const PROTECTED_SECTION_HEADER =
   /^\s*(?:#{1,6}\s*)?(?:[-*+]\s*)?(?:\d+[.)]\s*)?(?:(?:acceptance|permissions?|safety(?:\s*policy)?|scope|do\s*not\s*repeat)(?:\b|$)|(?:验收|权限|安全|范围|(?:任务)?边界|不要重复|禁止重复))/i
+
+/**
+ * 行内保护关键词（P0-B 审计 F5）。
+ *
+ * 只看行首会漏掉「注意：…不得写盘；必须验收…」这种夹在正文中间的约束。
+ * 这里改成**行内命中**：只要一行里出现验收/权限/安全/边界/禁止类关键词，
+ * 就把该行（及其后紧邻的列表项/续行）原样保留。宁可多保留，也不丢安全约束。
+ */
+const PROTECTED_INLINE_KEYWORD =
+  /(?:\b(?:acceptance|permissions?|safety(?:\s*policy)?|scope|do\s+not\s+repeat|must\s+not|read-?only)\b)|(?:验收|权限|安全(?:策略|限制|要求)?|范围|(?:任务)?边界|不要重复|禁止重复|不得|禁止)/i
 
 /**
  * 是否有实际内容（空串/空数组/空对象/全空的 scope 都不算）。
@@ -148,6 +157,10 @@ export function renderProtectedFieldsBlock(record, options = {}) {
  * 从自由文本里提取可能被首尾截断丢掉的保护段（验收、权限、安全、范围、边界等）。
  * 只做行级识别，不解释内容；返回原样文本块。
  *
+ * 两种命中：
+ * - 行首标题（`验收标准：` / `## Permissions`）：按段落收集到空行或下一个标题；
+ * - 行内关键词（`注意：…不得写盘；必须验收…`）：保留该行与紧邻的列表项/缩进续行。
+ *
  * @param {unknown} text
  * @returns {string[]}
  */
@@ -157,29 +170,49 @@ export function extractProtectedSections(text) {
   const blocks = []
   let index = 0
   while (index < lines.length) {
-    if (!PROTECTED_SECTION_HEADER.test(lines[index])) {
+    const line = lines[index]
+    const isHeader = PROTECTED_SECTION_HEADER.test(line)
+    const isInline = PROTECTED_INLINE_KEYWORD.test(line)
+    if (!isHeader && !isInline) {
       index += 1
       continue
     }
     const start = index
     index += 1
-    while (index < lines.length) {
-      const line = lines[index]
-      if (line.trim() === '') {
-        // 列表项之间的空行不结束本段；普通空行结束。
-        const next = lines[index + 1]
-        if (next !== undefined && /^\s*(?:[-*+]|\d+[.)])\s+/.test(next)) {
-          index += 1
-          continue
+    if (isHeader) {
+      while (index < lines.length) {
+        const next = lines[index]
+        if (next.trim() === '') {
+          // 列表项之间的空行不结束本段；普通空行结束。
+          const after = lines[index + 1]
+          if (after !== undefined && /^\s*(?:[-*+]|\d+[.)])\s+/.test(after)) {
+            index += 1
+            continue
+          }
+          break
         }
-        break
+        if (PROTECTED_SECTION_HEADER.test(next)) break
+        if (/^\s*(?:#{1,6}\s+|\[[A-Z][^\]]*\]\s*$)/.test(next)) break
+        index += 1
       }
-      if (PROTECTED_SECTION_HEADER.test(line)) break
-      if (/^\s*(?:#{1,6}\s+|\[[A-Z][^\]]*\]\s*$)/.test(line)) break
-      index += 1
+    } else {
+      // 行内命中：只带紧随其后的列表项/缩进续行，避免把整段无关正文都算进来。
+      while (index < lines.length) {
+        const next = lines[index]
+        if (next.trim() === '') {
+          const after = lines[index + 1]
+          if (after !== undefined && /^\s*(?:[-*+]|\d+[.)])\s+/.test(after)) {
+            index += 1
+            continue
+          }
+          break
+        }
+        if (!/^\s*(?:[-*+]|\d+[.)])\s+/.test(next) && !/^\s+\S/.test(next)) break
+        index += 1
+      }
     }
     const block = lines.slice(start, index).join('\n').trim()
-    if (block) blocks.push(block)
+    if (block && !blocks.includes(block)) blocks.push(block)
   }
   return blocks
 }

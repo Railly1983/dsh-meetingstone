@@ -579,7 +579,11 @@ export function createDshAdapter(ctx, options = {}) {
   /**
    * 已完成任务的结果快照（childId → 结果），只留最近 20 条。
    * 用途：`meetingstone_get_task` 读回"子 Agent 到底输出了什么"。
-   * @type {Map<string, { status: string, stopReason?: string, output: string, diagnostic?: string, at: number }>}
+   *
+   * 必须带**完整 runBase**（taskSpec/contextPack/title 等）：`continuesFrom` 命中内存
+   * 时直接返回这里，缺了 runBase 就会让内存重放比磁盘重放少掉验收/范围/禁止重复
+   * （P0-B 审计 F1）。快照与落盘记录保持同一形状，重放才有一致语义。
+   * @type {Map<string, any>}
    */
   const finished = new Map()
   /** @param {string} childId @param {any} value */
@@ -1067,7 +1071,7 @@ export function createDshAdapter(ctx, options = {}) {
         error: { code: disposeError.code, message: disposeError.message },
         at: startedAt,
       }
-      rememberFinished(lateChildId, settled)
+      rememberFinished(lateChildId, { ...lateRunBase, ...settled })
       // 先挂结果监听再写盘：写盘期间 result 落定也能清掉句柄/槽位。
       watchActivationResult(lateChildId)
       await emitRunFinish({
@@ -1203,7 +1207,9 @@ export function createDshAdapter(ctx, options = {}) {
           ...resultRecordFields(parseStructuredResult(settledOutput)),
           at: now(),
         }
-        rememberFinished(childId, settled)
+        // 内存快照必须携带完整 runBase（taskSpec/contextPack/title），
+        // 否则同进程 continuesFrom 重放会丢验收/范围/禁止重复（F1）。
+        rememberFinished(childId, { ...current.runBase, ...settled })
         void emitRunFinish({
           ...current.runBase,
           ...settled,
@@ -1235,7 +1241,7 @@ export function createDshAdapter(ctx, options = {}) {
           ...(current.jobId ? { jobId: current.jobId } : {}),
           at: now(),
         }
-        rememberFinished(childId, settled)
+        rememberFinished(childId, { ...current.runBase, ...settled })
         void emitRunFinish({
           ...current.runBase,
           ...settled,
@@ -1373,7 +1379,7 @@ export function createDshAdapter(ctx, options = {}) {
                 }
               : {}),
           }
-          rememberFinished(id, settled)
+          rememberFinished(id, { ...handle.runBase, ...settled })
           // 只在底层结算之后写终态：避免"记录已取消、进程其实又成功完成"
           await emitRunFinish({
             ...handle.runBase,
@@ -1519,7 +1525,7 @@ export function createDshAdapter(ctx, options = {}) {
                   ...(handle.jobId ? { jobId: handle.jobId } : {}),
                   at: now(),
                 }
-                rememberFinished(id, settled)
+                rememberFinished(id, { ...handle.runBase, ...settled })
                 await emitRunFinish({
                   ...handle.runBase,
                   ...settled,

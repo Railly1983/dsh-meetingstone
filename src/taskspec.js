@@ -54,15 +54,19 @@ function clip(value, max) {
 /**
  * 校验字符串数组；错误写进 issues，返回已清洗的数组。
  *
+ * `strict:true` 用于**保护字段**（验收/范围/禁止重复）：绝不静默截断，
+ * 超过单条长度或条数上限时写 issue 让调用方明确拒绝，而不是丢掉中间约束。
+ *
  * @param {unknown} value
  * @param {string} path
  * @param {string[]} issues
- * @param {{ maxItems?: number, maxChars?: number }} [options]
+ * @param {{ maxItems?: number, maxChars?: number, strict?: boolean }} [options]
  * @returns {string[]}
  */
 function readStringList(value, path, issues, options = {}) {
   const maxItems = options.maxItems ?? 50
   const maxChars = options.maxChars ?? 500
+  const strict = options.strict === true
   if (value === undefined || value === null) {
     return []
   }
@@ -78,7 +82,25 @@ function readStringList(value, path, issues, options = {}) {
       issues.push(`${path}[${index}]（必须是非空字符串）`)
       continue
     }
-    if (out.length >= maxItems) break
+    if (out.length >= maxItems) {
+      if (strict) {
+        issues.push(
+          `${path}（最多 ${maxItems} 条，收到 ${value.length} 条；保护字段不会被静默丢弃，请拆分为多次派单）`,
+        )
+      }
+      break
+    }
+    if (strict) {
+      const chars = Array.from(item.trim())
+      if (chars.length > maxChars) {
+        issues.push(
+          `${path}[${index}]（长度 ${chars.length} 字符，超过上限 ${maxChars}；保护字段不会被静默截断，请拆分为多条）`,
+        )
+        continue
+      }
+      out.push(item.trim())
+      continue
+    }
     out.push(item.trim().slice(0, maxChars))
   }
   return out
@@ -139,8 +161,17 @@ export function validateTaskSpec(args) {
       reject('scope', '必须是对象 { include: string[], exclude: string[] }')
     } else {
       const scope = /** @type {Record<string, unknown>} */ (source.scope)
-      include = readStringList(scope.include, 'scope.include', issues, { maxItems: 100, maxChars: 500 })
-      exclude = readStringList(scope.exclude, 'scope.exclude', issues, { maxItems: 100, maxChars: 500 })
+      // scope 是任务边界：超长/超条数显式拒绝，不静默 slice
+      include = readStringList(scope.include, 'scope.include', issues, {
+        maxItems: 100,
+        maxChars: 500,
+        strict: true,
+      })
+      exclude = readStringList(scope.exclude, 'scope.exclude', issues, {
+        maxItems: 100,
+        maxChars: 500,
+        strict: true,
+      })
     }
   }
 
@@ -149,6 +180,7 @@ export function validateTaskSpec(args) {
   const acceptance = readStringList(source.acceptance, 'acceptance', issues, {
     maxItems: 50,
     maxChars: 500,
+    strict: true,
   })
   if (scopeDeclared && acceptance.length === 0 && issues.length === acceptanceIssuesBefore) {
     reject('acceptance', '已声明 scope，必须给出至少一条验收标准，否则任务无法验收')
@@ -217,6 +249,7 @@ export function validateTaskSpec(args) {
       const doNotRepeat = readStringList(pack.doNotRepeat, 'contextPack.doNotRepeat', issues, {
         maxItems: 100,
         maxChars: 300,
+        strict: true,
       })
       /** @type {Array<{ summary: string, artifactRef: string | null }>} */
       const priorResults = []
@@ -317,6 +350,12 @@ export function renderTaskBrief(spec, contextPack) {
     for (const item of spec.contextRefs) lines.push(`- ${item}`)
   }
   if (spec.roleHint) lines.push(`roleHint: ${spec.roleHint}`)
+  // 保护字段（§8）：有就原样出现在简报里，不依赖自由文本描述。
+  for (const key of ['permissions', 'permissionPreset', 'safetyPolicy']) {
+    const value = spec[key]
+    if (value === undefined || value === null) continue
+    lines.push(`${key}: ${Array.isArray(value) ? value.join('; ') : String(value)}`)
+  }
   if (spec.outputBudget) {
     const notes = spec.outputBudget.notes ? `（${spec.outputBudget.notes}）` : ''
     lines.push(`outputBudget: summary ≈ ${spec.outputBudget.summaryTokens} tokens${notes}`)
@@ -348,6 +387,11 @@ export function renderTaskBrief(spec, contextPack) {
       lines.push('doNotRepeat:')
       for (const item of doNotRepeat) lines.push(`- ${item}`)
     }
+    for (const key of ['permissions', 'safetyPolicy']) {
+      const value = contextPack[key]
+      if (value === undefined || value === null) continue
+      lines.push(`${key}: ${Array.isArray(value) ? value.join('; ') : String(value)}`)
+    }
   }
 
   lines.push('[END TASK SPEC]')
@@ -356,12 +400,17 @@ export function renderTaskBrief(spec, contextPack) {
 }
 
 /**
- * 落盘用的 TaskSpec 摘要（截断，保证 JSON 仍然合法）。
+ * 落盘用的 TaskSpec 摘要。
+ *
+ * **保护字段不参与截断**（docs/reference/efficiency-v1.0.md §8）：
+ * acceptance / scope / permissions / safetyPolicy 原样保留，条数与单条长度都不裁剪；
+ * 只有自由文本（title/objective/evidence/contextRefs/roleHint/outputBudget.notes）才裁剪。
  * 幂等：对已经摘要过的对象再调一次不会继续膨胀。
  * @param {any} spec
  */
 export function summarizeTaskSpec(spec) {
   if (!spec || typeof spec !== 'object' || typeof spec.title !== 'string' || !spec.title) return null
+  /** 自由文本：允许条数/长度裁剪。 */
   const list = (/** @type {unknown} */ value) =>
     Array.isArray(value)
       ? value
@@ -369,11 +418,20 @@ export function summarizeTaskSpec(spec) {
           .slice(0, RECORD_LIST_ITEMS)
           .map((/** @type {string} */ item) => clip(item, RECORD_ITEM_CHARS))
       : []
-  return {
+  /** 保护字段：原样保留（不裁剪、不去重）。 */
+  const verbatimList = (/** @type {unknown} */ value) =>
+    Array.isArray(value)
+      ? value.filter((/** @type {unknown} */ item) => typeof item === 'string' && item)
+      : []
+  /** @type {Record<string, any>} */
+  const summary = {
     title: clip(spec.title, RECORD_TITLE_CHARS),
     objective: clip(spec.objective, RECORD_OBJECTIVE_CHARS),
-    scope: { include: list(spec.scope?.include), exclude: list(spec.scope?.exclude) },
-    acceptance: list(spec.acceptance),
+    scope: {
+      include: verbatimList(spec.scope?.include),
+      exclude: verbatimList(spec.scope?.exclude),
+    },
+    acceptance: verbatimList(spec.acceptance),
     evidence: list(spec.evidence),
     contextRefs: list(spec.contextRefs),
     roleHint: typeof spec.roleHint === 'string' && spec.roleHint ? clip(spec.roleHint, 100) : null,
@@ -385,10 +443,20 @@ export function summarizeTaskSpec(spec) {
           }
         : null,
   }
+  // 权限/安全策略是保护字段：一旦提供就原样落盘（不裁剪、不改造）。
+  if (spec.permissions !== undefined && spec.permissions !== null) summary.permissions = spec.permissions
+  if (spec.permissionPreset !== undefined && spec.permissionPreset !== null) {
+    summary.permissionPreset = spec.permissionPreset
+  }
+  if (spec.safetyPolicy !== undefined && spec.safetyPolicy !== null) summary.safetyPolicy = spec.safetyPolicy
+  return summary
 }
 
 /**
  * 落盘用的 ContextPack 摘要。
+ *
+ * doNotRepeat 是保护字段（§8：不得重复的约束不能因摘要丢失），原样保留；
+ * knownFacts/files/priorResults 属于自由文本，仍按条数/长度裁剪。
  * @param {any} pack
  */
 export function summarizeContextPack(pack) {
@@ -412,10 +480,16 @@ export function summarizeContextPack(pack) {
               : null,
         }))
     : []
-  return {
+  /** @type {Record<string, any>} */
+  const summary = {
     knownFacts: list(pack.knownFacts, RECORD_LIST_ITEMS),
     files: list(pack.files, 30),
     priorResults,
-    doNotRepeat: list(pack.doNotRepeat, RECORD_LIST_ITEMS),
+    doNotRepeat: Array.isArray(pack.doNotRepeat)
+      ? pack.doNotRepeat.filter((/** @type {unknown} */ item) => typeof item === 'string' && item)
+      : [],
   }
+  if (pack.permissions !== undefined && pack.permissions !== null) summary.permissions = pack.permissions
+  if (pack.safetyPolicy !== undefined && pack.safetyPolicy !== null) summary.safetyPolicy = pack.safetyPolicy
+  return summary
 }

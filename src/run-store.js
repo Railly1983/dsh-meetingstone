@@ -152,6 +152,10 @@ export class RunStoreError extends Error {
  * 按 UTF-8 字节截断，保留头部与尾部（中间用标记替代）。
  * 为什么留尾部：错误信息和结论常常在末尾，只截头会丢掉最有用的部分。
  *
+ * 预算纪律（P0-C 审计 F8）：返回值**绝不超过 maxBytes**（含截断标记），
+ * 且头部优先完整保留。小窗口（例如 headBytes=8 / tailBytes=6）放不下完整标记时，
+ * 退化成单字符省略号；连省略号都放不下时宁可不写标记，也不能丢头或超预算。
+ *
  * @param {unknown} value
  * @param {number} maxBytes
  * @param {{ headBytes?: number, tailBytes?: number }} [options]
@@ -162,12 +166,14 @@ export function truncateUtf8(value, maxBytes, options = {}) {
   const buffer = Buffer.from(text, 'utf8')
   if (buffer.length <= maxBytes) return { text, bytes: buffer.length, truncated: false }
 
-  const headBytes = options.headBytes ?? Math.floor(maxBytes * 0.75)
-  const tailBytes = options.tailBytes ?? maxBytes - headBytes
-  const marker = `\n…[truncated ${buffer.length - maxBytes} bytes]…\n`
-  const markerBytes = Buffer.byteLength(marker)
-
-  const head = sliceUtf8(buffer, 0, Math.max(0, headBytes - markerBytes))
+  const headBytes = Math.min(options.headBytes ?? Math.floor(maxBytes * 0.75), maxBytes)
+  // 头部优先：先按请求保留完整头部（字符边界对齐），剩余预算再给标记和尾部。
+  const head = sliceUtf8(buffer, 0, headBytes)
+  let remaining = Math.max(0, maxBytes - Buffer.byteLength(head))
+  let marker = `\n…[truncated ${buffer.length - maxBytes} bytes]…\n`
+  if (Buffer.byteLength(marker) > remaining) marker = '…'
+  if (Buffer.byteLength(marker) > remaining) marker = ''
+  const tailBytes = Math.max(0, remaining - Buffer.byteLength(marker))
   const tail = sliceUtf8(buffer, Math.max(0, buffer.length - tailBytes), buffer.length)
   const out = `${head}${marker}${tail}`
   return { text: out, bytes: Buffer.byteLength(out), truncated: true }
