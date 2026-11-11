@@ -25,3 +25,5 @@
 | `11-team-dispatch.md` | P0-11 | 团队 Worker 编队与派发协议验证 |
 
 - [16 · Codex 沙箱初始化失败与修复](./16-codex-sandbox-fix.md)
+
+- [17 · Claude 接入：官方 provider 不兼容，第三方被否决](./17-claude-integration-blocked.md)
