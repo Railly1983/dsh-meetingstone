@@ -108,6 +108,34 @@
 对照四件套：目标 ✅ / 范围 ✅ / 验收标准 ✅ / 证据格式 ✅。
 注意它没写"必须四件齐全否则拒绝"——因为本来就不拒绝，这只是把话说明白。
 
+## 5. 效率账本：把「省了多少」变成可复现统计
+
+`scripts/token-ledger.mjs` 只读扫描 `.meetingstone/runs/*.json`，统计任务数、成功/失败/取消、
+失败分类、`resultBytes` 分位（p50/p90/max）、平均耗时，以及按角色/通道聚合。零依赖，不参与
+`npm run verify`。
+
+```bash
+npm run ledger                              # 人类可读表格
+node scripts/token-ledger.mjs --json        # 机器可读
+node scripts/token-ledger.mjs --since 7d    # 相对时间（也支持 24h/30m、YYYY-MM-DD、ISO、毫秒时间戳）
+node scripts/token-ledger.mjs --limit 20    # 最近 20 条
+node scripts/token-ledger.mjs --dir <path>  # 指定 runs 目录（默认自动定位；worktree 回退主仓库）
+```
+
+**口径（先读）**：
+
+- **字节 ≠ Token**。脚本不输出 `approxTokens`，也不把字节数当 Token 汇报。
+- runs 记录**没有 Provider Usage 字段**，Provider Usage 一律标「未知」；找不到可读的宿主
+  会话/工具调用 JSONL 时就只做 runs 维度（本次基线未找到）。
+- 失败分类是从 `stopReason` / `diagnostic` / `error` / `resultStatus` 推导的**启发式**分类；
+  无信号时记 `unspecified`，不猜原因。
+- `resultBytes` 只统计成功记录（`status=completed` 且 `stopReason` 为 `completed`/空且
+  `resultStatus` 非 `failed`/`blocked`），含 0 字节；失败/取消/运行中不计入。
+- `completed` 但 `stopReason=refusal/error` 的记录计入失败，避免「跑完但没干活」被算成功。
+
+首份基线（样本、数字、局限）见
+[`docs/plan/2026-11-11-ledger-baseline.md`](plan/2026-11-11-ledger-baseline.md)。
+
 ## 不在本规范范围（明确不做）
 
 以下几项评审过但**砍掉**（指不写进本「协作约定 / 提示词」文档），不要补进来，也不算"没写完"：
