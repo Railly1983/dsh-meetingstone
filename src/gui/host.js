@@ -6,11 +6,14 @@
  *   browser `ctx.remote.meetingstone.list()`
  *     → Typert Gateway `/api`（SRC marker 反射）
  *     → 本文件创建的 `TypertRemoteService`（namespace `meetingstone`, method `list`）
- *     → `createGuiState().snapshot()`
+ *     → `createGuiState().fullSnapshot()`（同步快照 + 全局配置 + CLI 探测）
  *
  * 数据**不另建源**：
  *   - 角色：`registry.list()`（与 `meetingstone_list_roles` 同一份注册表）
- *   - 通道：插件配置 `cfg.channels`（与派单器同一份）
+ *   - 通道/默认模型：插件配置 `cfg.channels`（与派单器同一份）
+ *   - 额度/并发、调度规则：插件配置 `cfg.limits` / `cfg.defaultRoleId` /
+ *     `cfg.dispatchNotes` / `cfg.projectConfigFile`
+ *   - CLI 连接：`probe.probeAll()`（与 `meetingstone_cli_status` 同一探测器和缓存）
  *   - 最近错误：注册表/项目配置错误 + 本进程最近一次派单失败/落盘失败
  *
  * 为什么这里懒加载 `@deepseek-ai/dsh-typert-protocol`：
@@ -21,6 +24,7 @@
 
 import { createRequire } from 'node:module'
 import { roleAvailability } from '../dsh/register.js'
+import { CLI_SPECS } from '../cli/probe.js'
 
 const require = createRequire(import.meta.url)
 
@@ -29,6 +33,12 @@ export const GUI_REMOTE_SERVICE = 'meetingstone'
 
 /** `@deepseek-ai/dsh-typert-protocol/remote-methods` 的版本。 */
 const REMOTE_METHOD_DESCRIPTOR_VERSION = 1
+
+/**
+ * 设置页打开时最多等 CLI 探测多久。探测有 5 分钟缓存（src/cli/probe.js TTL），
+ * 首次冷启动在本机约 0.8s；超时则如实返回 `cli: null`，不编造状态。
+ */
+const CLI_PROBE_TIMEOUT_MS = 8000
 
 /**
  * 读取最近一条注册表错误，作为首次快照的 lastError。
@@ -77,12 +87,18 @@ function normalizeError(value, source, now = Date.now()) {
  * @param {any} ctx
  */
 function roleView(role, ctx) {
+  const channel = role?.channel
   return {
     roleId: typeof role?.roleId === 'string' ? role.roleId : '',
     name: typeof role?.name === 'string' ? role.name : '',
     aliases: Array.isArray(role?.aliases) ? role.aliases.map(String) : [],
     enabled: role?.enabled !== false,
     availability: roleAvailability(role, ctx),
+    // 角色引用的通道：设置页「默认模型」用它把默认角色解析到模型。
+    channelId: typeof channel?.channelId === 'string' ? channel.channelId : '',
+    provider: typeof channel?.provider === 'string' ? channel.provider : '',
+    model: typeof channel?.model === 'string' ? channel.model : '',
+    reasoning: typeof channel?.reasoning === 'string' ? channel.reasoning : '',
   }
 }
 
@@ -97,6 +113,73 @@ function channelView(channel) {
   }
 }
 
+/** 通道实例的完整只读视图（设置页用，含模型/强度）。 */
+function channelDetailView(channel) {
+  return {
+    channelId: typeof channel?.channelId === 'string' ? channel.channelId : '',
+    description: typeof channel?.description === 'string' ? channel.description : '',
+    kind: typeof channel?.kind === 'string' ? channel.kind : 'in-process',
+    provider: typeof channel?.provider === 'string' ? channel.provider : '',
+    model: typeof channel?.model === 'string' ? channel.model : '',
+    reasoning: typeof channel?.reasoning === 'string' ? channel.reasoning : '',
+  }
+}
+
+/** 并发/额度配置的只读视图；全部字段都保证 JSON-safe。 */
+function limitsView(limits) {
+  const source = limits && typeof limits === 'object' ? limits : {}
+  const max =
+    Number.isFinite(source.maxParallelWritesTotal) && source.maxParallelWritesTotal >= 1
+      ? Math.trunc(source.maxParallelWritesTotal)
+      : 4
+  return {
+    serializeWrites: source.serializeWrites !== false,
+    maxParallelWritesTotal: max,
+    defaultIsolation: source.defaultIsolation === 'none' ? 'none' : 'worktree',
+  }
+}
+
+/** CLI 探测结果 → JSON-safe 的只读视图。 */
+function cliView(result) {
+  const source = result && typeof result === 'object' ? result : {}
+  const cli = typeof source.cli === 'string' ? source.cli : ''
+  const spec = /** @type {Record<string, any>} */ (CLI_SPECS)[cli]
+  const notes = Array.isArray(source.notes) ? source.notes.map(String).slice(0, 8) : []
+  return {
+    cli,
+    label: typeof spec?.label === 'string' ? spec.label : cli,
+    installed: source.installed === true,
+    path: typeof source.path === 'string' ? source.path : '',
+    version: typeof source.version === 'string' ? source.version : '',
+    source: typeof source.source === 'string' ? source.source : '',
+    notes,
+    checkedAt: typeof source.checkedAt === 'number' ? new Date(source.checkedAt).toISOString() : null,
+  }
+}
+
+/**
+ * 等待一个 promise，超时返回 `null`（调用方如实显示「未获取」）。
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {number} ms
+ * @returns {Promise<T | null>}
+ */
+function withTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve(null), ms)
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
+}
+
 /**
  * 创建 GUI 状态。纯闭包，无 I/O；remote 每次 list 调一次 `snapshot()`，
  * 因此页面重新打开/重新拉取时能读到最新错误。
@@ -105,8 +188,16 @@ function channelView(channel) {
  * @param {any} [options.ctx] Host 插件 ctx（用于 `ctx.subagents.getProvider`）
  * @param {any} [options.registry] 角色注册表 `{ list(), errors }`
  * @param {Array<any>} [options.channels] 插件配置里的通道实例表
+ * @param {object} [options.config] 插件全局配置（默认角色/调度提示/并发策略）
+ * @param {{ probeAll?: (opts?: any) => Promise<any[]> }} [options.probe] CLI 探测器
  */
-export function createGuiState({ ctx = null, registry = null, channels = [] } = {}) {
+export function createGuiState({
+  ctx = null,
+  registry = null,
+  channels = [],
+  config = {},
+  probe = null,
+} = {}) {
   /** @type {ReturnType<typeof normalizeError> | null} */
   let lastError = initialLastError(registry)
 
@@ -146,7 +237,49 @@ export function createGuiState({ ctx = null, registry = null, channels = [] } = 
     }
   }
 
-  return { snapshot, recordError, recordDispatch }
+  /**
+   * 全局配置视图。只投影插件自己的 `cfg`，不推断、不补造字段。
+   * @param {any[] | null} cli
+   * @param {string | null} cliError
+   */
+  function globalView(cli, cliError) {
+    const source = config && typeof config === 'object' ? config : {}
+    return {
+      defaultRoleId: typeof source.defaultRoleId === 'string' ? source.defaultRoleId : '',
+      dispatchNotes: typeof source.dispatchNotes === 'string' ? source.dispatchNotes : '',
+      projectConfigFile:
+        typeof source.projectConfigFile === 'string' && source.projectConfigFile
+          ? source.projectConfigFile
+          : '.meetingstone.json',
+      limits: limitsView(source.limits),
+      channels: Array.isArray(channels) ? channels.map(channelDetailView) : [],
+      cli: Array.isArray(cli) ? cli.map(cliView) : null,
+      cliError: cliError ?? null,
+    }
+  }
+
+  /**
+   * 设置页快照 = 同步快照 + 全局配置 + 本机 CLI 探测。
+   * CLI 探测复用 `probe`（与 `meetingstone_cli_status` 同一缓存），失败/超时
+   * 只记 `cliError`，不影响角色与通道列表。
+   * @returns {Promise<ReturnType<typeof snapshot> & { global: any }>}
+   */
+  async function fullSnapshot() {
+    let cli = null
+    let cliError = null
+    if (probe && typeof probe.probeAll === 'function') {
+      try {
+        const results = await withTimeout(probe.probeAll(), CLI_PROBE_TIMEOUT_MS)
+        if (Array.isArray(results)) cli = results
+        else cliError = 'CLI_PROBE_TIMEOUT'
+      } catch (error) {
+        cliError = error instanceof Error ? error.message : String(error)
+      }
+    }
+    return { ...snapshot(), global: globalView(cli, cliError) }
+  }
+
+  return { snapshot, fullSnapshot, recordError, recordDispatch }
 }
 
 /**

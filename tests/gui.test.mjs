@@ -80,6 +80,99 @@ test('Host 快照：角色可用性来自 subagents，通道来自 cfg.channels�
   assert.deepEqual(JSON.parse(JSON.stringify(snapshot)), snapshot)
 })
 
+test('Host 全局快照：投影 cfg（默认角色/调度/并发）与本机 CLI 探测', async () => {
+  const probe = {
+    calls: 0,
+    async probeAll() {
+      this.calls += 1
+      return [
+        {
+          cli: 'codex',
+          installed: true,
+          path: 'C:\\Apps\\codex.exe',
+          version: '1.2.3',
+          source: 'appx',
+          notes: ['ok'],
+          checkedAt: 1_700_000_000_000,
+        },
+        {
+          cli: 'claude',
+          installed: false,
+          path: null,
+          version: null,
+          source: null,
+          notes: ['not found'],
+          checkedAt: 1_700_000_000_000,
+        },
+      ]
+    },
+  }
+  const gui = createGuiState({
+    ctx: hostCtx,
+    registry: makeRegistry(),
+    channels: [
+      { channelId: 'ch-acp-flash', kind: 'acp-cli', provider: 'acp', model: 'flash-1', reasoning: 'low' },
+      { channelId: 'ch-codex-sol', kind: 'codex', provider: 'codex-sol', model: 'sol-1', reasoning: 'high' },
+    ],
+    config: {
+      defaultRoleId: 'role-sashi',
+      dispatchNotes: '高难任务优先悟空',
+      projectConfigFile: '.meetingstone.json',
+      limits: { serializeWrites: false, maxParallelWritesTotal: 6, defaultIsolation: 'none' },
+    },
+    probe,
+  })
+  const snapshot = await gui.fullSnapshot()
+  assert.equal(probe.calls, 1)
+  assert.equal(snapshot.roles[0].model, '')
+  assert.equal(snapshot.global.defaultRoleId, 'role-sashi')
+  assert.equal(snapshot.global.dispatchNotes, '高难任务优先悟空')
+  assert.deepEqual(snapshot.global.limits, {
+    serializeWrites: false,
+    maxParallelWritesTotal: 6,
+    defaultIsolation: 'none',
+  })
+  assert.deepEqual(snapshot.global.channels[0], {
+    channelId: 'ch-acp-flash',
+    description: '',
+    kind: 'acp-cli',
+    provider: 'acp',
+    model: 'flash-1',
+    reasoning: 'low',
+  })
+  assert.deepEqual(snapshot.global.cli.map((c) => [c.cli, c.installed, c.version]), [
+    ['codex', true, '1.2.3'],
+    ['claude', false, ''],
+  ])
+  assert.equal(snapshot.global.cli[0].label, 'Codex CLI')
+  assert.equal(snapshot.global.cli[0].checkedAt, new Date(1_700_000_000_000).toISOString())
+  assert.equal(snapshot.global.cliError, null)
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot)), snapshot)
+})
+
+test('Host 全局快照：探测失败/缺失时如实降级，不拖垮角色列表', async () => {
+  const noProbe = createGuiState({ ctx: hostCtx, registry: makeRegistry(), channels })
+  const a = await noProbe.fullSnapshot()
+  assert.equal(a.global.cli, null)
+  assert.equal(a.global.cliError, null)
+  assert.equal(a.roles.length, 2)
+
+  const failing = createGuiState({
+    ctx: hostCtx,
+    registry: makeRegistry(),
+    channels,
+    probe: {
+      async probeAll() {
+        throw new Error('probe boom')
+      },
+    },
+  })
+  const b = await failing.fullSnapshot()
+  assert.equal(b.global.cli, null)
+  assert.equal(b.global.cliError, 'probe boom')
+  assert.equal(b.roles.length, 2)
+})
+
 test('Host 最近错误：注册表错误初始化；派单失败覆盖；长消息截断', () => {
   const broken = createRegistry({
     globalRoles: [{ roleId: 'BAD ID', name: '坏角色', channel: { kind: 'in-process' } }],
@@ -149,6 +242,7 @@ test('Host Remote 注册：缺少宿主 Typert 协议时安全降级，不抛错
 async function loadClientHarness(values = {}) {
   const registrations = []
   const mounted = []
+  const injectCalls = []
   const remoteValue =
     values.remoteValue !== undefined
       ? values.remoteValue
@@ -207,6 +301,7 @@ async function loadClientHarness(values = {}) {
   const remote = {
     async $mount(contribution) {
       mounted.push(contribution)
+      if (values.mountError) throw values.mountError
       return async () => {}
     },
     meetingstone: {
@@ -223,6 +318,13 @@ async function loadClientHarness(values = {}) {
   const ctx = {
     effect(fn) {
       return fn()
+    },
+    // 忠实模拟 Cordis 的动态注入契约：deps + callback；stub 在依赖已提供时
+    // 同步执行 callback（真实 Cordis 由 fiber 调度，语义相同：未就绪不执行）。
+    inject(deps, callback) {
+      injectCalls.push(deps)
+      callback(ctx)
+      return {}
     },
     locale: {
       bind: () => (key) => key,
@@ -242,11 +344,11 @@ async function loadClientHarness(values = {}) {
   }
 
   await exports.apply(ctx)
-  return { exports, registrations, mounted, remote }
+  return { exports, registrations, mounted, injectCalls, remote }
 }
 
 test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 取真实快照', async () => {
-  const { exports, registrations, mounted } = await loadClientHarness()
+  const { exports, registrations, mounted, injectCalls } = await loadClientHarness()
 
   assert.equal(registrations.length, 1)
   const { options, Component } = registrations[0]
@@ -257,6 +359,9 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
   assert.equal(typeof Component, 'function')
   assert.equal(options.label(), 'nav')
   assert.deepEqual(exports.inject, ['slots', 'locale', 'remote'])
+  // 动态注入：mount 后必须声明命名空间服务 `remote.meetingstone` 才读取。
+  assert.deepEqual(injectCalls, [['remote.meetingstone']])
+  assert.equal(exports.__test.REMOTE_INJECT, 'remote.meetingstone')
 
   assert.equal(mounted.length, 1)
   assert.equal(mounted[0].package, 'dsh-meetingstone')
@@ -275,10 +380,29 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
   const injected = options.inject()
   const snapshot = await injected.list()
   assert.deepEqual(snapshot.roles, [
-    { roleId: 'role-sashi', name: '沙僧', aliases: ['SS'], enabled: true, availability: 'available' },
+    {
+      roleId: 'role-sashi',
+      name: '沙僧',
+      aliases: ['SS'],
+      enabled: true,
+      availability: 'available',
+      channelId: '',
+      provider: '',
+      model: '',
+      reasoning: '',
+    },
   ])
   assert.deepEqual(snapshot.channels, [{ channelId: 'ch-acp-flash', kind: 'acp-cli' }])
   assert.equal(snapshot.lastError.code, 'ROLE_NOT_FOUND')
+  assert.deepEqual(snapshot.global, {
+    defaultRoleId: '',
+    dispatchNotes: '',
+    projectConfigFile: '.meetingstone.json',
+    limits: { serializeWrites: true, maxParallelWritesTotal: 4, defaultIsolation: 'worktree' },
+    channels: [],
+    cli: null,
+    cliError: null,
+  })
 })
 
 test('Browser half：Remote 失败时 list() 抛错，页面走 loadFailed 而不是伪装数据', async () => {
@@ -291,21 +415,95 @@ test('Browser half：Remote 失败时 list() 抛错，页面走 loadFailed 而�
 
 test('Browser half：normalizeSnapshot 对脏数据回退为空数组/无错误', async () => {
   const { exports } = await loadClientHarness()
+  const emptyGlobal = {
+    defaultRoleId: '',
+    dispatchNotes: '',
+    projectConfigFile: '.meetingstone.json',
+    limits: { serializeWrites: true, maxParallelWritesTotal: 4, defaultIsolation: 'worktree' },
+    channels: [],
+    cli: null,
+    cliError: null,
+  }
   assert.deepEqual(exports.__test.normalizeSnapshot(null), {
     roles: [],
     channels: [],
     lastError: null,
+    global: emptyGlobal,
   })
   assert.deepEqual(exports.__test.normalizeSnapshot({ roles: [null, 1], channels: 'x', lastError: 3 }), {
     roles: [],
     channels: [],
     lastError: null,
+    global: emptyGlobal,
   })
 })
 
-test('client 源文件不再内置占位角色/通道快照', async () => {
+test('Browser half：normalizeGlobal 收窄全局配置/CLI 数据', async () => {
+  const { exports } = await loadClientHarness()
+  const global = exports.__test.normalizeGlobal({
+    defaultRoleId: 'role-sashi',
+    dispatchNotes: 42,
+    projectConfigFile: '',
+    limits: { serializeWrites: 0, maxParallelWritesTotal: 0, defaultIsolation: 'bogus' },
+    channels: [{ channelId: 'ch-1', model: 'm1', extra: 1 }, null],
+    cli: [
+      { cli: 'codex', installed: true, version: '1.2.3', notes: ['a', 2], checkedAt: '2026-11-11T00:00:00.000Z' },
+      'bad',
+    ],
+    cliError: '',
+  })
+  assert.equal(global.defaultRoleId, 'role-sashi')
+  assert.equal(global.dispatchNotes, '')
+  assert.equal(global.projectConfigFile, '.meetingstone.json')
+  // maxParallelWritesTotal 为 0/非法时回退 4；serializeWrites 非 false 即 true。
+  assert.deepEqual(global.limits, {
+    serializeWrites: true,
+    maxParallelWritesTotal: 4,
+    defaultIsolation: 'worktree',
+  })
+  assert.deepEqual(global.channels, [
+    {
+      channelId: 'ch-1',
+      description: '',
+      kind: '',
+      provider: '',
+      model: 'm1',
+      reasoning: '',
+    },
+  ])
+  assert.deepEqual(global.cli, [
+    {
+      cli: 'codex',
+      label: 'codex',
+      installed: true,
+      path: '',
+      version: '1.2.3',
+      source: '',
+      notes: ['a', '2'],
+      checkedAt: '2026-11-11T00:00:00.000Z',
+    },
+  ])
+  assert.equal(global.cliError, null)
+})
+
+test('Browser half：$mount 失败时仍注册 section，并以 unavailable 快照解释原因', async () => {
+  const { registrations, injectCalls } = await loadClientHarness({
+    mountError: new Error('mount boom'),
+  })
+  assert.equal(registrations.length, 1)
+  assert.equal(injectCalls.length, 0, 'mount 失败不得进入动态注入')
+  const snapshot = await registrations[0].options.inject().list()
+  assert.equal(snapshot.unavailable.code, 'REMOTE_MOUNT_FAILED')
+  assert.match(snapshot.unavailable.message, /mount boom/)
+  assert.deepEqual(snapshot.roles, [])
+})
+
+test('client 源文件：无占位数据，且命名空间读取走动态注入', async () => {
   const source = await readFile(join(root, 'src/client/index.js'), 'utf8')
   assert.doesNotMatch(source, /SNAPSHOT/, '不应保留占位 SNAPSHOT')
   assert.doesNotMatch(source, /占位数据/, '不应保留占位文案')
-  assert.match(source, /ctx\.remote\[REMOTE_SERVICE\]\.list\(\)/)
+  // 修复前的裸访问（父 fiber 未声明 remote.meetingstone）必须消失。
+  assert.doesNotMatch(source, /ctx\.remote\[REMOTE_SERVICE\]\.list\(\)/)
+  assert.match(source, /ctx\.inject\(\[REMOTE_INJECT\]/, '必须在 mount 后动态注入命名空间服务')
+  assert.match(source, /service\.list\(\)/, '数据读取应发生在就绪子 ctx 捕获的服务上')
 })
