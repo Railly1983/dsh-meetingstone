@@ -59,6 +59,20 @@ export const ChannelSchema = compile(
   }),
 )
 
+/**
+ * 自动角色路由规则（P1-B）。默认规则表在 `src/dispatch/routing.js`；
+ * 这里只声明「形状 + 默认值」，语义（关键词匹配、可用性过滤）同样在 routing.js。
+ */
+export const RoutingRuleSchema = compile(
+  S.object({
+    taskType: S.string().required().description('任务类型标识，如 review / edit / research / architecture'),
+    label: S.string().default('').description('人类可读类型名，写进路由 reason'),
+    keywords: S.array(S.string()).default([]).description('判定任务类型的关键词'),
+    roleKeywords: S.array(S.string()).default([]).description('匹配角色 roleId/name/aliases/description 的关键词'),
+    roleIds: S.array(S.string()).default([]).description('直接指定角色 ID（优先于 roleKeywords）'),
+  }),
+)
+
 /** 角色定义。语义校验见 registry.js。 */
 export const RoleSchema = compile(
   S.object({
@@ -82,6 +96,9 @@ export const Config = compile(
       .default([])
       .description('通道实例表：一行 = 一个已配置的 provider（模型/强度写在这里）'),
     defaultRoleId: S.string().description('未指定角色时的默认角色'),
+    routingRules: S.array(RoutingRuleSchema)
+      .default([])
+      .description('自动路由规则表（空 = 用内置规则；仅 autoRoute:true 且未显式指定 role 时生效）'),
     dispatchNotes: S.string().default('').description('辅助调度提示，不改变通道与并发规则'),
     projectConfigFile: S.string()
       .default('.meetingstone.json')

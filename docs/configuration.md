@@ -13,6 +13,7 @@
     channels: [...]      # 通道实例表（见 §2）
     roles: [...]         # 角色表（见 §3）
     defaultRoleId: role-sashi
+    routingRules: []     # 自动路由规则表（空 = 用内置表；见 §1.2）
     dispatchNotes: "常规实现优先沙僧；关键改动交悟空复核。"
     projectConfigFile: .meetingstone.json
     limits:
@@ -43,6 +44,70 @@
 - 请求隔离但建树失败 / 服务缺失 → **拒绝派单**，绝不退回主工作区。
 - 完成 / 失败 / 取消 / 卸载都**不删除**工作树与分支。
 - **隔离是文件布局隔离，不是权限沙箱**（同账号、同文件系统、共享 git 元数据）。
+
+### 1.2 自动角色路由（P1-B，规则式）
+
+`meetingstone_dispatch` 的 `role` 现在是**可选**的；但“不指定角色”必须显式开关：
+
+| 调用方式 | 行为 |
+| --- | --- |
+| 传 `role`（旧用法） | **显式指定优先**，完全不走规则路由；回执 `routing:{roleId, auto:false}`，不写 reason |
+| 不传 `role` + `autoRoute:true` | 按下面规则表选角色；回执 `routing:{roleId, reason, auto:true}`，reason 同时落盘 |
+| 不传 `role` + 未开 `autoRoute` | 明确报 `ROLE_REQUIRED`，不会偷偷用 `defaultRoleId` |
+
+内置规则表（`src/dispatch/routing.js` 的 `DEFAULT_ROUTING_RULES`）：
+
+| 任务类型 | 判定关键词（示例） | 目标角色（按角色标识匹配） | reason 标签 |
+| --- | --- | --- | --- |
+| `architecture` | architecture / architect / 架构 / 决策 / 选型 / 技术方案 | roleId/name/aliases/description 含架构、决策、设计、lead、领导 | 评审/决策 |
+| `review` | review / 审查 / 评审 / 复核 / 审核 / 审计 / 验收 | 含 review、reviewer、审查、评审、复核、审核、审计、验收 | 评审 |
+| `research` | research / investigate / 调研 / 研究 / 调查 / 探索 / 分析 | 含 research、researcher、scout、调研、研究、调查、探索、分析 | 调研 |
+| `edit` | edit / implement / fix / refactor / 实现 / 修复 / 修改 / 开发 / 重构 / 改 | 含 implement、developer、执行、实现、修复、开发、主力、骨干 | 执行 |
+
+确定性规则：
+
+1. **先看关键词首次出现的位置**：任务里 `修复 review 指出的问题` 归执行，`review 并修复` 归评审；同位置时按规则表顺序。
+2. **只从 `enabled !== false` 且 `availability === 'available'` 的角色中选**。停用、provider 未安装、别名歧义的角色都不参与；可用角色为 0 → `AUTO_ROUTE_FAILED`。
+3. **角色匹配顺序**：规则 `roleIds` 显式指定 → `roleId`/`name`/`aliases` 命中 → `description` 命中 → `prompt` 命中（弱信号兜底）→ 角色表顺序。整段 prompt 只用来找关键词，reason 也只会回显命中的关键词。
+4. **兜底**：任务类型没有匹配到可用角色、或完全没命中关键词时，使用生效配置的 `defaultRoleId`（按“全局 → 项目 → 会话”继承）；默认角色本身不可用则 `AUTO_ROUTE_FAILED`。
+5. **不改执行面**：路由只决定“用哪个角色”，provider/model/reasoning/权限继续由该角色的 `channel` 决定；不切更高成本模型、不提升权限、不调用任何 AI 分类器。
+
+成功回执示例（自动路由）：
+
+```json
+{
+  "ok": true,
+  "taskRef": { "childId": "child-1", "provider": "acp" },
+  "roleId": "role-wukong",
+  "roleName": "悟空",
+  "isolation": "worktree",
+  "routing": {
+    "roleId": "role-wukong",
+    "reason": "任务含关键词「审查」→ 评审规则（review），选择「悟空」（role-wukong；角色描述含「审核」）",
+    "auto": true
+  }
+}
+```
+
+手动指定角色时 `routing` 只有 `{ "roleId": "role-wukong", "auto": false }`（无 `reason`）。
+`meetingstone_get_task` / `meetingstone_list_runs` 读到的落盘记录同样带 `routing`；手动派单的
+旧记录没有该字段（不伪造）。
+
+自定义规则表（可覆盖内置表；只来自插件全局配置，项目/会话层不支持）：
+
+```yaml
+routingRules:
+  - taskType: docs
+    label: 文档
+    keywords: [文档, 手册, 校对]
+    roleKeywords: [文档, writer, 文书]
+  # - taskType: review
+  #   keywords: [审查, review]
+  #   roleIds: [role-wukong]   # 也可直接钉死角色 ID
+```
+
+> 自定义表是**整体替换**而非追加；非法条目（缺 `taskType` 或 `keywords`）会被跳过。
+> 只配 `docs` 时，其它任务类型不再命中内置规则，只能走 `defaultRoleId` 或报错——这是有意为之，避免“配置了一半却偷偷用内置表”。
 
 ## 2. `channels`（通道实例表）
 
@@ -173,6 +238,8 @@
 
 | 场景 | 行为 |
 | --- | --- |
+| 未指定 `role` 且未开 `autoRoute`（或 `role` 不是字符串） | `ROLE_REQUIRED`（不会隐式使用 `defaultRoleId`） |
+| 开了 `autoRoute` 但没有 `enabled + available` 的角色；或任务类型无匹配角色且 `defaultRoleId` 未配置/不可用 | `AUTO_ROUTE_FAILED`，`message` 说明失败在“无可用角色”还是“无匹配角色/兜底” |
 | 名字/别名冲突 | 冲突 token 不参与解析；角色仍可用 `roleId`；`list_roles` 的 `errors` 里给 `ALIAS_CONFLICT` |
 | 派单到歧义名字 | `ROLE_AMBIGUOUS`，提示里列出可选 roleId |
 | 派单到停用角色 | `ROLE_DISABLED` |
@@ -245,7 +312,7 @@
 | --- | --- | --- |
 | `meetingstone_get_task` | `status` / `stopReason` / `resultBytes` / `jobId` / `recordPath`；有结构化 `summary` 时只回 summary/resultStatus/openIssues/handoff（`resultOmitted:true`），否则回结果首 1KiB + 末 512B | `full:true` 返回完整 `result`；`output` 与 `result` 相同时只回一份（字段名统一为 `result`） |
 | `meetingstone_get_run_artifact` | 完整结果文本（`.meetingstone/runs/<childId>.json` 的 `result`） | 用 `headBytes`/`tailBytes` 取首尾，或 `lineFrom`/`lineTo`（1 起、含端点）取行范围 |
-| `meetingstone_dispatch` | 成功只回 `ok` / `taskRef`（`childId`、`name`、`provider`、`jobId`）/ `roleId` / `roleName` / `isolation` | 角色全量、prompt、工作树细节一律不回；需要时查 `meetingstone_list_runs` |
+| `meetingstone_dispatch` | 成功只回 `ok` / `taskRef`（`childId`、`name`、`provider`、`jobId`）/ `roleId` / `roleName` / `isolation` / `routing`（`roleId` + 自动路由时的 `reason`） | 角色全量、prompt、工作树细节一律不回；需要时查 `meetingstone_list_runs` |
 | `meetingstone_list_runs` | 记录索引：`title` / `status` / `resultStatus` / `summaryPreview` / `resultBytes` 等 | 需要正文用 `meetingstone_get_task` 或 `meetingstone_get_run_artifact` |
 | `meetingstone_list_roles` | `roleId` / `name` / `aliases` / `enabled` / `availability` | `verbose:true` 追加 `description` / `channel` / `model` / `hasPrompt` / `source` |
 | `meetingstone_wait` | 每个任务的 `childId` / `status` / `stopReason` / `resultBytes` / `summary?` / `timedOut` | 超时未完成的任务标 `status:'running'`、`timedOut:true`；未知 `childId` 立即返回 `UNKNOWN_CHILD` |

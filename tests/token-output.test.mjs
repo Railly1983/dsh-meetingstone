@@ -192,7 +192,7 @@ test('get_task 摘要：自由文本中间的验收/权限段被截断时必须�
   assert.ok(out.result.includes('权限限制：只读，不得写盘'))
 })
 
-test('dispatch 成功回执瘦身：只回 ok/taskRef/roleId/roleName/isolation', async () => {
+test('dispatch 成功回执瘦身：只回 ok/taskRef/roleId/roleName/isolation/routing', async () => {
   const tools = makeTools({
     dispatcher: {
       dispatch: async () => ({
@@ -222,7 +222,17 @@ test('dispatch 成功回执瘦身：只回 ok/taskRef/roleId/roleName/isolation'
     },
   })
   const out = await tools.get(TOOL_NAMES.DISPATCH).execute({ role: 'WK', task: 'x' })
-  assert.deepEqual(Object.keys(out).sort(), ['isolation', 'ok', 'roleId', 'roleName', 'taskRef'])
+  assert.deepEqual(Object.keys(out).sort(), [
+    'isolation',
+    'ok',
+    'roleId',
+    'roleName',
+    'routing',
+    'taskRef',
+  ])
+  // P1-B：手动指定角色 → auto:false 且不写 reason（不能伪装成规则选的）
+  assert.deepEqual(out.routing, { roleId: 'role-wukong', auto: false })
+  assert.equal(Object.hasOwn(out.routing, 'reason'), false)
   assert.deepEqual(Object.keys(out.taskRef).sort(), ['childId', 'jobId', 'name', 'provider'])
   assert.equal(out.roleId, 'role-wukong')
   assert.equal(out.roleName, '悟空')

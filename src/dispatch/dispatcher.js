@@ -41,6 +41,8 @@ import { sanitizedGitEnv } from '../worktree.js'
 
 /** 派单错误码。 */
 export const DISPATCH_ERRORS = Object.freeze({
+  // P1-B：调用方既没给 role，也没开 autoRoute（自动路由失败用 AUTO_ROUTE_FAILED）
+  ROLE_REQUIRED: 'ROLE_REQUIRED',
   ROLE_NOT_FOUND: 'ROLE_NOT_FOUND',
   ROLE_DISABLED: 'ROLE_DISABLED',
   ROLE_AMBIGUOUS: 'ROLE_AMBIGUOUS',
@@ -370,6 +372,9 @@ function positiveInteger(value, fallback) {
  * @typedef {object} DispatchRequest
  * @property {string} role 角色引用（roleId / name / 别名）
  * @property {string} task 任务内容
+ * @property {{ roleId: string, reason?: string, auto: boolean }} [routing]
+ *   角色路由结果（P1-B）：由工具层在自动路由时生成；dispatcher 只负责透传与落盘，
+ *   不参与决策、不改 provider/model。手动指定角色时 `auto:false` 且不带 reason。
  * @property {any} [taskSpec] 已校验的 TaskSpec（结构化模式；不传 = 旧路径）
  * @property {any} [contextPack] 已校验的 ContextPack（可空）
  * @property {string} [cwd] 目标目录；隔离模式下会被工作树路径覆盖
@@ -386,6 +391,7 @@ function positiveInteger(value, fallback) {
  * @property {string} task
  * @property {any} [taskSpec] TaskSpec（原样透传，由适配器渲染提示词与落盘摘要）
  * @property {any} [contextPack] ContextPack（原样透传）
+ * @property {{ roleId: string, reason?: string, auto: boolean }} [routing] 路由结果（P1-B，落盘用）
  * @property {string} [cwd]
  * @property {number} timeoutMs
  * @property {object} [context] 由调用方透传的宿主上下文
@@ -405,7 +411,8 @@ function positiveInteger(value, fallback) {
 
 /**
  * @typedef {{ ok: true, taskRef: object, role: object, startedAt: number, isolation?: string,
- *             operationId?: string, worktree?: object }
+ *             operationId?: string, worktree?: object,
+ *             routing?: { roleId: string, reason?: string, auto: boolean } }
  *   | { ok: false, code: string, message: string, role?: object,
  *       operationId?: string, worktree?: object, residualPath?: string,
  *       path?: string, branch?: string, phase?: string }} DispatchResult
@@ -482,6 +489,7 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       deduplicated: true,
       taskRef: first.taskRef, // 原值：原 childId / jobId
       role: entry.role,
+      ...(entry.routing ? { routing: entry.routing } : {}),
       isolation: entry.isolation,
       status: entry.phase === 'started' ? 'running' : 'queued',
       startedAt: entry.startedAt,
@@ -615,7 +623,13 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
    */
   async function dispatch(req) {
     if (!req || typeof req.role !== 'string' || !req.role.trim()) {
-      return fail(DISPATCH_ERRORS.ROLE_NOT_FOUND, '必须提供角色名、别名或 roleId')
+      // P1-B：自动路由在工具层完成，到达这里时 role 必须已是具体角色引用。
+      // 未指定 role（且没有开 autoRoute）在工具层已返回 ROLE_REQUIRED；这里同样
+      // 用 ROLE_REQUIRED，避免直接调用 dispatcher 时拿到会误导的 ROLE_NOT_FOUND。
+      return fail(
+        DISPATCH_ERRORS.ROLE_REQUIRED,
+        '必须提供角色名、别名或 roleId（自动路由请在 meetingstone_dispatch 传 autoRoute:true）',
+      )
     }
     if (typeof req.task !== 'string' || !req.task.trim()) {
       return fail(DISPATCH_ERRORS.INVALID_TASK, '任务内容不能为空')
@@ -722,6 +736,7 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
     /** @type {any} */
     const entry = {
       role,
+      routing: req.routing && typeof req.routing === 'object' ? req.routing : null,
       projectKey,
       startedAt: now(),
       ref: null,
@@ -816,6 +831,8 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       started = await adapter.start({
         role,
         task: req.task,
+        // P1-B：路由结果原样交给适配器，落盘后可用 get_task/list_runs 解释「为什么是它」
+        ...(req.routing && typeof req.routing === 'object' ? { routing: req.routing } : {}),
         // P0-B：结构化简报原样交给适配器（提示词组装与落盘摘要都在那里做）
         ...(req.taskSpec && typeof req.taskSpec === 'object' ? { taskSpec: req.taskSpec } : {}),
         ...(req.contextPack && typeof req.contextPack === 'object'
@@ -875,6 +892,7 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       ok: true,
       taskRef: started.taskRef,
       role,
+      ...(req.routing && typeof req.routing === 'object' ? { routing: req.routing } : {}),
       startedAt: now(),
       isolation,
       ...(operationId ? { operationId } : {}),

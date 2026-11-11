@@ -104,8 +104,10 @@ test('注册给宿主的工具 schema 是合法 JSON Schema（不撞保留注解
   }
   const dispatch = tools.find((t) => t.name === 'meetingstone_dispatch')
   assert.equal(Object.hasOwn(dispatch.parameters.properties, 'readOnly'), false, '只读通道已移除')
-  assert.deepEqual(dispatch.parameters.required, ['role', 'task'])
+  // P1-B：role 可选（省略时配合 autoRoute），task 仍必填；旧 role+task 调用不受影响。
+  assert.deepEqual(dispatch.parameters.required, ['task'])
   assert.deepEqual(dispatch.parameters.properties.role.type, 'string')
+  assert.equal(dispatch.parameters.properties.autoRoute.type, 'boolean')
 })
 
 test('注入宿主 defineTool 时传的是作者 spec 字典（不双重编译）', () => {
