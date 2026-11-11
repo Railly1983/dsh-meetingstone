@@ -21,6 +21,7 @@
   "scripts": {
     "test": "node scripts/run-tests.mjs",
     "measure": "node scripts/measure-tool-output.mjs",
+    "ledger": "node scripts/token-ledger.mjs",
     "check:host-schema": "node scripts/verify-host-schema.mjs",
     "check:manifest": "node scripts/verify-manifest.mjs",
     "check:package": "node scripts/verify-package.mjs",
