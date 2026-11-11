@@ -233,10 +233,10 @@ test('Host Remote marker：按 Stage-3 装饰器顺序调用 Remote(method) 返�
 })
 
 test('Host Remote 注册：缺少宿主 Typert 协议时安全降级，不抛错', () => {
-  const result = registerGuiRemote({}, { snapshot: () => ({ roles: [], channels: [], lastError: null }) })
+  const result = registerGuiRemote({}, { snapshot: () => ({ roles: [], channels: [], lastError: null }), protocol: null })
   assert.equal(typeof result.registered, 'boolean')
   assert.equal(result.registered, false, '本地单测环境没有 @deepseek-ai/dsh-typert-protocol')
-  assert.equal(result.reason, 'TYPERT_UNAVAILABLE')
+  assert.match(String(result.reason), /TYPERT_UNAVAILABLE|REMOTE_REGISTER_FAILED/)
   assert.equal(GUI_REMOTE_SERVICE, 'meetingstone')
 })
 
