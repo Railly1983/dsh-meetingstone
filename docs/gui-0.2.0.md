@@ -102,7 +102,7 @@ Settings 页面
 ## 4. 验证步骤
 
 ```bash
-node scripts/run-tests.mjs        # 含 tests/gui.test.mjs（stub harness）
+node scripts/run-tests.mjs        # 含 tests/gui.test.mjs（stub harness）与 tests/session-gui-api.test.mjs
 node scripts/verify-manifest.mjs
 node scripts/verify-package.mjs
 ```
@@ -129,7 +129,84 @@ node scripts/verify-package.mjs
    `[meetingstone] GUI remote unavailable: TYPERT_UNAVAILABLE`，说明宿主未解析到
    `@deepseek-ai/dsh-typert-protocol`，页面会显示读取失败而不是假数据。
 
-## 5. 限制与未验证项（如实登记）
+## 5. V1 UI：对话顶部入口 + 右侧栏会话角色编辑（决策 2/3/4/5/6）
+
+在 0.2.0 只读页之外，本次新增「会话级角色覆盖」入口与编辑面板，复用同一套官方 slot 注册
+与 Typert Remote，不新建 UI 体系、不做 DOM/CSS 注入。
+
+### 5.1 顶部集合石入口（header action）
+
+- slot：`conversation.session.header.actions`（`kind:list, scope:session`）。
+- 注册形状（对齐官方 header-actions 约定）：
+  `{ name, id, order, locale, inject(sessionId) }`，组件渲染一个图标按钮
+  （宿主 `@deepseek-ai/dsh-client-ui-primitives` 的 `Icon`，缺失时回退文字）。
+- 点击 → `ctx.sidebarRightTabs.open(TAB_ID)` 打开右侧栏 tab（见 5.2）。
+- tooltip / aria 走宿主 locale（`settings.meetingstone` 命名空间），新增 key：
+  `headerTitle` / `headerDesc` / `openPanel`。
+- 代码：`src/client/index.js` 的 `registerHeaderAction()`，在 `ctx.inject([REMOTE_INJECT])`
+  回调内注册（与 `settings.section` 同一就绪子 ctx）。
+
+### 5.2 右侧栏 tab（两步式）
+
+不能直接注册 rightbar，按官方两步：
+
+1. `ctx.sidebarRightTabs.register({ id, kind, priority, title })` 注册 tab 本体
+   （`src/client/index.js` 的 `registerSidebarTab()`）。
+2. 注册两个 keyed seat（scope session，id 与 tab 对齐）：
+   - `sidebar.right.pane.tab` → 面板内容组件 `SidebarRolePane`
+   - `sidebar.right.pane.tab.title` → 标题组件 `SidebarRoleTitle`
+
+### 5.3 面板内容：当前会话角色覆盖编辑
+
+`SidebarRolePane` 通过新 remote 方法拉取并写回当前会话的角色覆盖：
+
+- 角色列表来自全局角色库（经 `getSessionConfig` 的 `effective.roles`，即 global→project→
+  session 合并后的生效表）。
+- 每个角色可覆盖字段（白名单）：
+  `alias`（别名）、`description`（描述）、`provider`（CLI/provider）、`model`（模型）、
+  `reasoning`（思考强度）。别名字段统一记作 `aliases`；通道字段写成 `channel.<key>`。
+- 每个字段显示「继承 / 覆盖」状态（`sources.roles[roleId].fields['channel.model']`
+  等来自 `resolveEffectiveConfig` 的字段级来源）。
+- 修改即写入会话覆盖（`setSessionOverride`），**只存差异**；等于继承值时自动删除旧覆盖
+  （= 恢复继承）。每个字段有「恢复继承」按钮（`clearSessionOverride`）。
+
+### 5.4 Host 远程方法（复用 src/session 继承模型）
+
+`src/gui/host.js` 的 `registerGuiRemote` 在 `meetingstone` 命名空间下新增 3 个方法
+（`deps.session` 为 `createSessionGuiApi`，见 `src/gui/session.js`）：
+
+| 方法 | 入参 | 返回 |
+| --- | --- | --- |
+| `getSessionConfig(sessionId)` | sessionId | `{ effective, overrides, sources }` |
+| `setSessionOverride(sessionId, roleId, field, value)` | 见上 | store 写盘结果（written/patch/errors） |
+| `clearSessionOverride(sessionId, roleId, field)` | field 缺省=整角色 | store 写盘结果（removed） |
+
+- 校验白名单，坏输入返回明确错误码（见 `src/gui/session.js` 的 `SESSION_GUI_ERRORS`）：
+  `SESSION_GUI_SESSION_ROOT_UNKNOWN` / `INVALID_SESSION_ID` / `INVALID_ROLE_ID` /
+  `INVALID_FIELD`。`sessionId`/`roleId`/`field` 任一非法即拒绝，不静默生效。
+- `getSessionConfig` 只接受一个 `sessionId`，但 host 需要项目根才能定位
+  `.meetingstone/sessions/<sessionId>.json`。项目根来自 `index.js` 在每次派单/工具执行时
+  记录的 `sessionRoots` 映射（sessionId→cwd）；若找不到则返回 `SESSION_ROOT_UNKNOWN`。
+
+### 5.5 继承语义（与 src/session/config.js 一致）
+
+- 会话层**只影响当前 Session**：存储按 sessionId 分文件（store.js），解析时只传入当前会话覆盖。
+- 只写差异：值等于继承值时不写入；恢复字段用 `clearSessionOverride`。
+- 字段级来源（`sources`）在 `resolveEffectiveConfig` 中逐项标注，面板据此显示「继承/覆盖」。
+
+### 5.6 验证
+
+```bash
+node scripts/run-tests.mjs            # 含 tests/gui.test.mjs（header/tab/seat/remote 注册）
+                                      # + tests/session-gui-api.test.mjs（get/set/clear/继承）
+```
+
+`tests/session-gui-api.test.mjs`（Node 级真相测试）：直接驱动 `createSessionGuiApi` 验证
+get/set/clear 的继承语义、只写差异、恢复继承、session 隔离、白名单校验与错误码。
+`tests/gui.test.mjs` 的 stub harness 扩展覆盖：header 注册形状与点击打开右侧栏、右侧栏两步式
+注册、两个 keyed seat、以及 pane 通过 `remote.meetingstone` 的 get/set/clear 调用。
+
+## 6. 限制与未验证项（如实登记）
 
 - **真机 GUI 未验证**：本环境无法启动 DSH 桌面端，未做截图级确认。`settings.section` 是否
   真实出现、`Tag`/主题 token 的实际渲染、`ctx.remote.$mount` 与宿主 Gateway 的真实传输，
@@ -150,3 +227,17 @@ node scripts/verify-package.mjs
   不落盘、不跨重启。
 - **既有 flaky 测试**：`tests/parallel.test.mjs` 的「真实并行：两任务时间重叠」在全量并发下
   偶发失败（两任务区间恰好相切），单跑通过；与本次改动无关。
+- **V1 UI 真机未验证**：header action（`conversation.session.header.actions`）、右侧栏两步式
+  注册（`sidebarRightTabs.register` + `sidebar.right.pane.tab` / `.title` seat）、`Icon` 渲染、
+  `ctx.sidebarRightTabs.open(TAB_ID)` 的打开语义，均只做了源码级对齐 + stub harness 结构断言，
+  未做真机渲染确认。
+- **`sidebarRightTabs.open` 方法名未核实**：打开右侧栏用的是 `open(id)`（参考官方右侧栏 API 命名），
+  真机若实际为 `activate`/`show`/`select` 等，需在 `registerHeaderAction` 内调整。
+- **会话方法 contribution 的 `parameters` 写的是 `[]`**：与 `list` 一致按最小 descriptor 手写，
+  未经 `typert.remotes.register()` 对带参方法的 codec 校验；真机若要求参数描述符，需补
+  `parameters` 形状（本仓库无生成器，属未验证项）。
+- **`sessionRoots` 依赖派单/工具先触发**：右侧栏远程方法只有 sessionId、没有 cwd，靠 `index.js`
+  在 `resolveRegistry(exec)` 时记录 sessionId→项目根。若用户**未在该会话内触发过任何派单/工具**
+  就打开面板，host 找不到项目根，返回 `SESSION_GUI_SESSION_ROOT_UNKNOWN`；真机需确认该映射时机。
+- **面板为只读渲染 + 覆盖写入**：字段编辑走 `setSessionOverride`/`clearSessionOverride` 的
+  差异写盘，未做乐观更新与写入失败重试（store 写失败会在 `errors` 中返回，面板保持原值）。

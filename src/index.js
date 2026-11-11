@@ -25,6 +25,7 @@ import { createNodeSessionOverrideStore } from './session/store.js'
 import { createRunStore } from './run-store.js'
 import { createWorktreeManager } from './worktree.js'
 import { createGuiState, registerGuiRemote } from './gui/host.js'
+import { createSessionGuiApi } from './gui/session.js'
 
 /**
  * 宿主运行时把 `@deepseek-ai/dsh-tools` 作为 shared package 提供。
@@ -98,6 +99,15 @@ export function apply(ctx, config = {}) {
   const projectStore = createNodeProjectConfigStore()
   const sessionStore = createNodeSessionOverrideStore()
 
+  /**
+   * sessionId → 项目根 映射。右侧栏远程方法只有 sessionId，没有 cwd，靠每次派单/
+   * 工具执行时 `resolveRegistry` 记录的映射来定位会话配置文件。会话结束/卸载不清空
+   * （会话配置是落盘文件，下次同 sessionId 仍可解析），但换项目根后会读旧根——已在
+   * docs/gui-0.2.0.md 登记为未验证项。
+   * @type {Map<string, string>}
+   */
+  const sessionRoots = new Map()
+
   /** @type {import('./roles/registry.js').RoleRegistry} */
   const globalRegistry = createRegistry({ globalRoles: cfg.roles ?? [] })
 
@@ -132,6 +142,10 @@ export function apply(ctx, config = {}) {
   async function resolveRegistry(exec) {
     const projectRoot = exec?.agent?.session?.header?.cwd
     const sessionId = exec?.agent?.session?.id
+    // 记录 sessionId → 项目根，供右侧栏远程方法定位会话配置。
+    if (typeof projectRoot === 'string' && projectRoot && typeof sessionId === 'string' && sessionId) {
+      sessionRoots.set(sessionId, projectRoot)
+    }
     const loaded = projectStore.get(projectRoot, cfg.projectConfigFile)
     // 没有会话 id 时不应用会话覆盖（宁可不生效，也不张冠李戴到别的会话）。
     const sessionLoaded =
@@ -369,7 +383,16 @@ export function apply(ctx, config = {}) {
     // GUI 只读 Remote：宿主注册 `meetingstone/list`（SRC marker），浏览器 half 用
     // ctx.remote.meetingstone.list() 取快照。宿主没有 Typert 协议时静默跳过，
     // 不影响工具与派单（设置页会显示“读取失败”，不会假装有数据）。
-    const guiRemote = registerGuiRemote(ctx, { snapshot: () => gui.fullSnapshot() })
+    const sessionApi = createSessionGuiApi({
+      cfg,
+      projectStore,
+      sessionStore,
+      resolveProjectRoot: (sessionId) => sessionRoots.get(sessionId) ?? null,
+    })
+    const guiRemote = registerGuiRemote(ctx, {
+      snapshot: () => gui.fullSnapshot(),
+      session: sessionApi,
+    })
     if (guiRemote.registered !== true) {
       const detail = `[${name}] GUI remote unavailable: ${guiRemote.reason}${
         guiRemote.error ? ` (${guiRemote.error})` : ''

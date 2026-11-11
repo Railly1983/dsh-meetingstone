@@ -298,6 +298,20 @@ async function loadClientHarness(values = {}) {
   assert.equal(captured?.id, 'dsh-meetingstone', 'lazy-CJS 入口 id 必须是包名')
 
   const exports = captured.factory(fakeRequire)
+  const sidebarTabRegisters = []
+  const sidebarOpenCalls = []
+  const sessionRemoteCalls = []
+  const SAMPLE_SESSION_VIEW = {
+    effective: {
+      roles: [{ roleId: 'role-sashi', name: '沙僧', aliases: ['SS'], channel: { model: 'm1' } }],
+      channels: [],
+      defaultRoleId: undefined,
+      dispatchNotes: '',
+      projectRules: [],
+    },
+    overrides: { 'role-sashi': { channel: { model: 'm1' } } },
+    sources: { roles: { 'role-sashi': { layer: 'session', fields: { 'channel.model': 'session' } } } },
+  }
   const remote = {
     async $mount(contribution) {
       mounted.push(contribution)
@@ -307,6 +321,18 @@ async function loadClientHarness(values = {}) {
     meetingstone: {
       async list() {
         return remoteValue
+      },
+      async getSessionConfig(sessionId) {
+        sessionRemoteCalls.push(['getSessionConfig', sessionId])
+        return { ok: true, value: SAMPLE_SESSION_VIEW }
+      },
+      async setSessionOverride(sessionId, roleId, field, value) {
+        sessionRemoteCalls.push(['setSessionOverride', sessionId, roleId, field, value])
+        return { ok: true, value: { written: true, patch: { channel: { model: value } } } }
+      },
+      async clearSessionOverride(sessionId, roleId, field) {
+        sessionRemoteCalls.push(['clearSessionOverride', sessionId, roleId, field])
+        return { ok: true, value: { removed: true } }
       },
     },
     pluginInventory: {
@@ -339,20 +365,40 @@ async function loadClientHarness(values = {}) {
         return () => {}
       },
     },
+    sidebarRightTabs: {
+      register(options) {
+        sidebarTabRegisters.push(options)
+        return () => {}
+      },
+      open(id) {
+        sidebarOpenCalls.push(id)
+        return () => {}
+      },
+    },
     remote,
     logger: { info() {}, warn() {} },
   }
 
   await exports.apply(ctx)
-  return { exports, registrations, mounted, injectCalls, remote }
+  return {
+    exports,
+    registrations,
+    mounted,
+    injectCalls,
+    remote,
+    sidebarTabRegisters,
+    sidebarOpenCalls,
+    sessionRemoteCalls,
+  }
 }
 
 test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 取真实快照', async () => {
   const { exports, registrations, mounted, injectCalls } = await loadClientHarness()
 
-  assert.equal(registrations.length, 1)
-  const { options, Component } = registrations[0]
-  assert.equal(options.name, 'settings.section')
+  const byName = (name) => registrations.filter((r) => r.options.name === name)
+  assert.equal(byName('settings.section').length, 1, 'settings.section 注册一次')
+  const section = byName('settings.section')[0]
+  const { options, Component } = section
   assert.equal(options.id, 'meetingstone')
   assert.equal(options.order, 100)
   assert.equal(options.locale, 'settings.meetingstone')
@@ -365,17 +411,22 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
 
   assert.equal(mounted.length, 1)
   assert.equal(mounted[0].package, 'dsh-meetingstone')
-  assert.deepEqual(mounted[0].descriptors, [
-    {
-      id: 'dsh-meetingstone#meetingstone/list',
-      service: 'meetingstone',
-      namespace: 'meetingstone',
-      method: 'list',
-      parameters: [],
-      invocation: { kind: 'direct' },
-      result: { mode: 'src-json' },
-    },
-  ])
+  // 现有 1 个只读方法 + 3 个会话级方法，共 4 个 descriptor。
+  assert.equal(mounted[0].descriptors.length, 4)
+  assert.deepEqual(
+    mounted[0].descriptors.map((d) => d.method).sort(),
+    ['clearSessionOverride', 'getSessionConfig', 'list', 'setSessionOverride'],
+  )
+  const listDesc = mounted[0].descriptors.find((d) => d.method === 'list')
+  assert.deepEqual(listDesc, {
+    id: 'dsh-meetingstone#meetingstone/list',
+    service: 'meetingstone',
+    namespace: 'meetingstone',
+    method: 'list',
+    parameters: [],
+    invocation: { kind: 'direct' },
+    result: { mode: 'src-json' },
+  })
 
   const injected = options.inject()
   const snapshot = await injected.list()
@@ -496,6 +547,88 @@ test('Browser half：$mount 失败时仍注册 section，并以 unavailable 快�
   assert.equal(snapshot.unavailable.code, 'REMOTE_MOUNT_FAILED')
   assert.match(snapshot.unavailable.message, /mount boom/)
   assert.deepEqual(snapshot.roles, [])
+})
+
+test('Browser half：顶部集合石入口（conversation.session.header.actions）注册，点击打开右侧栏', async () => {
+  const { exports, registrations, sidebarOpenCalls } = await loadClientHarness()
+  const TAB_ID = exports.__test.TAB_ID
+
+  const header = registrations.filter((r) => r.options.name === 'conversation.session.header.actions')
+  assert.equal(header.length, 1, 'header.action 注册一次')
+  const { options, Component } = header[0]
+  assert.equal(options.id, exports.__test.HEADER_ACTION_ID)
+  assert.equal(typeof options.order, 'number')
+  assert.equal(options.locale, 'settings.meetingstone')
+  assert.equal(typeof options.inject, 'function', 'host 用 inject(sessionId) 注入 props')
+  assert.equal(typeof Component, 'function')
+
+  // 模拟 host 用 inject(sessionId) 拿到 props 并渲染，再触发点击。
+  const props = options.inject('sess-h1')
+  assert.equal(props.sessionId, 'sess-h1')
+  assert.equal(typeof props.openRolePanel, 'function')
+  const element = Component(props)
+  assert.equal(element.type, 'button', '入口是图标按钮')
+  assert.equal(typeof element.props.onClick, 'function')
+  element.props.onClick()
+  assert.deepEqual(sidebarOpenCalls, [TAB_ID], '点击应打开右侧栏 tab')
+})
+
+test('Browser half：右侧栏两步式注册（sidebarRightTabs + 两个 keyed seat）', async () => {
+  const { exports, registrations, sidebarTabRegisters } = await loadClientHarness()
+  const TAB_ID = exports.__test.TAB_ID
+
+  // 第 1 步：tab 本体
+  assert.equal(sidebarTabRegisters.length, 1)
+  const tab = sidebarTabRegisters[0]
+  assert.equal(tab.id, TAB_ID)
+  assert.equal(tab.kind, 'meetingstone-roles')
+  assert.equal(typeof tab.priority, 'number')
+  assert.equal(typeof tab.title, 'function')
+
+  // 第 2 步：keyed seat（内容 + 标题，scope session）
+  const pane = registrations.filter((r) => r.options.name === 'sidebar.right.pane.tab')
+  const title = registrations.filter((r) => r.options.name === 'sidebar.right.pane.tab.title')
+  assert.equal(pane.length, 1)
+  assert.equal(title.length, 1)
+  assert.equal(pane[0].options.id, TAB_ID, 'seat 用 tab id 对齐到右侧栏')
+  assert.equal(title[0].options.id, TAB_ID)
+  assert.equal(pane[0].options.locale, 'settings.meetingstone')
+  assert.equal(typeof pane[0].Component, 'function')
+})
+
+test('Browser half：右侧栏 pane 通过 remote 方法读取/写入会话角色覆盖', async () => {
+  const { exports, remote, sessionRemoteCalls } = await loadClientHarness()
+  const service = remote.meetingstone
+
+  const loader = exports.__test.makeSessionLoader(service)
+  const view = await loader('sess-p1')
+  assert.deepEqual(sessionRemoteCalls[0], ['getSessionConfig', 'sess-p1'])
+  assert.equal(view.effective.roles[0].roleId, 'role-sashi')
+
+  await exports.__test.applySessionOverride(service, 'sess-p1', 'role-sashi', 'model', 'm-x')
+  assert.deepEqual(
+    sessionRemoteCalls[sessionRemoteCalls.length - 1],
+    ['setSessionOverride', 'sess-p1', 'role-sashi', 'model', 'm-x'],
+  )
+
+  await exports.__test.clearSessionOverride(service, 'sess-p1', 'role-sashi', 'model')
+  assert.deepEqual(
+    sessionRemoteCalls[sessionRemoteCalls.length - 1],
+    ['clearSessionOverride', 'sess-p1', 'role-sashi', 'model'],
+  )
+})
+
+test('Browser half：remote 方法失败时（ok!==true）loader 抛错而非伪装', async () => {
+  const { exports } = await loadClientHarness()
+  const failingService = {
+    async getSessionConfig() {
+      return { ok: false, error: { code: 'SESSION_GUI_SESSION_ROOT_UNKNOWN', message: 'no root' } }
+    },
+  }
+  await assert.rejects(
+    () => exports.__test.makeSessionLoader(failingService)('sess-z'),
+    /SESSION_GUI_SESSION_ROOT_UNKNOWN/,
+  )
 })
 
 test('client 源文件：无占位数据，且命名空间读取走动态注入', async () => {

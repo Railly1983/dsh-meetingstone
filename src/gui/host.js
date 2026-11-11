@@ -34,6 +34,13 @@ export const GUI_REMOTE_SERVICE = 'meetingstone'
 /** `@deepseek-ai/dsh-typert-protocol/remote-methods` 的版本。 */
 const REMOTE_METHOD_DESCRIPTOR_VERSION = 1
 
+/** 会话级远程方法名（与 src/gui/session.js 的方法一一对应）。 */
+const SESSION_REMOTE_METHODS = Object.freeze([
+  'getSessionConfig',
+  'setSessionOverride',
+  'clearSessionOverride',
+])
+
 /**
  * 设置页打开时最多等 CLI 探测多久。探测有 5 分钟缓存（src/cli/probe.js TTL），
  * 首次冷启动在本机约 0.8s；超时则如实返回 `cli: null`，不编造状态。
@@ -338,7 +345,7 @@ export function markRemoteMethod(prototype, method, Remote) {
  * 调用（证据：dsh-api-gateway/lib/index.js:924-938,1268-1272）。
  *
  * @param {any} ctx Host 插件 ctx
- * @param {{ snapshot: () => any }} deps
+ * @param {{ snapshot: () => any, session?: import('./session.js').createSessionGuiApi }} deps
  */
 export function registerGuiRemote(ctx, deps) {
   if (!ctx || typeof deps?.snapshot !== 'function') {
@@ -348,6 +355,8 @@ export function registerGuiRemote(ctx, deps) {
   if (!protocol || typeof protocol.TypertRemoteService !== 'function' || typeof protocol.Remote !== 'function') {
     return { registered: false, reason: 'TYPERT_UNAVAILABLE' }
   }
+
+  const session = deps?.session ?? null
 
   try {
     const { TypertRemoteService, Remote } = protocol
@@ -360,10 +369,36 @@ export function registerGuiRemote(ctx, deps) {
       async list() {
         return deps.snapshot()
       }
+
+      /**
+       * 当前会话的角色配置视图（生效角色表 + 覆盖 + 来源）。
+       * 失败抛带 code 的错误，由 Typert Gateway 包成 `{ ok:false, error }`。
+       */
+      async getSessionConfig(sessionId) {
+        if (!session) throw new Error('session gui api 未挂载')
+        return session.getSessionConfig(sessionId)
+      }
+
+      /** 写一个字段级会话覆盖（只写差异）。 */
+      async setSessionOverride(sessionId, roleId, field, value) {
+        if (!session) throw new Error('session gui api 未挂载')
+        return session.setSessionOverride(sessionId, roleId, field, value)
+      }
+
+      /** 恢复一个字段（或全部）的继承。 */
+      async clearSessionOverride(sessionId, roleId, field) {
+        if (!session) throw new Error('session gui api 未挂载')
+        return session.clearSessionOverride(sessionId, roleId, field)
+      }
     }
     markRemoteMethod(MeetingStoneGuiRemote.prototype, 'list', Remote)
+    if (session) {
+      for (const method of SESSION_REMOTE_METHODS) {
+        markRemoteMethod(MeetingStoneGuiRemote.prototype, method, Remote)
+      }
+    }
     const instance = new MeetingStoneGuiRemote(ctx)
-    return { registered: true, instance }
+    return { registered: true, instance, withSession: Boolean(session) }
   } catch (error) {
     return {
       registered: false,

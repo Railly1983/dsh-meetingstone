@@ -47,6 +47,11 @@ window.__ModuleLoader__.load({
     const NS = 'settings.meetingstone'
     const inject = ['slots', 'locale', 'remote']
 
+    /** 右侧栏 tab 的 id（header 点击时用它打开面板）。 */
+    const TAB_ID = 'meetingstone-roles'
+    /** 标题右侧入口（conversation.session.header.actions）的 id。 */
+    const HEADER_ACTION_ID = 'meetingstone-role'
+
     // Remote namespace / method 必须与 Host src/gui/host.js 的 GUI_REMOTE_SERVICE 对齐。
     const REMOTE_PACKAGE = 'dsh-meetingstone'
     const REMOTE_SERVICE = 'meetingstone'
@@ -80,6 +85,15 @@ window.__ModuleLoader__.load({
           invocation: { kind: 'direct' },
           result: { mode: 'src-json' },
         },
+        ...['getSessionConfig', 'setSessionOverride', 'clearSessionOverride'].map((method) => ({
+          id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/${method}`,
+          service: REMOTE_SERVICE,
+          namespace: REMOTE_SERVICE,
+          method,
+          parameters: [],
+          invocation: { kind: 'direct' },
+          result: { mode: 'src-json' },
+        })),
       ],
     }
 
@@ -289,6 +303,26 @@ window.__ModuleLoader__.load({
       isolationNone: '主工作区（串行）',
       projectConfigFile: '项目配置文件',
       dispatchNotes: '调度提示',
+      // 顶部集合石入口 + 右侧栏「当前会话角色」
+      headerTitle: '集合石角色',
+      headerDesc: '编辑当前会话的角色覆盖',
+      tabTitle: '集合石角色',
+      paneTitle: '当前会话角色覆盖',
+      openPanel: '打开集合石角色面板',
+      noRoles: '当前会话没有可用角色',
+      inherited: '继承',
+      overridden: '覆盖',
+      restore: '恢复继承',
+      aliasField: '别名',
+      descField: '描述',
+      providerField: '提供商',
+      modelField: '模型',
+      reasoningField: '思考强度',
+      dispatchNotesField: '调度规则',
+      saving: '保存中…',
+      saved: '已保存',
+      failed: '保存失败',
+      notSet: '未设置',
     }
     const en = {
       nav: 'MeetingStone',
@@ -329,6 +363,26 @@ window.__ModuleLoader__.load({
       isolationNone: 'Main workspace (serialized)',
       projectConfigFile: 'Project config file',
       dispatchNotes: 'Dispatch notes',
+      // 顶部集合石入口 + 右侧栏「当前会话角色」
+      headerTitle: 'MeetingStone Roles',
+      headerDesc: 'Edit role overrides for this session',
+      tabTitle: 'MeetingStone Roles',
+      paneTitle: 'Session role overrides',
+      openPanel: 'Open MeetingStone role panel',
+      noRoles: 'No roles available in this session',
+      inherited: 'Inherited',
+      overridden: 'Overridden',
+      restore: 'Restore inherited',
+      aliasField: 'Alias',
+      descField: 'Description',
+      providerField: 'Provider',
+      modelField: 'Model',
+      reasoningField: 'Reasoning',
+      dispatchNotesField: 'Dispatch notes',
+      saving: 'Saving…',
+      saved: 'Saved',
+      failed: 'Save failed',
+      notSet: 'Not set',
     }
 
     /** availability → 宿主 Tag 的 tone/文案 key（tone 取值见官方 TAG_TONES）。 */
@@ -622,6 +676,315 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** 可覆盖字段的元数据：从生效角色读取值、写覆盖时构造 patch 形状。 */
+    const OVERRIDABLE_FIELDS = [
+      {
+        key: 'alias',
+        labelKey: 'aliasField',
+        get: (/** @type {any} */ r) => (Array.isArray(r.aliases) ? r.aliases.join(', ') : ''),
+        toValue: (/** @type {string} */ raw) =>
+          raw
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean),
+      },
+      { key: 'description', labelKey: 'descField', get: (/** @type {any} */ r) => r.description ?? '' },
+      {
+        key: 'provider',
+        labelKey: 'providerField',
+        get: (/** @type {any} */ r) => r.channel?.provider ?? '',
+      },
+      {
+        key: 'model',
+        labelKey: 'modelField',
+        get: (/** @type {any} */ r) => r.channel?.model ?? '',
+      },
+      {
+        key: 'reasoning',
+        labelKey: 'reasoningField',
+        get: (/** @type {any} */ r) => r.channel?.reasoning ?? '',
+      },
+    ]
+
+    /**
+     * 加载当前会话的角色视图。service 必须是已就绪的 `remote.meetingstone` 命名空间服务。
+     * @param {any} service
+     */
+    function makeSessionLoader(service) {
+      return async (sessionId) => {
+        const result = await service.getSessionConfig(sessionId)
+        if (!result || result.ok !== true) {
+          const failure = result && result.error ? result.error : {}
+          throw new Error(
+            `${REMOTE_SERVICE}.getSessionConfig failed: ${failure.code ?? 'unknown'}: ${failure.message ?? 'unknown'}`,
+          )
+        }
+        return result.value
+      }
+    }
+
+    /** @param {any} service @param {string} sessionId @param {string} roleId @param {string} field @param {unknown} value */
+    async function applySessionOverride(service, sessionId, roleId, field, value) {
+      const result = await service.setSessionOverride(sessionId, roleId, field, value)
+      if (!result || result.ok !== true) {
+        const failure = result && result.error ? result.error : {}
+        throw new Error(
+          `${REMOTE_SERVICE}.setSessionOverride failed: ${failure.code ?? 'unknown'}: ${failure.message ?? 'unknown'}`,
+        )
+      }
+      return result.value
+    }
+
+    /** @param {any} service @param {string} sessionId @param {string} roleId @param {string} [field] */
+    async function clearSessionOverride(service, sessionId, roleId, field) {
+      const result = await service.clearSessionOverride(sessionId, roleId, field ?? null)
+      if (!result || result.ok !== true) {
+        const failure = result && result.error ? result.error : {}
+        throw new Error(
+          `${REMOTE_SERVICE}.clearSessionOverride failed: ${failure.code ?? 'unknown'}: ${failure.message ?? 'unknown'}`,
+        )
+      }
+      return result.value
+    }
+
+    /** 标题右侧入口：图标按钮（宿主 Icon，回退文字）；点击打开右侧栏 tab。 */
+    function HeaderEntry({ t, openRolePanel }) {
+      const label = t('headerTitle')
+      const desc = t('headerDesc')
+      const icon =
+        typeof primitives.Icon === 'function'
+          ? jsx(primitives.Icon, { name: 'users', 'aria-label': label, title: desc })
+          : jsx('span', { children: label })
+      return jsx('button', {
+        type: 'button',
+        className: 'dsh-meetingstone-header-entry',
+        'aria-label': label,
+        title: desc,
+        onClick: () => {
+          try {
+            if (openRolePanel) openRolePanel()
+          } catch {
+            /* 宿主未提供 sidebarRightTabs.open 时静默 */
+          }
+        },
+        children: icon,
+      })
+    }
+
+    /** 右侧栏 tab 标题。 */
+    function SidebarRoleTitle({ t }) {
+      return jsx('span', { children: t('tabTitle') })
+    }
+
+    /** 单个角色的覆盖编辑卡片（只用宿主 token，不自带 CSS）。 */
+    function RoleCard({ t, role, sources, service, sessionId, onChanged }) {
+      const srcFields = sources?.[role.roleId]?.fields ?? {}
+      return jsxs('div', {
+        style: card,
+        children: [
+          jsx('div', { style: row, children: [jsx('strong', { children: role.name || role.roleId }), jsx('span', { style: grow })] }),
+          ...OVERRIDABLE_FIELDS.map((field) => {
+            const fieldPath = field.key.startsWith('channel.') ? field.key : field.key
+            const src = srcFields[fieldPath] ?? srcFields[field.key] ?? 'default'
+            const isOverridden = src === 'session'
+            const value = field.get(role)
+            return jsxs(
+              'div',
+              {
+                style: { display: 'flex', flexDirection: 'column', gap: 4 },
+                children: [
+                  jsxs('div', {
+                    style: row,
+                    children: [
+                      jsx('span', { style: dt, children: t(field.labelKey) }),
+                      jsx('span', { style: grow }),
+                      jsx(Tag, {
+                        tone: isOverridden ? 'warning' : 'neutral',
+                        children: isOverridden ? t('overridden') : t('inherited'),
+                      }),
+                    ],
+                  }),
+                  jsx('input', {
+                    type: 'text',
+                    value: value,
+                    placeholder: t('notSet'),
+                    style: { ...code, width: '100%' },
+                    onInput: async (/** @type {any} */ e) => {
+                      const raw = e?.target?.value ?? ''
+                      try {
+                        const next = field.key === 'alias' ? field.toValue(raw) : raw
+                        await applySessionOverride(service, sessionId, role.roleId, field.key, next)
+                        if (onChanged) onChanged()
+                      } catch {
+                        /* 写入失败：保持原值，下一轮刷新会显示真实状态 */
+                      }
+                    },
+                  }),
+                  isOverridden
+                    ? jsx('button', {
+                        type: 'button',
+                        style: { ...dim, background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', padding: 0 },
+                        onClick: async () => {
+                          try {
+                            await clearSessionOverride(service, sessionId, role.roleId, field.key)
+                            if (onChanged) onChanged()
+                          } catch {
+                            /* 同上 */
+                          }
+                        },
+                        children: t('restore'),
+                      })
+                    : null,
+                ],
+              },
+              `${role.roleId}.${field.key}`,
+            )
+          }),
+        ],
+      })
+    }
+
+    /** 右侧栏「当前会话角色」面板：拉取视图 → 渲染角色覆盖卡 → 写回。 */
+    function SidebarRolePane({ t, sessionId, service }) {
+      const [state, setState] = react.useState({ status: 'loading' })
+      const reload = () => {
+        Promise.resolve()
+          .then(() => makeSessionLoader(service)(sessionId))
+          .then(
+            (view) => setState({ status: 'ready', view }),
+            (error) =>
+              setState({
+                status: 'error',
+                message: error instanceof Error ? error.message : String(error),
+              }),
+          )
+      }
+      react.useEffect(() => {
+        let current = true
+        Promise.resolve()
+          .then(() => makeSessionLoader(service)(sessionId))
+          .then(
+            (view) => {
+              if (current) setState({ status: 'ready', view })
+            },
+            (error) => {
+              if (current)
+                setState({
+                  status: 'error',
+                  message: error instanceof Error ? error.message : String(error),
+                })
+            },
+          )
+        return () => {
+          current = false
+        }
+      }, [sessionId, service])
+
+      if (state.status === 'loading') {
+        return jsx('div', { style: note, children: t('loading') })
+      }
+      if (state.status === 'error') {
+        return jsxs('div', { role: 'alert', children: [jsx('p', { style: note, children: t('loadFailed') }), jsx('p', { style: note, children: state.message })] })
+      }
+
+      const view = state.view
+      const roles = Array.isArray(view?.effective?.roles) ? view.effective.roles : []
+      const sources = view?.sources?.roles ?? {}
+      return jsxs('div', {
+        style: root,
+        children: [
+          jsx('h3', { style: heading, children: t('paneTitle') }),
+          roles.length === 0
+            ? jsx('p', { style: note, children: t('noRoles') })
+            : jsxs('div', {
+                style: list,
+                children: roles.map((role) =>
+                  jsx(RoleCard, {
+                    key: role.roleId,
+                    t,
+                    role,
+                    sources,
+                    service,
+                    sessionId,
+                    onChanged: reload,
+                  }),
+                ),
+              }),
+        ],
+      })
+    }
+
+    /**
+     * 注册 title 右侧入口 `conversation.session.header.actions`（kind:list, scope:session）。
+     * 注册形状对齐官方：{ name, id, order, locale, inject(sessionId) }。
+     * @param {any} slotCtx
+     * @param {any} service 已就绪的 remote.meetingstone 服务
+     * @param {(key: string) => string} t
+     */
+    function registerHeaderAction(slotCtx, service, t) {
+      const openPanel = () => {
+        try {
+          slotCtx.sidebarRightTabs?.open?.(TAB_ID)
+        } catch {
+          /* 宿主未提供 open 时静默 */
+        }
+      }
+      slotCtx.slots.inject('conversation.session.header.actions', () =>
+        slotCtx.slots.register(
+          {
+            name: 'conversation.session.header.actions',
+            id: HEADER_ACTION_ID,
+            order: 60,
+            locale: NS,
+            inject: (/** @type {string} */ sessionId) => ({ sessionId, openRolePanel: openPanel, t }),
+          },
+          HeaderEntry,
+        ),
+      )
+    }
+
+    /**
+     * 两步式注册右侧栏 tab：先 `sidebarRightTabs.register` 注册 tab，再注册两个
+     * keyed seat（内容 + 标题，scope session）。
+     * @param {any} slotCtx
+     * @param {any} service
+     * @param {(key: string) => string} t
+     */
+    function registerSidebarTab(slotCtx, service, t) {
+      // 1) tab 本体
+      if (typeof slotCtx.sidebarRightTabs?.register === 'function') {
+        slotCtx.sidebarRightTabs.register({
+          id: TAB_ID,
+          kind: 'meetingstone-roles',
+          priority: 50,
+          title: () => t('tabTitle'),
+        })
+      }
+      // 2) keyed seats（scope session）
+      slotCtx.slots.inject('sidebar.right.pane.tab', () =>
+        slotCtx.slots.register(
+          {
+            name: 'sidebar.right.pane.tab',
+            id: TAB_ID,
+            locale: NS,
+            inject: (/** @type {string} */ sessionId) => ({ sessionId, service, t }),
+          },
+          SidebarRolePane,
+        ),
+      )
+      slotCtx.slots.inject('sidebar.right.pane.tab.title', () =>
+        slotCtx.slots.register(
+          {
+            name: 'sidebar.right.pane.tab.title',
+            id: TAB_ID,
+            locale: NS,
+            inject: () => ({ t }),
+          },
+          SidebarRoleTitle,
+        ),
+      )
+    }
+
     /**
      * 挂载 section。inject 与 register 形状对齐官方 settings-plugins。
      *
@@ -653,6 +1016,8 @@ window.__ModuleLoader__.load({
       ctx.inject([REMOTE_INJECT], (readyCtx) => {
         const service = readyCtx.remote[REMOTE_SERVICE]
         registerSection(readyCtx, makeLoader(service), t)
+        registerHeaderAction(readyCtx, service, t)
+        registerSidebarTab(readyCtx, service, t)
       })
     }
 
@@ -665,6 +1030,12 @@ window.__ModuleLoader__.load({
       unavailableSnapshot,
       REMOTE_CONTRIBUTION,
       REMOTE_INJECT,
+      TAB_ID,
+      HEADER_ACTION_ID,
+      makeSessionLoader,
+      applySessionOverride,
+      clearSessionOverride,
+      OVERRIDABLE_FIELDS,
     }
     return module.exports
   },
