@@ -1,0 +1,9 @@
+# 仅示例；后续合并到可信测试项目 .codex/config.toml，替换绝对路径。
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 1
+[mcp_servers.meetingstone_poc]
+command = "node"
+args = ["D:/ABS/REPO/docs/cross-host/codex-poc/server.mjs"]
+enabled_tools = ["meetingstone_list_roles"]
+required = true
