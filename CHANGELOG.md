@@ -22,6 +22,8 @@ V1 范围冻结（docs/V1-SCOPE.md）：四个工作包 + 不做清单。
 
 ### Fixed
 - 设置页与对话顶部集合石入口不显示：slot 注册不再阻塞在 `ctx.inject(['remote.meetingstone'])` 回调里，改为立即注册 + `ctx.get()` 惰性取服务
+- 右侧栏无法打开：改用 `ctx.sidebarRight.openTab(kind, { params })`，keyed seat 使用 `key`
+- 会话角色面板改为**只读**：手写 Typert 带参远程无法满足宿主 strict codec（zod 类型符号），编辑能力待生成式 Remote 支持
 
 ### Known limitations
 - 自动路由、效率账本为实验/开发工具，不属于 V1 卖点
