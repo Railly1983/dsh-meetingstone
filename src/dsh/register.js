@@ -118,7 +118,20 @@ function compileParameterSpec(spec) {
   for (const [key, field] of Object.entries(spec ?? {})) {
     const source = field && typeof field === 'object' ? field : {}
     const node = {}
-    for (const k of ['type', 'description', 'title', 'default', 'examples', 'enum', 'const']) {
+    for (const k of [
+      'type',
+      'description',
+      'title',
+      'default',
+      'examples',
+      'enum',
+      'const',
+      // 宿主对嵌套结构有硬性要求：object 必须显式 additionalProperties，
+      // array 必须给 items（真机报错：parameters.scope.additionalProperties must be explicitly true or false）。
+      'items',
+      'additionalProperties',
+      'properties',
+    ]) {
       if (Object.hasOwn(source, k)) node[k] = source[k]
     }
     // 避免 `__proto__` 之类的键触发原型赋值语义（与宿主实现一致）。
@@ -483,18 +496,22 @@ export function registerTools(ctx, deps) {
         },
         scope: {
           type: 'object',
+          additionalProperties: true,
           description: '范围与边界：{ include: string[], exclude: string[] }；声明了 scope 就必须给 acceptance',
         },
         acceptance: {
           type: 'array',
+          items: { type: 'string' },
           description: '验收标准（字符串数组）；声明 scope 时必填，简单查询可省略',
         },
         evidence: {
           type: 'array',
+          items: { type: 'string' },
           description: '需要提交的证据 / 文件 / 测试（字符串数组）',
         },
         contextRefs: {
           type: 'array',
+          items: { type: 'string' },
           description: '上下文包或文件引用（字符串数组）',
         },
         roleHint: {
@@ -503,10 +520,12 @@ export function registerTools(ctx, deps) {
         },
         outputBudget: {
           type: 'object',
+          additionalProperties: true,
           description: '摘要与产物预算：{ summaryTokens?: number, notes?: string }',
         },
         contextPack: {
           type: 'object',
+          additionalProperties: true,
           description:
             '最小上下文：{ knownFacts: string[], files: string[], priorResults: [{ summary, artifactRef }], doNotRepeat: string[] }',
         },

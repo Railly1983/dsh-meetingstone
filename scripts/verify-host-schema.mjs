@@ -72,6 +72,18 @@ function checkParameters(name, p) {
       !Object.hasOwn(node, 'required'),
       `${name}.${key}: required 必须提升到根级 required 数组，不能留在属性里`,
     )
+    // 宿主对嵌套结构有硬性要求（2026-11-11 真机踩到）：
+    // object 参数必须显式 additionalProperties，array 参数必须给 items，否则 profile 启动时整行 failed。
+    if (node?.type === 'object') {
+      assert.equal(
+        typeof node.additionalProperties,
+        'boolean',
+        `${name}.${key}: object 参数必须显式声明 additionalProperties（宿主硬性要求）`,
+      )
+    }
+    if (node?.type === 'array') {
+      assert.ok(node.items !== undefined, `${name}.${key}: array 参数必须声明 items（宿主硬性要求）`)
+    }
   }
 }
 
