@@ -741,6 +741,15 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /** Cordis 服务访问必须走 ctx.get（直接读属性会抛 without inject）。 */
+    function sidebarRightTabsOf(slotCtx) {
+      try {
+        return typeof slotCtx.get === 'function' ? slotCtx.get('sidebarRightTabs') : undefined
+      } catch {
+        return undefined
+      }
+    }
+
     /** GUI 注册期错误：注册失败时页面上要能看见原因，而不是整块消失。 */
     const guiErrors = []
 
@@ -800,7 +809,7 @@ window.__ModuleLoader__.load({
               // 区 2「管理角色」入口：打开右侧栏会话角色面板（复用既有 TAB_ID）。
               openRoles: () => {
                 try {
-                  slotCtx.sidebarRightTabs?.open?.(TAB_ID)
+                  sidebarRightTabsOf(slotCtx)?.open?.(TAB_ID)
                 } catch {
                   /* 宿主未提供 open 时静默 */
                 }
@@ -1080,7 +1089,7 @@ window.__ModuleLoader__.load({
     function registerHeaderAction(slotCtx, service, t) {
       const openPanel = () => {
         try {
-          slotCtx.sidebarRightTabs?.open?.(TAB_ID)
+          sidebarRightTabsOf(slotCtx)?.open?.(TAB_ID)
         } catch {
           /* 宿主未提供 open 时静默 */
         }
@@ -1108,8 +1117,8 @@ window.__ModuleLoader__.load({
      */
     function registerSidebarTab(slotCtx, getService, t) {
       // 1) tab 本体
-      if (typeof slotCtx.sidebarRightTabs?.register === 'function') {
-        slotCtx.sidebarRightTabs.register({
+      if (typeof sidebarRightTabsOf(slotCtx)?.register === 'function') {
+        sidebarRightTabsOf(slotCtx).register({
           id: TAB_ID,
           kind: 'meetingstone-roles',
           priority: 50,

@@ -378,6 +378,7 @@ async function loadClientHarness(values = {}) {
     // 动态取名空间服务：生产代码用 ctx.get('remote.meetingstone')，不阻塞注册。
     get(key) {
       if (key === 'remote.meetingstone') return remote.meetingstone
+      if (key === 'sidebarRightTabs') return ctx.sidebarRightTabs
       return undefined
     },
     remote,
