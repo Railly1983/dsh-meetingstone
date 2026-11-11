@@ -36,14 +36,16 @@ function clip(value, max) {
 }
 
 /**
- * 扫描文本里所有**平衡的顶层 `{...}`**（跳过字符串与转义），最多 `limit` 个。
+ * 扫描文本里所有**平衡的顶层 `{...}`**（跳过字符串与转义）。
  * 用于「结果里夹着说明文字、JSON 在后面」的容错；不解析、不校验。
  *
+ * 必须扫描全部对象：输出契约要求"回复的最后给出结果"，只扫前几个会让正文示例
+ * 冒充最终结论（P0-C 审计 F6）。
+ *
  * @param {string} text
- * @param {number} limit
  * @returns {string[]}
  */
-function balancedObjects(text, limit) {
+function balancedObjects(text) {
   /** @type {string[]} */
   const out = []
   let depth = 0
@@ -73,7 +75,6 @@ function balancedObjects(text, limit) {
       if (depth === 0 && start >= 0) {
         out.push(text.slice(start, index + 1))
         start = -1
-        if (out.length >= limit) return out
       }
     }
   }
@@ -99,33 +100,47 @@ function hasKnownKey(value) {
 
 /**
  * 从结果文本里提取结构化对象。
+ *
+ * 选择规则（P0-C 审计 F6）：**取文档顺序里最后一个合法结构化结果**。
+ * 输出契约把结果放在回复末尾；正文中间经常有示例 JSON，取第一个会被示例冒充结论。
+ * 同时扫描全部平衡对象（不再限制前三个），代码块里的多个对象也会被逐个尝试。
+ *
  * @param {string} text
  * @returns {{ value: Record<string, unknown> | null, sawCandidate: boolean }}
  */
 function extractJsonObject(text) {
   /** @type {string[]} */
   const candidates = []
+  /** @type {Set<string>} */
+  const seen = new Set()
+  /** @param {unknown} candidate */
+  const push = (candidate) => {
+    if (typeof candidate !== 'string' || !candidate) return
+    if (seen.has(candidate)) return
+    seen.add(candidate)
+    candidates.push(candidate)
+  }
   const trimmed = text.trim()
-  if (trimmed.startsWith('{')) candidates.push(trimmed)
+  if (trimmed.startsWith('{')) push(trimmed)
   for (const match of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
     const body = match[1].trim()
-    if (body.startsWith('{')) candidates.push(body)
+    if (body.startsWith('{')) push(body)
   }
-  for (const candidate of balancedObjects(text, 3)) {
-    if (!candidates.includes(candidate)) candidates.push(candidate)
-  }
+  for (const candidate of balancedObjects(text)) push(candidate)
   const sawCandidate = candidates.length > 0
-  for (const candidate of candidates.slice(0, 6)) {
+  /** @type {Record<string, unknown> | null} */
+  let selected = null
+  for (const candidate of candidates) {
     try {
       const value = JSON.parse(candidate)
       if (isPlainObject(value) && hasKnownKey(/** @type {Record<string, unknown>} */ (value))) {
-        return { value: /** @type {Record<string, unknown>} */ (value), sawCandidate }
+        selected = /** @type {Record<string, unknown>} */ (value)
       }
     } catch {
       /* 坏 JSON：继续试下一个候选 */
     }
   }
-  return { value: null, sawCandidate }
+  return { value: selected, sawCandidate }
 }
 
 /**

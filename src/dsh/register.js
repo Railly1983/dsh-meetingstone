@@ -312,11 +312,16 @@ function taskResultView(record, full) {
     out.resultTruncated = source.resultTruncated === true
     delete out.resultOmitted
   } else if (summary) {
-    // 结构化摘要已经在记录里（落盘时按 8KiB 截断）；不再附带原始正文
+    // 结构化摘要已经在记录里（落盘时按 8KiB 截断）；不再附带原始正文。
+    // 但自由文本中间被截掉的验收/权限段仍要能被默认查询看到（审计 F4）：
+    // 摘要只是「正文省略」，不是「保护约束可以消失」。
     delete out.result
     out.resultOmitted = true
     out.resultBytes = bytes
     out.resultTruncated = true
+    // 已经被 summary 完整覆盖的段不重复注入，避免短结果双份。
+    const sections = extractProtectedSections(text).filter((block) => !summary.includes(block))
+    if (sections.length > 0) out.protectedSections = sections
   } else {
     const preview = truncateUtf8(text, TASK_RESULT_HEAD_BYTES + TASK_RESULT_TAIL_BYTES, {
       headBytes: TASK_RESULT_HEAD_BYTES,
