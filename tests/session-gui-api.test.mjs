@@ -240,6 +240,86 @@ test('resolveProjectRoot 返回 null → SESSION_ROOT_UNKNOWN', () => {
   assert.throws(() => api.setSessionOverride('sess-x', 'role-sashi', 'model', 'x'), (e) => e.code === SESSION_GUI_ERRORS.SESSION_ROOT_UNKNOWN)
 })
 
+test('setSessionOverride：重复设置同值 → idempotent，不重复落盘', async () => {
+  const { api } = makeApi()
+  const first = await api.setSessionOverride('sess-1', 'role-sashi', 'model', 'm-session')
+  assert.equal(first.written, true)
+  assert.equal(first.idempotent, false)
+  assert.equal(first.scope, 'field')
+  assert.equal(first.code, null)
+
+  const second = await api.setSessionOverride('sess-1', 'role-sashi', 'model', 'm-session')
+  assert.equal(second.ok, true)
+  assert.equal(second.written, false)
+  assert.equal(second.idempotent, true)
+  assert.equal(second.code, null)
+})
+
+test('clearSessionOverride：field 省略/null 都按整角色恢复，scope=role', async () => {
+  const { api } = makeApi()
+  await api.setSessionOverride('sess-1', 'role-sashi', 'model', 'm-session')
+  await api.setSessionOverride('sess-1', 'role-sashi', 'description', '会话描述')
+
+  const omitted = await api.clearSessionOverride('sess-1', 'role-sashi')
+  assert.equal(omitted.scope, 'role')
+  assert.equal(omitted.removed, true)
+  assert.ok(!('role-sashi' in omitted.config.roleOverrides))
+
+  await api.setSessionOverride('sess-1', 'role-sashi', 'model', 'm-session')
+  const nullField = await api.clearSessionOverride('sess-1', 'role-sashi', null)
+  assert.equal(nullField.scope, 'role')
+  assert.ok(!('role-sashi' in nullField.config.roleOverrides))
+})
+
+test('clearSessionOverride：重复恢复 → idempotent（removed=false, written=false）', async () => {
+  const { api } = makeApi()
+  await api.setSessionOverride('sess-1', 'role-sashi', 'model', 'm-session')
+  await api.clearSessionOverride('sess-1', 'role-sashi', 'model')
+  const again = await api.clearSessionOverride('sess-1', 'role-sashi', 'model')
+  assert.equal(again.ok, true)
+  assert.equal(again.written, false)
+  assert.equal(again.removed, false)
+  assert.equal(again.idempotent, true)
+  assert.equal(again.scope, 'field')
+})
+
+test('setSessionOverride：非法字段值 → ok:false + 稳定 code，不落盘', async () => {
+  const { api, sessionFs } = makeApi()
+  const result = await api.setSessionOverride('sess-1', 'role-sashi', 'timeoutMs', -1)
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'SESSION_CONFIG_BAD_FIELD')
+  assert.equal(result.written, false)
+  assert.equal(sessionFs.files.size, 0, '没有任何文件被写入')
+})
+
+test('setSessionOverride：坏会话文件 → 拒绝覆盖 + CORRUPT 错误码', async () => {
+  const path = join(ROOT, '.meetingstone', 'sessions', 'sess-1.json')
+  const sessionFs = memorySessionFs({ [path]: '{ not json' })
+  const { api } = makeApi({ sessionFs })
+  const result = await api.setSessionOverride('sess-1', 'role-sashi', 'model', 'm-session')
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'SESSION_CONFIG_CORRUPT')
+  assert.equal(result.written, false)
+  assert.equal(sessionFs.files.get(path), '{ not json', '不覆盖用户手写内容')
+})
+
+test('getSessionConfig：坏会话文件时 warnings 如实暴露，不抛异常', () => {
+  const path = join(ROOT, '.meetingstone', 'sessions', 'sess-1.json')
+  const sessionFs = memorySessionFs({ [path]: '{ not json' })
+  const { api } = makeApi({ sessionFs })
+  const view = api.getSessionConfig('sess-1')
+  assert.ok(Array.isArray(view.warnings))
+  assert.equal(view.warnings[0].code, 'SESSION_CONFIG_INVALID_JSON')
+})
+
+test('clearSessionOverride：空字符串 field → INVALID_FIELD（不当作省略）', () => {
+  const { api } = makeApi()
+  assert.throws(
+    () => api.clearSessionOverride('sess-1', 'role-sashi', ''),
+    (error) => error.code === SESSION_GUI_ERRORS.INVALID_FIELD,
+  )
+})
+
 test('新会话未派单：官方 ctx.sessions.header.cwd 即可读取，不依赖 sessionRoots', () => {
   const cfg = { roles: GLOBAL_ROLES, projectConfigFile: '.meetingstone.json' }
   const sessionStore = createSessionOverrideStore(memorySessionFs().deps)

@@ -16,6 +16,9 @@
     roles: [...]         # 角色表（见 §3）
     defaultRoleId: role-sashi
     routingRules: []     # 自动路由规则表（空 = 用内置表；见 §1.2）
+    cliPreferences:      # 外部 CLI 显式偏好（见 §1.3；缺省 = unset）
+      codex: true
+      codebuddy: false
     dispatchNotes: "常规实现优先沙僧；关键改动交悟空复核。"
     projectConfigFile: .meetingstone.json
     limits:
@@ -113,6 +116,86 @@ routingRules:
 
 > 自定义表是**整体替换**而非追加；非法条目（缺 `taskType` 或 `keywords`）会被跳过。
 > 只配 `docs` 时，其它任务类型不再命中内置规则，只能走 `defaultRoleId` 或报错——这是有意为之，避免“配置了一半却偷偷用内置表”。
+
+### 1.3 CLI 显式偏好（`cliPreferences`）与 preflight（P0-S2）
+
+外部 CLI（`codex` / `codebuddy` / `claude`）的开关**只由用户显式偏好 + preflight 证据**决定，
+不再把「探测到已安装」直接当成「已启用」。
+
+```yaml
+cliPreferences:
+  codex: true        # 用户显式开启（仍要 preflight 通过才生效）
+  codebuddy: false   # 用户显式关闭：持久化，重启/升级保持
+  # claude 缺失 = unset
+```
+
+| 配置值 | 语义 | 生效条件 | 是否写盘 |
+| --- | --- | --- | --- |
+| 键缺失（`unset`） | 没有用户意图（**不是关闭**） | 首次 preflight `ready` 时视为启用 | 不写（避免把默认值钉进 profile） |
+| `true`（`enabled`） | 用户显式开启 | preflight `ready`；否则保留「启用意图」但当前不生效 | 开启成功后才写 |
+| `false`（`disabled`） | 用户显式关闭 | 永不在本次会话启用 | 立即写，重启/升级保持 |
+
+规则（实现见 `src/cli/preferences.js`、`src/gui/config-api.js`）：
+
+1. **显式关闭跨重启保持**：值写在 profile 的 `meetingstone` 行，插件重载/升级后仍读到 `false`。
+2. **首次检测通过才自动启用**：`unset` + preflight `ready` → 派生为启用（`firstDetection`），但**不落盘**。
+3. **开启前必须 preflight**：`false`/`unset` → `true` 的写操作先跑 preflight；`ready !== 'ready'` 时
+   **不写任何配置**（保持关闭；不会把 `unset` 顺手写成 `false`），返回分类、人工步骤、`retryable`。
+4. **运行故障不回写 disabled**：运行中失败/检查失败只影响派生显示，不修改 `cliPreferences`；
+   已 `enabled` 的角色/CLI 继续保留「启用意图」（`userPreference` 不变）。
+5. **未知状态不伪造**：拿不到宿主集成/登录证据时 `ready:'unknown'`、`blockedReason:'evidence-missing'`，
+   不当作 `ready`，也不猜「需要登录」。
+6. **不做自动修复**：不安装、不登录、不改 PATH、不改配置、不提权。`autoFix` 恒为 `false`，
+   `manualSteps` 只给人工操作提示。
+
+preflight 结果字段（`src/cli/preflight.js`）：
+
+| 字段 | 取值 | 说明 |
+| --- | --- | --- |
+| `installed` | boolean | 是否解析到可执行文件 |
+| `version` | string \| null | `--version` 解析出的版本 |
+| `ready` | `ready` / `blocked` / `unknown` | 是否允许开启 |
+| `blockedReason` | 见下表 | `ready` 时为 `null` |
+| `retryable` | boolean | 人工修复后能否重检；`unknown-cli` 为 `false` |
+| `autoFix` | `false` | 恒为 false：本模块不做自动修复 |
+| `manualSteps` | string[] | 人工步骤（不自动执行） |
+| `login` | `true` / `false` / `unknown` | 登录证据；生产当前无可靠来源，缺省 `unknown` |
+| `hostIntegration` | `true` / `false` / `unknown` | 宿主是否注册对应 provider |
+
+失败分类（`blockedReason`）：
+
+| 分类 | 触发证据 | 人工步骤（摘要） |
+| --- | --- | --- |
+| `not-installed` | 所有解析源都没有候选 | 安装 CLI 后重检；不改 PATH |
+| `permission-denied` | `--version` stderr 含 Access denied/EACCES/EPERM，或 spawn 抛 EACCES/EPERM | 补读/执行权限后重检；不提权、不改 ACL |
+| `path-invalid` | ENOENT / no such file / not found | 检查安装路径/升级变化；不改 PATH |
+| `login-required` | `--version` 输出或注入的登录检查明确为未登录 | 在 CLI 内登录后重检；不代登录、不读凭据 |
+| `host-integration-disabled` | 宿主 `ctx.subagents.getProvider` 对对应 provider 返回空 | 启用宿主 provider 后重载/重检；不改宿主配置 |
+| `startup-failed` | 退出码非 0 且无更具体线索；版本输出无法解析 | 手动跑 `<cli> --version` 后重检；不自动修复 |
+| `evidence-missing` | 宿主集成没有正向证据（`ready:'unknown'`） | 重检、确认 provider 已注册；不伪造 ready |
+| `unknown-cli` | 不是 codex/codebuddy/claude | 只支持这三个外部 CLI；不可重检 |
+
+> 登录/权限/额度**没有证据时一律 unknown**，不会用 429、refusal、`failureClass` 或
+> 「安装成功」推断「已登录/ready」。凭据不读取、不落盘、不进日志。
+
+相关 Host 侧 API（P0-S2 只做后端，UI 由 U1 接）：
+
+| API | 作用 |
+| --- | --- |
+| `configApi.preflightCli(cli)` | 只检查、不写 |
+| `configApi.listCliStates()` | 偏好 + preflight 派生状态（`enabled`/`ready`/`blockedReason`/`manualSteps`） |
+| `configApi.setCliEnabled(cli, boolean)` | 开启前强制 preflight；失败不写；关闭立即写 |
+| `configApi.setGlobalRoleEnabled(roleId, boolean)` | 写全局角色 `enabled`（profile，保留未知字段） |
+| `configApi.updateProjectConfig(projectRoot, patch)` | 写项目配置白名单字段（保留未知字段） |
+
+**全局写实现**：`src/config/global-writer.js` 经官方 `ctx.get('configEditor').edit(ctx.fiber.entry, change)`
+写入（API 证据见 [audit/07 §3.4](./audit/07-config-extension.md)）。`change(current)` 的 `current`
+是当前 raw config；本模块以它为底合并，**整值替换时不丢未知字段**。高层覆盖 / entry 失效会返回
+`GLOBAL_CONFIG_OVERRIDDEN` / `GLOBAL_CONFIG_ENTRY_STALE` / `GLOBAL_CONFIG_ENTRY_INACTIVE`，不静默。
+
+**项目写实现**：`src/project/write.js` 只允许顶层 `defaultRoleId` / `dispatchNotes` / `projectRules` /
+`roles` / `roleOverrides`，角色/通道字段复用会话层白名单；文件里的未知顶层键、角色/覆盖对象里的
+未知键原样保留。坏 JSON / 非对象**拒绝覆盖**（`PROJECT_WRITE_INVALID_JSON` / `PROJECT_WRITE_NOT_OBJECT`）。
 
 ## 2. `channels`（通道实例表）
 
@@ -221,7 +304,7 @@ routingRules:
 | 角色 | `roleId` / `name` / `alias`（或 `aliases`）/ `description` / `prompt` / `channel` / `enabled` / `fallbackRoleId` / `timeoutMs` |
 | 通道 | `kind` / `channelId` / `provider` / `cli` / `model` / `reasoning` |
 
-新增/改字段的宿主侧 API（`src/session/store.js`，无 UI）：
+新增/改字段的宿主侧 API（`src/session/store.js` + `src/gui/session.js`，无 UI）：
 
 - `store.setOverride(projectRoot, sessionId, { roleId, patch, inherited })`：只写差异；
   等于继承值的字段会从旧覆盖里删除。
@@ -229,6 +312,17 @@ routingRules:
   支持 `channel.model`，也接受 `model` / `reasoning` 等通道简写。
 - `store.get(projectRoot, sessionId)`：永不抛异常；文件不存在 → 空配置，坏 JSON / 版本不认识 →
   空配置 + `SESSION_CONFIG_INVALID_JSON` / `SESSION_CONFIG_UNSUPPORTED_VERSION`。
+
+GUI Host 方法（strict Remote 的三个方法，P0-S0/S2）：
+
+- 返回值统一补 `scope`（`field` / `role`）、`idempotent`（未真正落盘）与 `code`
+  （首个错误码；写被拒绝时优先 `SESSION_CONFIG_CORRUPT`）。
+- `clearSessionOverride(sessionId, roleId)` 省略 `field` 与显式传 `null`/`undefined` 等价：
+  **清整个角色覆盖**。Host 侧显式传 `{ roleId, field: undefined }`，不依赖「键缺失」的隐式语义。
+- 非法 sessionId / roleId / field 仍**同步抛**带 `code` 的错误（由 Remote 层转 `RemoteError`）；
+  坏会话文件返回 `ok:false` + `SESSION_CONFIG_CORRUPT`，**不覆盖**用户手写内容。
+- 重复设置同值 / 重复恢复 → `written:false`、`idempotent:true`；`getSessionConfig` 新增
+  `warnings`（读取层非致命告警），不改变 `effective` 的降级语义。
 
 > **为什么不用宿主的 session 级存储**（2026-11-11 查 0.2.2-rc.1 实际包）：
 > `@deepseek-ai/dsh-session` 的 `SessionHeader` 是创建时深冻结的元数据（仅 `cwd` 等），
@@ -269,6 +363,19 @@ routingRules:
 | `meetingstone_get_run_artifact` 找不到记录 | `NOT_FOUND` |
 | 记录文件不是合法 JSON | `CORRUPT` |
 | `lineFrom/lineTo` 与 `headBytes/tailBytes` 同时使用、或范围非法 | `INVALID_RANGE` |
+| 会话写 API：非法 sessionId / roleId / 字段白名单 | `SESSION_GUI_INVALID_SESSION_ID` / `SESSION_GUI_INVALID_ROLE_ID` / `SESSION_GUI_INVALID_FIELD` |
+| 会话写 API：找不到会话项目根 | `SESSION_GUI_SESSION_ROOT_UNKNOWN` |
+| 会话写 API：坏会话文件拒绝改写 | `SESSION_CONFIG_CORRUPT`（写被拒；文件保持原样） |
+| CLI 偏好：未知 CLI / 非布尔开关 | `CLI_PREFERENCE_INVALID_CLI` / `CLI_PREFERENCE_INVALID_STATE` |
+| CLI 偏好：开启前 preflight 未通过（未写配置） | `CLI_PREFERENCE_PREFLIGHT_FAILED`（附 `manualSteps` / `retryable` / `autoFix:false`） |
+| CLI 偏好：写 profile 失败 | `CLI_PREFERENCE_WRITE_FAILED`（`cause` 为底层码） |
+| 全局写：宿主无 configEditor / entry 不可用 | `GLOBAL_CONFIG_EDITOR_UNAVAILABLE` / `GLOBAL_CONFIG_ENTRY_UNAVAILABLE` |
+| 全局写：非法 CLI / 偏好 / roleId / 角色补丁 | `GLOBAL_CONFIG_INVALID_CLI` / `GLOBAL_CONFIG_INVALID_PREFERENCE` / `GLOBAL_CONFIG_INVALID_ROLE_ID` / `GLOBAL_CONFIG_INVALID_ROLE_PATCH` |
+| 全局写：角色不存在 | `GLOBAL_CONFIG_ROLE_NOT_FOUND` |
+| 全局写：被 home patch/命令行覆盖、entry 失效、插件不活跃 | `GLOBAL_CONFIG_OVERRIDDEN` / `GLOBAL_CONFIG_ENTRY_STALE` / `GLOBAL_CONFIG_ENTRY_INACTIVE` |
+| 全局写：其他写入失败 | `GLOBAL_CONFIG_WRITE_FAILED` |
+| 项目写：项目根未知 / 读取失败 / 坏 JSON / 非对象 | `PROJECT_WRITE_PATH_UNKNOWN` / `PROJECT_WRITE_READ_FAILED` / `PROJECT_WRITE_INVALID_JSON` / `PROJECT_WRITE_NOT_OBJECT` |
+| 项目写：非白名单字段 / 非法值 / 写盘失败 | `PROJECT_WRITE_UNKNOWN_FIELD` / `PROJECT_WRITE_INVALID_VALUE` / `PROJECT_WRITE_WRITE_FAILED` |
 | `meetingstone_wait` 的 `childIds` 不是非空字符串数组 | `INVALID_CHILD_IDS` |
 | `meetingstone_wait` 的 `timeoutMs` 不是正数 | `INVALID_TIMEOUT` |
 | `meetingstone_wait` 的 childId 在本进程查不到（含 DSH 重启前的任务） | `UNKNOWN_CHILD`：立即返回，不阻塞，`unknownChildIds` 列出 |

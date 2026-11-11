@@ -73,6 +73,31 @@ test('完整角色可以往返', () => {
   assert.equal(role.channel.provider, 'acp')
 })
 
+test('cliPreferences：缺省为空对象（unset），只接受布尔值', () => {
+  const cfg = normalizeConfig({})
+  assert.deepEqual(cfg.cliPreferences, {})
+  assert.deepEqual(normalizeConfig({ cliPreferences: { codex: false, claude: true } }).cliPreferences, {
+    codex: false,
+    claude: true,
+  })
+  // 直接走严格 schema：类型错会抛（normalizeConfig 会先容错清洗）。
+  assert.throws(() => Config({ cliPreferences: { codex: 'false' } }))
+})
+
+test('cliPreferences：normalizeConfig 容错清洗，不拖垮角色表', () => {
+  const cfg = normalizeConfig({
+    roles: [validRole],
+    cliPreferences: { codex: false, codebuddy: 'yes', claude: 1 },
+  })
+  assert.equal(cfg.roles.length, 1)
+  assert.deepEqual(cfg.cliPreferences, { codex: false })
+})
+
+test('cliPreferences：未知键被忽略（向前兼容）', () => {
+  const cfg = normalizeConfig({ cliPreferences: { future: true, codex: true } })
+  assert.deepEqual(cfg.cliPreferences, { codex: true })
+})
+
 test('simplify 会把等于默认值的字段剥掉（保持配置文件紧凑）', () => {
   const cfg = Config({
     roles: [validRole],

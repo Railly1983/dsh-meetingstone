@@ -152,6 +152,83 @@ test('Host 全局快照：投影 cfg（默认角色/调度/并发）与本机 CL
   assert.deepEqual(JSON.parse(JSON.stringify(snapshot)), snapshot)
 })
 
+test('Host 全局快照：cliStates 提供「偏好 + preflight + 人工步骤」，全部 JSON-safe', async () => {
+  const gui = createGuiState({
+    ctx: hostCtx,
+    registry: makeRegistry(),
+    channels,
+    config: {},
+    cliStates: async () => [
+      {
+        cli: 'codex',
+        userPreference: 'enabled',
+        enabled: true,
+        ready: 'ready',
+        blockedReason: null,
+        manualSteps: [],
+        retryable: false,
+        installed: true,
+        version: '1.2.3',
+        path: 'C:/x/codex.exe',
+        source: 'path',
+        login: 'unknown',
+        hostIntegration: true,
+        firstDetection: false,
+        notes: ['ok'],
+        checkedAt: 1_700_000_000_000,
+      },
+      {
+        cli: 'claude',
+        userPreference: 'disabled',
+        enabled: false,
+        ready: 'blocked',
+        blockedReason: 'not-installed',
+        manualSteps: ['安装对应 CLI（本项目不自动安装）'],
+        retryable: true,
+        installed: false,
+        version: null,
+        path: null,
+        source: null,
+        login: 'unknown',
+        hostIntegration: 'unknown',
+        firstDetection: false,
+        notes: [],
+        checkedAt: 1_700_000_000_000,
+      },
+    ],
+  })
+  const snapshot = await gui.fullSnapshot()
+  assert.deepEqual(snapshot.global.cliPreferences, { codex: 'enabled', claude: 'disabled' })
+  assert.equal(snapshot.global.cli.length, 2)
+  assert.equal(snapshot.global.cli[0].label, 'Codex CLI')
+  assert.equal(snapshot.global.cli[0].userPreference, 'enabled')
+  assert.equal(snapshot.global.cli[0].enabled, true)
+  assert.equal(snapshot.global.cli[0].ready, 'ready')
+  assert.equal(snapshot.global.cli[0].autoFix, false)
+  assert.equal(snapshot.global.cli[0].checkedAt, new Date(1_700_000_000_000).toISOString())
+  assert.equal(snapshot.global.cli[1].ready, 'blocked')
+  assert.equal(snapshot.global.cli[1].blockedReason, 'not-installed')
+  assert.ok(snapshot.global.cli[1].manualSteps.length > 0)
+  assert.equal(snapshot.global.cli[1].retryable, true)
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot)), snapshot)
+})
+
+test('Host 全局快照：cliStates 抛错时如实降级，不拖垮角色列表', async () => {
+  const gui = createGuiState({
+    ctx: hostCtx,
+    registry: makeRegistry(),
+    channels,
+    config: {},
+    cliStates: async () => {
+      throw new Error('preflight boom')
+    },
+  })
+  const snapshot = await gui.fullSnapshot()
+  assert.equal(snapshot.global.cli, null)
+  assert.equal(snapshot.global.cliError, 'preflight boom')
+  assert.equal(snapshot.roles.length, 2)
+})
+
 test('Host 全局快照：探测失败/缺失时如实降级，不拖垮角色列表', async () => {
   const noProbe = createGuiState({ ctx: hostCtx, registry: makeRegistry(), channels })
   const a = await noProbe.fullSnapshot()

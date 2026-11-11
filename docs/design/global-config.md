@@ -95,4 +95,7 @@ interface Effective<T> { value: T; from: Scope; overriddenBy: Scope[] }  // 可�
 - **不做** `permissionPreset` / 只读通道（2026-11-11 用户决策，宿主无权限字段）。
 - **不做** 全局 `rules[]` 数组（与 `dispatchNotes` 双写冲突）、不做会话落盘/跨会话共享/配置历史审计。
 - **不做** UI 修改 `projectConfigFile` 路径（会让已存在的项目文件失联）。
-- **已知缺口**：`defaultRoleId` / `dispatchNotes` / `projectRules` 目前**只解析不消费**（`src/index.js`、`dispatcher.js` 无引用）；`src/` 无 `ctx.settings` / `configEditor` 写入通道；快照仅全局、无 `limits`。
+- **已知缺口**：`defaultRoleId` / `dispatchNotes` / `projectRules` 目前**只解析不消费**（`src/index.js`、`dispatcher.js` 无引用）；快照仅全局、无 `limits`。
+- **2026-11-11 P0-S2 补充**：全局写入通道已补上（`src/config/global-writer.js` 经官方
+  `ctx.get('configEditor').edit(ctx.fiber.entry, change)`；基于 current raw config 合并，保留未知字段）；
+  项目写入见 `src/project/write.js`（白名单 + 保留未知字段）。UI 接线仍待 U1/U3。

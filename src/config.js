@@ -14,6 +14,7 @@
  * 所以配置里没有 permissionPreset，也不要再实现（2026-11-11 用户决策）。
  */
 import { S, ValidationError, compile } from './schema.js'
+import { CLI_NAMES, sanitizeCliPreferences } from './cli/preferences.js'
 
 /** 通道类型。见 docs/开发计划.md §3.4。 */
 export const CHANNEL_KINDS = /** @type {const} */ ([
@@ -88,6 +89,28 @@ export const RoleSchema = compile(
   }),
 )
 
+/**
+ * 外部 CLI 的显式用户偏好（P0-S2）。
+ *
+ * - 键缺失 = `unset`（不是关闭）
+ * - `true` = 用户显式开启（仍需 preflight 通过才生效）
+ * - `false` = 用户显式关闭（持久化，重启/升级保持）
+ *
+ * 值只接受布尔；未知键忽略（向前兼容）。语义详见 `src/cli/preferences.js`
+ * 与 docs/configuration.md §1.3。
+ */
+const cliPreferencesSpec = S.object(
+  Object.fromEntries(
+    CLI_NAMES.map((cli) => [
+      cli,
+      S.boolean().description(`${cli}：true=显式开启，false=显式关闭，缺省=unset`),
+    ]),
+  ),
+)
+
+/** 编译后的 `cliPreferences`（测试可直接用；嵌套到 Config 时用 spec 带描述）。 */
+export const CliPreferencesSchema = compile(cliPreferencesSpec)
+
 /** 插件配置根。 */
 export const Config = compile(
   S.object({
@@ -99,6 +122,9 @@ export const Config = compile(
     routingRules: S.array(RoutingRuleSchema)
       .default([])
       .description('自动路由规则表（空 = 用内置规则；仅 autoRoute:true 且未显式指定 role 时生效）'),
+    cliPreferences: cliPreferencesSpec.description(
+      '外部 CLI 显式偏好：true=开启、false=关闭、缺省=unset（首次 preflight 通过才视为启用）',
+    ),
     dispatchNotes: S.string().default('').description('辅助调度提示，不改变通道与并发规则'),
     projectConfigFile: S.string()
       .default('.meetingstone.json')
@@ -125,15 +151,28 @@ export const Config = compile(
   }),
 )
 
+/** @param {unknown} value */
+const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+
 /**
  * 把用户给的原始配置规范化成安全值。
  * - 缺字段回退默认值
  * - 非法值抛 `ValidationError`（上层决定降级策略）
  *
+ * 例外：`cliPreferences` 先做**容错清洗**。一个手写错的 CLI 偏好（比如把
+ * `false` 写成 `"false"`）不应该让整个角色表一起回落到默认值；非法项按
+ * unset 丢弃，其余配置照常校验。
+ *
  * @param {unknown} raw
  */
 export function normalizeConfig(raw) {
-  return Config(raw ?? {})
+  const input = isPlainObject(raw) ? { .../** @type {Record<string, unknown>} */ (raw) } : {}
+  if (Object.hasOwn(input, 'cliPreferences')) {
+    const sanitized = sanitizeCliPreferences(input.cliPreferences)
+    if (sanitized === undefined) delete input.cliPreferences
+    else input.cliPreferences = sanitized
+  }
+  return Config(input)
 }
 
 export default Config
