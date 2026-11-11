@@ -47,6 +47,13 @@ window.__ModuleLoader__.load({
     const NS = 'settings.meetingstone'
     const inject = ['slots', 'locale', 'remote']
 
+    /**
+     * 浏览器 half 无法读 `package.json`（宿主只加载 factory 脚本），故版本常量
+     * 与 package.json / src/index.js 的 PLUGIN_VERSION 保持一致，供统一注册日志
+     * 使用。升级版本时三处同步。
+     */
+    const PLUGIN_VERSION = '0.1.0-alpha'
+
     /** 右侧栏 tab 的 kind（`sidebarRight.openTab(kind)` 用它打开）。 */
     const TAB_KIND = 'meetingstone-roles'
 
@@ -69,6 +76,13 @@ window.__ModuleLoader__.load({
      * 且 `meetingstone/list` 是**零参数、无结果解码**的只读方法，故按生成物字段
      * 手写最小 descriptor。
      *
+     * 真机证据（2026-11-11）：带参方法不可手写。宿主 Gateway 要求参数是 strict
+     * codec（zod typeSymbol + create），手写 host 没有类型符号，无法伪造；
+     * `src-json` 参数也会被 `requireStrictInputs` 拒绝。真机错误：
+     * `generated Remote meetingstone/getSessionConfig field "sessionId" has no
+     * strict codec`。因此这里**只保留无参 `list`**；会话级覆盖编辑等宿主生成式
+     * Remote 支持后再接。
+     *
      * 字段不是随便写的：`ctx.remote.$mount` 会先经 `typert.remotes.register()`
      * 校验 descriptor（dsh-typert-registry/lib/index.js:143-155,584-627）：
      *   - `id` / `service` / `namespace` / `method` 必须是非空 segment；
@@ -85,33 +99,6 @@ window.__ModuleLoader__.load({
           namespace: REMOTE_SERVICE,
           method: 'list',
           parameters: [],
-          invocation: { kind: 'direct' },
-          result: { mode: 'src-json' },
-        },
-        {
-          id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/getSessionConfig`,
-          service: REMOTE_SERVICE,
-          namespace: REMOTE_SERVICE,
-          method: 'getSessionConfig',
-          parameters: [{ name: 'sessionId', wire: 'sessionId', source: 'json', codec: { mode: 'src-json' } }],
-          invocation: { kind: 'direct' },
-          result: { mode: 'src-json' },
-        },
-        {
-          id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/setSessionOverride`,
-          service: REMOTE_SERVICE,
-          namespace: REMOTE_SERVICE,
-          method: 'setSessionOverride',
-          parameters: [{ name: 'sessionId', wire: 'sessionId', source: 'json', codec: { mode: 'src-json' } }, { name: 'roleId', wire: 'roleId', source: 'json', codec: { mode: 'src-json' } }, { name: 'field', wire: 'field', source: 'json', codec: { mode: 'src-json' } }, { name: 'value', wire: 'value', source: 'json', codec: { mode: 'src-json' } }],
-          invocation: { kind: 'direct' },
-          result: { mode: 'src-json' },
-        },
-        {
-          id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/clearSessionOverride`,
-          service: REMOTE_SERVICE,
-          namespace: REMOTE_SERVICE,
-          method: 'clearSessionOverride',
-          parameters: [{ name: 'sessionId', wire: 'sessionId', source: 'json', codec: { mode: 'src-json' } }, { name: 'roleId', wire: 'roleId', source: 'json', codec: { mode: 'src-json' } }, { name: 'field', wire: 'field', source: 'json', codec: { mode: 'src-json' } }],
           invocation: { kind: 'direct' },
           result: { mode: 'src-json' },
         },
@@ -154,6 +141,8 @@ window.__ModuleLoader__.load({
         .map((item) => ({
           cli: asString(item.cli),
           label: asString(item.label) || asString(item.cli),
+          // 宿主自报分类；老版本 host 没有该字段时按外部 CLI 处理（探测只覆盖外部）。
+          category: asString(item.category) || 'external',
           installed: item.installed === true,
           path: asString(item.path),
           version: asString(item.version),
@@ -265,6 +254,26 @@ window.__ModuleLoader__.load({
       wordBreak: 'break-all',
     }
     const meta = { fontSize: 12, lineHeight: '18px', color: C.tertiary, wordBreak: 'break-all' }
+    // CLI 分类标签（宿主/外部）：弱化显示，不抢名称与状态。
+    const category = {
+      fontSize: 11,
+      lineHeight: '16px',
+      color: C.tertiary,
+      border: '0.5px solid var(--dsw-alias-settings-card-stroke)',
+      borderRadius: 4,
+      padding: '0 4px',
+      flexShrink: 0,
+    }
+    // 左右对齐行：标签在左，值靠右；用于默认协作配置。
+    const alignRow = {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      fontSize: 13,
+      lineHeight: '20px',
+      color: C.primary,
+    }
+    const alignValue = { marginLeft: 'auto', textAlign: 'right', color: C.secondary, wordBreak: 'break-word' }
     // 宿主设置卡片：同一组 alias token（官方 settings-plugin-inventory 的卡片样式）。
     const card = {
       border: '0.5px solid var(--dsw-alias-settings-card-stroke)',
@@ -311,7 +320,6 @@ window.__ModuleLoader__.load({
       noCli: '未获取到本机 CLI 探测结果',
       cliTimeout: 'CLI 探测超时（下次打开将复用缓存）',
       defaultRole: '默认角色',
-      channelModels: '通道模型',
       noChannels: '未配置通道实例',
       model: '模型',
       reasoning: '思考强度',
@@ -332,31 +340,29 @@ window.__ModuleLoader__.load({
       openAdvanced: '展开',
       closeAdvanced: '收起',
       cliPaths: 'CLI 完整路径',
+      channelInstances: '通道实例',
       configFile: '配置文件',
       openConfig: '打开配置文件',
       diagLog: '诊断日志位于 .meetingstone/runs',
       errorWarning: '最近一次错误',
       errorDetails: '查看详情',
-      // 顶部集合石入口 + 右侧栏「当前会话角色」
+      errorHideDetails: '收起详情',
+      // CLI 分类
+      categoryHost: '宿主',
+      categoryExternal: '外部',
+      hostName: 'DeepSeek Harness',
+      hostRunning: '运行中',
+      // 顶部集合石入口 + 右侧栏只读角色面板
       headerTitle: '集合石角色',
-      headerDesc: '编辑当前会话的角色覆盖',
+      headerDesc: '查看当前会话角色（只读）',
       tabTitle: '集合石角色',
-      paneTitle: '当前会话角色覆盖',
+      paneTitle: '当前会话角色（只读）',
+      paneReadonlyNote: '当前版本只读（展示全局角色库）；会话级覆盖编辑待宿主生成式 Remote 支持',
       openPanel: '打开集合石角色面板',
-      noRoles: '当前会话没有可用角色',
-      inherited: '继承',
-      overridden: '覆盖',
-      restore: '恢复继承',
-      aliasField: '别名',
-      descField: '描述',
-      providerField: '提供商',
-      modelField: '模型',
-      reasoningField: '思考强度',
-      dispatchNotesField: '调度规则',
-      saving: '保存中…',
-      saved: '已保存',
-      failed: '保存失败',
-      notSet: '未设置',
+      noRoles: '当前没有可用角色',
+      aliasLabel: '别名',
+      channelLabel: '通道',
+      remoteUnavailableHint: '远程不可用',
     }
     const en = {
       nav: 'MeetingStone',
@@ -384,7 +390,6 @@ window.__ModuleLoader__.load({
       noCli: 'No local CLI probe result available',
       cliTimeout: 'CLI probe timed out (cache will be reused next time)',
       defaultRole: 'Default role',
-      channelModels: 'Channel models',
       noChannels: 'No channel instance configured',
       model: 'Model',
       reasoning: 'Reasoning',
@@ -405,31 +410,30 @@ window.__ModuleLoader__.load({
       openAdvanced: 'Expand',
       closeAdvanced: 'Collapse',
       cliPaths: 'CLI full paths',
+      channelInstances: 'Channel instances',
       configFile: 'Config file',
       openConfig: 'Open config file',
       diagLog: 'Diagnostic logs are under .meetingstone/runs',
       errorWarning: 'Most recent error',
       errorDetails: 'View details',
-      // 顶部集合石入口 + 右侧栏「当前会话角色」
+      errorHideDetails: 'Hide details',
+      // CLI 分类
+      categoryHost: 'Host',
+      categoryExternal: 'External',
+      hostName: 'DeepSeek Harness',
+      hostRunning: 'Running',
+      // 顶部集合石入口 + 右侧栏只读角色面板
       headerTitle: 'MeetingStone Roles',
-      headerDesc: 'Edit role overrides for this session',
+      headerDesc: 'View session roles (read-only)',
       tabTitle: 'MeetingStone Roles',
-      paneTitle: 'Session role overrides',
+      paneTitle: 'Session roles (read-only)',
+      paneReadonlyNote:
+        'Read-only in this version (global role library); session-level overrides await host-generated Remote support',
       openPanel: 'Open MeetingStone role panel',
-      noRoles: 'No roles available in this session',
-      inherited: 'Inherited',
-      overridden: 'Overridden',
-      restore: 'Restore inherited',
-      aliasField: 'Alias',
-      descField: 'Description',
-      providerField: 'Provider',
-      modelField: 'Model',
-      reasoningField: 'Reasoning',
-      dispatchNotesField: 'Dispatch notes',
-      saving: 'Saving…',
-      saved: 'Saved',
-      failed: 'Save failed',
-      notSet: 'Not set',
+      noRoles: 'No roles available',
+      aliasLabel: 'Aliases',
+      channelLabel: 'Channel',
+      remoteUnavailableHint: 'Remote unavailable',
     }
 
     /** availability → 宿主 Tag 的 tone/文案 key（tone 取值见官方 TAG_TONES）。 */
@@ -458,46 +462,62 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** CLI 连接：只投影本机探测结果；拿不到就明说，不猜。 */
-    function CliList({ t, global }) {
-      if (!global.cli) {
-        const message = global.cliError === 'CLI_PROBE_TIMEOUT' ? t('cliTimeout') : t('noCli')
-        return jsx('p', { style: note, children: message })
-      }
-      if (global.cli.length === 0) {
-        return jsx('span', { style: dim, children: t('none') })
-      }
-      return jsxs(
+    /**
+     * CLI 连接：紧凑一行一个（名称 + 版本 + 状态），并区分宿主 / 外部 CLI。
+     * 宿主行是当前 DSH（页面能渲染即说明宿主在运行）；外部行只投影真实探测结果，
+     * 拿不到就明说，不猜。
+     */
+    function CliList({ t, global, remoteOk }) {
+      const hostRow = jsxs(
         'div',
         {
-          style: list,
-          children: global.cli.map((item) => {
-            const label = item.label || item.cli || t('unknown')
-            const version = item.installed ? item.version : ''
-            return jsxs(
+          style: row,
+          children: [
+            jsx('span', { style: category, children: t('categoryHost') }),
+            jsx('span', { children: t('hostName') }),
+            jsx('span', { style: meta, children: '—' }),
+            jsx('span', { style: grow }),
+            remoteOk === false
+              ? jsx(Tag, { tone: 'danger', children: t('remoteUnavailableHint') })
+              : jsx(Tag, { tone: 'info', children: t('hostRunning') }),
+          ],
+        },
+        'host',
+      )
+
+      /** @type {any[]} */
+      const children = [hostRow]
+      if (!global.cli) {
+        const message = global.cliError === 'CLI_PROBE_TIMEOUT' ? t('cliTimeout') : t('noCli')
+        children.push(jsx('p', { style: note, children: message }, 'cli-note'))
+      } else if (global.cli.length === 0) {
+        children.push(jsx('span', { style: dim, children: t('none') }, 'cli-none'))
+      } else {
+        for (const item of global.cli) {
+          const label = item.label || item.cli || t('unknown')
+          const version = item.installed ? item.version : ''
+          children.push(
+            jsxs(
               'div',
               {
-                style: { display: 'flex', flexDirection: 'column', gap: 2 },
+                style: row,
                 children: [
-                  jsxs('div', {
-                    style: row,
-                    children: [
-                      jsx('span', { children: label }),
-                      version ? jsx('span', { style: code, children: `v${version.replace(/^v/, '')}` }) : null,
-                      jsx('span', { style: grow }),
-                      jsx(Tag, {
-                        tone: item.installed ? 'info' : 'neutral',
-                        children: item.installed ? t('installed') : t('notInstalled'),
-                      }),
-                    ],
+                  jsx('span', { style: category, children: t('categoryExternal') }),
+                  jsx('span', { children: label }),
+                  version ? jsx('span', { style: code, children: `v${version.replace(/^v/, '')}` }) : null,
+                  jsx('span', { style: grow }),
+                  jsx(Tag, {
+                    tone: item.installed ? 'info' : 'neutral',
+                    children: item.installed ? t('installed') : t('notInstalled'),
                   }),
                 ],
               },
               item.cli || label,
-            )
-          }),
-        },
-      )
+            ),
+          )
+        }
+      }
+      return jsxs('div', { style: list, children })
     }
 
     /** 高级：CLI 完整路径（仅已安装）。完整路径从区 1 移入此处，避免主页面噪声。 */
@@ -551,17 +571,25 @@ window.__ModuleLoader__.load({
 
     /**
      * 纯函数渲染「已就绪」设置页（V1 三区）。抽出来便于 stub harness 断言结构，
-     * 不依赖 React 状态机。advancedOpen=false 时高级区折叠（默认）。
+     * 不依赖 React 状态机。advancedOpen 默认 false（高级区默认收起）。
      * @param {(key: string) => string} t
      * @param {any} snapshot
-     * @param {{ advancedOpen?: boolean, openRoles?: () => void, onToggleAdvanced?: () => void }} opts
+     * @param {{
+     *   advancedOpen?: boolean,
+     *   errorOpen?: boolean,
+     *   openRoles?: () => void,
+     *   onToggleAdvanced?: () => void,
+     *   onToggleError?: () => void,
+     * }} opts
      */
     function renderSection(t, snapshot, opts = {}) {
       const global = snapshot.global
-      const advancedOpen = opts.advancedOpen !== false
+      const advancedOpen = opts.advancedOpen === true
+      const errorOpen = opts.errorOpen === true
       const openRoles = typeof opts.openRoles === 'function' ? opts.openRoles : () => {}
       const onToggleAdvanced =
         typeof opts.onToggleAdvanced === 'function' ? opts.onToggleAdvanced : () => {}
+      const onToggleError = typeof opts.onToggleError === 'function' ? opts.onToggleError : () => {}
 
       const roleCount = snapshot.roles.length
       const defaultRole = global.defaultRoleId
@@ -572,7 +600,7 @@ window.__ModuleLoader__.load({
         : t('notSet')
       const limits = global.limits
 
-      // 错误：有则一条警告（可点击看详情）；无则不占位（不显示「无」）。
+      // 错误：首屏一行摘要（不换行）；详情默认折叠，点击展开。无错误不占位。
       const lastError = snapshot.lastError
       const errorCard = !lastError
         ? null
@@ -581,31 +609,36 @@ window.__ModuleLoader__.load({
             style: { ...card, borderColor: 'var(--dsw-alias-state-error-primary)' },
             children: [
               jsxs('div', {
-                style: row,
+                style: alignRow,
                 children: [
                   jsx(Tag, { tone: 'danger', children: t('errorWarning') }),
-                  jsx('span', { style: grow }),
-                  jsx('button', {
-                    type: 'button',
-                    style: { ...dim, background: 'none', border: 'none', cursor: 'pointer', padding: 0 },
-                    onClick: () => {},
-                    children: t('errorDetails'),
-                  }),
-                ],
-              }),
-              jsxs('div', {
-                style: grow,
-                children: [
-                  jsx('div', {
+                  jsx('span', {
+                    style: { ...grow, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
                     children: `[${lastError.code}] ${lastError.message || t('unknown')}`,
                   }),
-                  lastError.at ? jsx('div', { style: meta, children: lastError.at }) : null,
+                  jsx('button', {
+                    type: 'button',
+                    style: { ...dim, background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0 },
+                    'aria-expanded': errorOpen,
+                    onClick: onToggleError,
+                    children: errorOpen ? t('errorHideDetails') : t('errorDetails'),
+                  }),
                 ],
               }),
+              errorOpen
+                ? jsxs('div', {
+                    style: { ...note, display: 'flex', flexDirection: 'column', gap: 4 },
+                    children: [
+                      jsx('div', { children: lastError.message || t('unknown') }),
+                      jsx('div', { style: meta, children: `${lastError.code}${lastError.source ? ` · ${lastError.source}` : ''}` }),
+                      lastError.at ? jsx('div', { style: meta, children: lastError.at }) : null,
+                    ],
+                  })
+                : null,
             ],
           })
 
-      // 高级区（默认折叠）：隔离 / CLI 完整路径 / 通道模型映射 / 配置文件入口。
+      // 高级区（默认收起）：隔离 / CLI 完整路径 / 通道实例 / 配置文件 / 日志目录。
       const advancedBody = !advancedOpen
         ? null
         : jsxs('div', {
@@ -623,7 +656,7 @@ window.__ModuleLoader__.load({
               }),
               jsx('div', { style: subheading, children: t('cliPaths') }),
               jsx(CliPaths, { t, global }),
-              jsx('div', { style: subheading, children: t('channelModels') }),
+              jsx('div', { style: subheading, children: t('channelInstances') }),
               jsx(ChannelModels, { t, global }),
               jsx('div', { style: subheading, children: t('configFile') }),
               jsxs('div', {
@@ -647,10 +680,13 @@ window.__ModuleLoader__.load({
         style: root,
         children: [
           errorCard,
-          // 区 1：CLI 连接（四平台自动检测 / 版本 / 状态；完整路径已移入高级）。
+          // 区 1：CLI 连接（紧凑一行一个：宿主 / 外部 CLI + 版本 + 状态）。
           jsx('h3', { style: heading, children: t('cli') }),
-          jsx('div', { style: card, children: jsx(CliList, { t, global }) }),
-          // 区 2：默认协作配置（角色数量 + 管理入口；不在此做编辑器）。
+          jsx('div', {
+            style: card,
+            children: jsx(CliList, { t, global, remoteOk: !snapshot.unavailable }),
+          }),
+          // 区 2：默认协作配置（角色数量 + 默认角色 + 管理入口合并为一行）。
           jsx('h3', { style: heading, children: t('collab') }),
           jsx('div', {
             style: card,
@@ -658,27 +694,47 @@ window.__ModuleLoader__.load({
               style: list,
               children: [
                 jsxs('div', {
-                  style: row,
+                  style: { ...alignRow, flexWrap: 'wrap' },
                   children: [
                     jsx('span', { children: t('roleCount') }),
-                    jsx('span', { children: String(roleCount) }),
+                    jsx('span', { style: dim, children: String(roleCount) }),
+                    jsx('span', { style: dim, children: '·' }),
+                    jsx('span', { children: t('defaultRole') }),
+                    jsx('span', { style: dim, children: defaultRoleLabel }),
                     jsx('span', { style: grow }),
                     jsx('button', {
                       type: 'button',
-                      style: { ...dim, background: 'none', border: 'none', cursor: 'pointer', padding: 0 },
+                      style: { ...dim, background: 'none', border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0 },
                       onClick: openRoles,
                       children: t('manageRoles'),
                     }),
                   ],
                 }),
-                kvRow(t('defaultRole'), defaultRoleLabel, 'defaultRole'),
-                kvRow(t('parallelLimit'), String(limits.maxParallelWritesTotal), 'max'),
-                kvRow(t('serializeWrites'), limits.serializeWrites ? t('on') : t('off'), 'serialize'),
-                kvRow(t('dispatchNotes'), global.dispatchNotes || t('none'), 'dispatchNotes'),
+                jsxs('div', {
+                  style: alignRow,
+                  children: [
+                    jsx('span', { children: t('parallelLimit') }),
+                    jsx('span', { style: alignValue, children: String(limits.maxParallelWritesTotal) }),
+                  ],
+                }),
+                jsxs('div', {
+                  style: alignRow,
+                  children: [
+                    jsx('span', { children: t('serializeWrites') }),
+                    jsx('span', { style: alignValue, children: limits.serializeWrites ? t('on') : t('off') }),
+                  ],
+                }),
+                jsxs('div', {
+                  style: alignRow,
+                  children: [
+                    jsx('span', { children: t('dispatchNotes') }),
+                    jsx('span', { style: alignValue, children: global.dispatchNotes || t('none') }),
+                  ],
+                }),
               ],
             }),
           }),
-          // 区 3：高级设置（默认折叠）。
+          // 区 3：高级设置（默认收起）。
           jsxs('div', {
             style: { display: 'flex', alignItems: 'center', gap: 10 },
             children: [
@@ -701,6 +757,7 @@ window.__ModuleLoader__.load({
     function Section({ t, list: load, openRoles }) {
       const [state, setState] = react.useState({ status: 'loading' })
       const [advancedOpen, setAdvancedOpen] = react.useState(false)
+      const [errorOpen, setErrorOpen] = react.useState(false)
       react.useEffect(() => {
         let current = true
         Promise.resolve()
@@ -755,8 +812,10 @@ window.__ModuleLoader__.load({
             : null,
           renderSection(t, snapshot, {
             advancedOpen,
+            errorOpen,
             openRoles,
             onToggleAdvanced: () => setAdvancedOpen(!advancedOpen),
+            onToggleError: () => setErrorOpen(!errorOpen),
           }),
         ],
       })
@@ -792,9 +851,17 @@ window.__ModuleLoader__.load({
      * provide，父 fiber 的 inject 不保证被唤醒。改为：注册永远立即发生，读取服务时用
      * `ctx.get()` 动态取；取不到就返回 unavailable 快照，页面仍可见并解释原因。
      * @param {any | (() => any | null)} serviceOrGet
+     * @param {{ code?: string, message?: string }} [mountFailure]
      */
-    function makeLoader(serviceOrGet) {
+    function makeLoader(serviceOrGet, mountFailure) {
       return async () => {
+        // $mount 已失败：命名空间服务不可用，不再尝试调用（避免读到残留对象）。
+        if (mountFailure) {
+          return unavailableSnapshot(
+            mountFailure.code ?? 'REMOTE_MOUNT_FAILED',
+            mountFailure.message ?? 'remote.meetingstone 挂载失败',
+          )
+        }
         const service = typeof serviceOrGet === 'function' ? serviceOrGet() : serviceOrGet
         if (!service || typeof service.list !== 'function') {
           return unavailableSnapshot('REMOTE_UNAVAILABLE', 'remote.meetingstone 尚未就绪')
@@ -827,6 +894,13 @@ window.__ModuleLoader__.load({
      * @param {(key: string) => string} t
      */
     function registerSection(slotCtx, loader, t) {
+      if (
+        !slotCtx?.slots ||
+        typeof slotCtx.slots.inject !== 'function' ||
+        typeof slotCtx.slots.register !== 'function'
+      ) {
+        throw new Error('CAPABILITY_MISSING: slots.inject/register')
+      }
       slotCtx.slots.inject('settings.section', () =>
         slotCtx.slots.register(
           {
@@ -852,98 +926,112 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 可覆盖字段的元数据：从生效角色读取值、写覆盖时构造 patch 形状。 */
-    const OVERRIDABLE_FIELDS = [
-      {
-        key: 'alias',
-        labelKey: 'aliasField',
-        get: (/** @type {any} */ r) => (Array.isArray(r.aliases) ? r.aliases.join(', ') : ''),
-        toValue: (/** @type {string} */ raw) =>
-          raw
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean),
-      },
-      { key: 'description', labelKey: 'descField', get: (/** @type {any} */ r) => r.description ?? '' },
-      {
-        key: 'provider',
-        labelKey: 'providerField',
-        get: (/** @type {any} */ r) => r.channel?.provider ?? '',
-      },
-      {
-        key: 'model',
-        labelKey: 'modelField',
-        get: (/** @type {any} */ r) => r.channel?.model ?? '',
-      },
-      {
-        key: 'reasoning',
-        labelKey: 'reasoningField',
-        get: (/** @type {any} */ r) => r.channel?.reasoning ?? '',
-      },
-    ]
+    /**
+     * 右侧栏只读面板。会话级覆盖编辑（原 get/set/clearSessionOverride）
+     * **暂不接入**：手写带参 Remote 被宿主 Gateway strict codec 拒绝（真机证据见
+     * 文件头与 docs/gui-0.2.0.md §6）。这里只消费无参 `list()` 快照。
+     */
+    function channelTextOf(role, t) {
+      const parts = [role.channelId, role.provider, role.model].filter(Boolean)
+      return parts.length > 0 ? parts.join(' · ') : t('notSet')
+    }
+
+    /** 单个角色的只读卡片：名称 / 别名 / 可用性 / 通道。 */
+    function RoleReadonlyCard({ t, role }) {
+      const badge = availabilityBadge(t, role.availability)
+      const aliases = asArray(role.aliases).filter(Boolean)
+      return jsxs('div', {
+        style: { ...card, gap: 4 },
+        children: [
+          jsxs('div', {
+            style: { ...row, alignItems: 'flex-start' },
+            children: [
+              jsx('strong', { children: role.name || role.roleId || t('unknown') }),
+              jsx('span', { style: grow }),
+              jsx(Tag, { tone: badge.tone, children: badge.label }),
+            ],
+          }),
+          jsxs('div', {
+            style: meta,
+            children: [`${t('aliasLabel')}: `, aliases.length > 0 ? aliases.join(', ') : t('none')],
+          }),
+          jsxs('div', {
+            style: meta,
+            children: [`${t('channelLabel')}: `, channelTextOf(role, t)],
+          }),
+        ],
+      })
+    }
+
+    /** 纯函数渲染只读面板，便于 stub harness 断言结构。 */
+    function renderRolePane(t, snapshot) {
+      const roles = asArray(snapshot?.roles)
+      const unavailable = snapshot?.unavailable
+      return jsxs('div', {
+        style: root,
+        children: [
+          jsx('h3', { style: heading, children: t('paneTitle') }),
+          jsx('p', { style: note, role: 'status', children: t('paneReadonlyNote') }),
+          unavailable
+            ? jsx('p', {
+                style: { ...note, color: 'var(--dsw-alias-state-error-primary)' },
+                role: 'status',
+                children: `${t('unavailable')} · ${unavailable.message || unavailable.code}`,
+              })
+            : null,
+          roles.length === 0
+            ? jsx('p', { style: note, children: t('noRoles') })
+            : jsxs('div', {
+                style: list,
+                children: roles.map((role) => jsx(RoleReadonlyCard, { t, role }, role.roleId || role.name)),
+              }),
+        ],
+      })
+    }
 
     /**
-     * 加载当前会话的角色视图。service 必须是已就绪的 `remote.meetingstone` 命名空间服务。
-     * @param {any} service
+     * 标题右侧入口：图标按钮（宿主 Icon，回退文字）；点击打开右侧栏 tab。
+     * `$mount` 失败时入口仍然存在：标题/点击提示「远程不可用」，不擅自消失。
      */
-    function makeSessionLoader(service) {
-      return async (sessionId) => {
-        const result = await service.getSessionConfig(sessionId)
-        if (!result || result.ok !== true) {
-          const failure = result && result.error ? result.error : {}
-          throw new Error(
-            `${REMOTE_SERVICE}.getSessionConfig failed: ${failure.code ?? 'unknown'}: ${failure.message ?? 'unknown'}`,
-          )
-        }
-        return result.value
-      }
-    }
-
-    /** @param {any} service @param {string} sessionId @param {string} roleId @param {string} field @param {unknown} value */
-    async function applySessionOverride(service, sessionId, roleId, field, value) {
-      const result = await service.setSessionOverride(sessionId, roleId, field, value)
-      if (!result || result.ok !== true) {
-        const failure = result && result.error ? result.error : {}
-        throw new Error(
-          `${REMOTE_SERVICE}.setSessionOverride failed: ${failure.code ?? 'unknown'}: ${failure.message ?? 'unknown'}`,
-        )
-      }
-      return result.value
-    }
-
-    /** @param {any} service @param {string} sessionId @param {string} roleId @param {string} [field] */
-    async function clearSessionOverride(service, sessionId, roleId, field) {
-      const result = await service.clearSessionOverride(sessionId, roleId, field ?? null)
-      if (!result || result.ok !== true) {
-        const failure = result && result.error ? result.error : {}
-        throw new Error(
-          `${REMOTE_SERVICE}.clearSessionOverride failed: ${failure.code ?? 'unknown'}: ${failure.message ?? 'unknown'}`,
-        )
-      }
-      return result.value
-    }
-
-    /** 标题右侧入口：图标按钮（宿主 Icon，回退文字）；点击打开右侧栏 tab。 */
-    function HeaderEntry({ t, openRolePanel }) {
+    function HeaderEntry({ t, openRolePanel, remoteReady }) {
       const label = t('headerTitle')
-      const desc = t('headerDesc')
+      const remoteOk = remoteReady !== false
+      const desc = remoteOk ? t('headerDesc') : t('remoteUnavailableHint')
+      const [notice, setNotice] = react.useState(null)
       const icon =
         typeof primitives.Icon === 'function'
           ? jsx(primitives.Icon, { name: 'users', 'aria-label': label, title: desc })
           : jsx('span', { children: label })
-      return jsx('button', {
-        type: 'button',
-        className: 'dsh-meetingstone-header-entry',
-        'aria-label': label,
-        title: desc,
-        onClick: () => {
-          try {
-            if (openRolePanel) openRolePanel()
-          } catch {
-            /* 宿主未提供 sidebarRightTabs.open 时静默 */
-          }
-        },
-        children: icon,
+      return jsxs('span', {
+        style: { display: 'inline-flex', alignItems: 'center', gap: 6 },
+        children: [
+          jsx('button', {
+            type: 'button',
+            className: 'dsh-meetingstone-header-entry',
+            'aria-label': label,
+            title: desc,
+            onClick: () => {
+              if (!remoteOk) {
+                // 入口保留，点击给出可读提示（不弹宿主 modal、不写凭证）。
+                setNotice(t('remoteUnavailableHint'))
+                return
+              }
+              try {
+                if (openRolePanel) openRolePanel()
+              } catch {
+                /* 宿主未提供 sidebarRightTabs.open 时静默 */
+              }
+            },
+            children: icon,
+          }),
+          notice
+            ? jsx('span', {
+                role: 'status',
+                style: { ...meta, color: 'var(--dsw-alias-state-error-primary)', whiteSpace: 'nowrap' },
+                children: notice,
+              })
+            : null,
+        ],
       })
     }
 
@@ -952,116 +1040,16 @@ window.__ModuleLoader__.load({
       return jsx('span', { children: t('tabTitle') })
     }
 
-    /** 单个角色的覆盖编辑卡片（只用宿主 token，不自带 CSS）。 */
-    function RoleCard({ t, role, sources, service, sessionId, onChanged }) {
-      const srcFields = sources?.[role.roleId]?.fields ?? {}
-      return jsxs('div', {
-        style: card,
-        children: [
-          jsx('div', { style: row, children: [jsx('strong', { children: role.name || role.roleId }), jsx('span', { style: grow })] }),
-          ...OVERRIDABLE_FIELDS.map((field) => {
-            const fieldPath = field.key.startsWith('channel.') ? field.key : field.key
-            const src = srcFields[fieldPath] ?? srcFields[field.key] ?? 'default'
-            const isOverridden = src === 'session'
-            const value = field.get(role)
-            return jsxs(
-              'div',
-              {
-                style: { display: 'flex', flexDirection: 'column', gap: 4 },
-                children: [
-                  jsxs('div', {
-                    style: row,
-                    children: [
-                      jsx('span', { style: dt, children: t(field.labelKey) }),
-                      jsx('span', { style: grow }),
-                      jsx(Tag, {
-                        tone: isOverridden ? 'warning' : 'neutral',
-                        children: isOverridden ? t('overridden') : t('inherited'),
-                      }),
-                    ],
-                  }),
-                  jsx('input', {
-                    type: 'text',
-                    value: value,
-                    placeholder: t('notSet'),
-                    style: { ...code, width: '100%' },
-                    onInput: async (/** @type {any} */ e) => {
-                      const raw = e?.target?.value ?? ''
-                      try {
-                        const next = field.key === 'alias' ? field.toValue(raw) : raw
-                        await applySessionOverride(service, sessionId, role.roleId, field.key, next)
-                        if (onChanged) onChanged()
-                      } catch {
-                        /* 写入失败：保持原值，下一轮刷新会显示真实状态 */
-                      }
-                    },
-                  }),
-                  isOverridden
-                    ? jsx('button', {
-                        type: 'button',
-                        style: { ...dim, background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', padding: 0 },
-                        onClick: async () => {
-                          try {
-                            await clearSessionOverride(service, sessionId, role.roleId, field.key)
-                            if (onChanged) onChanged()
-                          } catch {
-                            /* 同上 */
-                          }
-                        },
-                        children: t('restore'),
-                      })
-                    : null,
-                ],
-              },
-              `${role.roleId}.${field.key}`,
-            )
-          }),
-        ],
-      })
-    }
-
-    /**
-     * 惰性服务代理：render 时 `remote.meetingstone` 可能还没就绪，
-     * 每次方法调用时再取；取不到抛可诊断错误（由 UI 显示"读取失败"）。
-     * @param {() => any | null} getService
-     */
-    function lazyRemoteService(getService) {
-      const call = (/** @type {string} */ name) => (...args) => {
-        const service = getService()
-        if (!service || typeof service[name] !== 'function') {
-          throw new Error('REMOTE_UNAVAILABLE: remote.meetingstone 尚未就绪')
-        }
-        return service[name](...args)
-      }
-      return {
-        getSessionConfig: call('getSessionConfig'),
-        setSessionOverride: call('setSessionOverride'),
-        clearSessionOverride: call('clearSessionOverride'),
-      }
-    }
-
-    /** 右侧栏「当前会话角色」面板：拉取视图 → 渲染角色覆盖卡 → 写回。 */
-    function SidebarRolePane({ t, sessionId, service }) {
+    /** 右侧栏只读面板：拉取 `list()` 快照 → 渲染角色名/别名/可用性/通道。 */
+    function SidebarRolePane({ t, list: load }) {
       const [state, setState] = react.useState({ status: 'loading' })
-      const reload = () => {
-        Promise.resolve()
-          .then(() => makeSessionLoader(service)(sessionId))
-          .then(
-            (view) => setState({ status: 'ready', view }),
-            (error) =>
-              setState({
-                status: 'error',
-                message: error instanceof Error ? error.message : String(error),
-              }),
-          )
-      }
       react.useEffect(() => {
         let current = true
         Promise.resolve()
-          .then(() => makeSessionLoader(service)(sessionId))
+          .then(() => (typeof load === 'function' ? load() : null))
           .then(
-            (view) => {
-              if (current) setState({ status: 'ready', view })
+            (snapshot) => {
+              if (current) setState({ status: 'ready', snapshot })
             },
             (error) => {
               if (current)
@@ -1074,50 +1062,41 @@ window.__ModuleLoader__.load({
         return () => {
           current = false
         }
-      }, [sessionId, service])
+      }, [load])
 
       if (state.status === 'loading') {
         return jsx('div', { style: note, children: t('loading') })
       }
       if (state.status === 'error') {
-        return jsxs('div', { role: 'alert', children: [jsx('p', { style: note, children: t('loadFailed') }), jsx('p', { style: note, children: state.message })] })
+        return jsxs('div', {
+          role: 'alert',
+          children: [
+            jsx('p', { style: note, children: t('loadFailed') }),
+            jsx('p', { style: note, children: state.message }),
+          ],
+        })
       }
-
-      const view = state.view
-      const roles = Array.isArray(view?.effective?.roles) ? view.effective.roles : []
-      const sources = view?.sources?.roles ?? {}
-      return jsxs('div', {
-        style: root,
-        children: [
-          jsx('h3', { style: heading, children: t('paneTitle') }),
-          roles.length === 0
-            ? jsx('p', { style: note, children: t('noRoles') })
-            : jsxs('div', {
-                style: list,
-                children: roles.map((role) =>
-                  jsx(RoleCard, {
-                    key: role.roleId,
-                    t,
-                    role,
-                    sources,
-                    service,
-                    sessionId,
-                    onChanged: reload,
-                  }),
-                ),
-              }),
-        ],
-      })
+      return renderRolePane(t, state.snapshot)
     }
 
     /**
      * 注册 title 右侧入口 `conversation.session.header.actions`（kind:list, scope:session）。
      * 注册形状对齐官方：{ name, id, order, locale, inject(sessionId) }。
+     *
+     * 入口注册**独立于** Remote 是否可挂载：`$mount` 失败时仍然注册，只是把
+     * `remoteReady:false` 传进组件，点击显示「远程不可用」。
      * @param {any} slotCtx
-     * @param {any} service 已就绪的 remote.meetingstone 服务
+     * @param {{ getService: () => any | null, mountError: string | null }} deps
      * @param {(key: string) => string} t
      */
-    function registerHeaderAction(slotCtx, service, t) {
+    function registerHeaderAction(slotCtx, deps, t) {
+      if (
+        !slotCtx?.slots ||
+        typeof slotCtx.slots.inject !== 'function' ||
+        typeof slotCtx.slots.register !== 'function'
+      ) {
+        throw new Error('CAPABILITY_MISSING: slots.inject/register')
+      }
       const openPanel = () => {
         try {
           openRolePanelOf(slotCtx)
@@ -1132,7 +1111,14 @@ window.__ModuleLoader__.load({
             id: HEADER_ACTION_ID,
             order: 60,
             locale: NS,
-            inject: (/** @type {string} */ sessionId) => ({ sessionId, openRolePanel: openPanel, t }),
+            inject: (/** @type {string} */ sessionId) => ({
+              sessionId,
+              openRolePanel: openPanel,
+              // 只有 $mount 明确失败才提示不可用；命名空间可能稍后就绪，
+              // 面板 loader 自己会回退到 unavailable 快照。
+              remoteReady: !deps.mountError,
+              t,
+            }),
           },
           HeaderEntry,
         ),
@@ -1141,21 +1127,33 @@ window.__ModuleLoader__.load({
 
     /**
      * 两步式注册右侧栏 tab：先 `sidebarRightTabs.register` 注册 tab，再注册两个
-     * keyed seat（内容 + 标题，scope session）。
+     * keyed seat（内容 + 标题，scope session）。面板只读，数据来自无参 `list()`。
      * @param {any} slotCtx
-     * @param {() => any | null} getService 动态取 remote.meetingstone（可能尚未就绪）
+     * @param {{ getService: () => any | null, mountError: string | null }} deps
      * @param {(key: string) => string} t
      */
-    function registerSidebarTab(slotCtx, getService, t) {
-      // 1) tab 本体
-      if (typeof sidebarRightTabsOf(slotCtx)?.register === 'function') {
-        sidebarRightTabsOf(slotCtx).register({
+    function registerSidebarTab(slotCtx, deps, t) {
+      if (
+        !slotCtx?.slots ||
+        typeof slotCtx.slots.inject !== 'function' ||
+        typeof slotCtx.slots.register !== 'function'
+      ) {
+        throw new Error('CAPABILITY_MISSING: slots.inject/register')
+      }
+      // 1) tab 本体（能力检测后调用；没有该服务时仍注册 seat，不拖垮其他模块）
+      const tabs = sidebarRightTabsOf(slotCtx)
+      if (tabs && typeof tabs.register === 'function') {
+        tabs.register({
           id: TAB_ID,
           kind: 'meetingstone-roles',
           priority: 50,
           title: () => t('tabTitle'),
         })
       }
+      const loader = makeLoader(
+        deps.getService,
+        deps.mountError ? { code: 'REMOTE_MOUNT_FAILED', message: deps.mountError } : undefined,
+      )
       // 2) keyed seats（scope session）
       slotCtx.slots.inject('sidebar.right.pane.tab', () =>
         slotCtx.slots.register(
@@ -1163,11 +1161,7 @@ window.__ModuleLoader__.load({
             name: 'sidebar.right.pane.tab',
             key: TAB_ID,
             locale: NS,
-            inject: (/** @type {string} */ sessionId) => ({
-              sessionId,
-              service: lazyRemoteService(getService),
-              t,
-            }),
+            inject: (/** @type {string} */ sessionId) => ({ sessionId, list: loader, t }),
           },
           SidebarRolePane,
         ),
@@ -1186,46 +1180,50 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 挂载 section。注册与 `remote.meetingstone` 的就绪**解耦**：
+     * 挂载 GUI。注册与 `remote.meetingstone` 的就绪**解耦**：
      *
      * 0.1.0-alpha 真机事故：把 slot 注册放进 `ctx.inject(['remote.meetingstone'], cb)`，
      * 该服务由 $mount 在子 fiber provide，父 fiber 的注入回调并不保证被唤醒；
      * 结果是设置页与对话顶部入口**都不出现**（用户看到的就是这个）。
-     * 现在：$mount 之后立即注册 section / header / sidebar，服务读取走 `ctx.get()` 惰性获取；
+     * 现在：先注册 header / section / sidebar，服务读取走 `ctx.get()` 惰性获取；
      * 取不到时显示 unavailable 快照，而不是让整个 UI 消失。
+     *
+     * 注册顺序固定为 **header → section → sidebar**，每段独立 guard。任何一段失败
+     * 只写一条统一格式日志（模块 / 阶段 / 插件版本 / 堆栈），不影响其他段，也不
+     * 拖垮宿主启动。日志不记录任何凭证（只记 error message 与 stack）。
      */
     async function apply(ctx) {
       const t = ctx.locale.bind(NS)
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'meetingstone: section dictionaries')
 
-      // 任何一段注册失败都不能拖垮宿主启动（0.1.0-alpha 真机事故：一个 slot 注册
-      // 抛错导致 web boot "entry did not activate"，整个应用无法打开）。
-      const guard = (/** @type {string} */ label, /** @type {() => void} */ fn) => {
+      /** 统一 GUI 注册日志：module / phase / version / detail（error+stack）。 */
+      const log = (/** @type {string} */ level, /** @type {string} */ module, /** @type {string} */ phase, /** @type {string} */ detail = '') => {
+        const line = `[meetingstone] gui module=${module} phase=${phase} version=${PLUGIN_VERSION}${
+          detail ? ` ${detail}` : ''
+        }`
         try {
-          fn()
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          guiErrors.push(`${label}: ${message}`)
-          try {
-            console.error(`[meetingstone] GUI ${label} failed:`, error)
-          } catch {
-            /* console 不可用 */
-          }
-          if (typeof ctx.logger?.warn === 'function') ctx.logger.warn(`[meetingstone] GUI ${label} failed: ${message}`)
+          const fn = ctx.logger && typeof ctx.logger[level] === 'function' ? ctx.logger[level] : null
+          if (fn) fn.call(ctx.logger, line)
+          else if (level === 'error') console.error(line)
+          else if (level === 'warn') console.warn(line)
+          else console.log(line)
+        } catch {
+          /* logger 不可用 */
         }
       }
 
-      let unmount
-      try {
-        unmount = await ctx.remote.$mount(REMOTE_CONTRIBUTION)
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        if (typeof ctx.logger?.warn === 'function') ctx.logger.warn(error)
-        guard('section(mount-failed)', () => registerSection(ctx, async () => unavailableSnapshot('REMOTE_MOUNT_FAILED', message), t))
-        return
+      const guard = (/** @type {string} */ module, /** @type {string} */ phase, /** @type {() => void} */ fn) => {
+        try {
+          fn()
+          log('info', module, phase, 'status=ok')
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          const stack =
+            error instanceof Error && error.stack ? String(error.stack).replace(/\s+/g, ' ').slice(0, 600) : ''
+          guiErrors.push(`${module}: ${message}`)
+          log('error', module, phase, `error=${message}${stack ? ` stack=${stack}` : ''}`)
+        }
       }
-      // $mount 返回卸载函数；绑定到本插件 effect，卸载/重载时回收命名空间服务。
-      ctx.effect(() => () => unmount(), 'meetingstone: remote contribution')
 
       // 动态取名空间服务：不在 fiber.inject 里声明（会阻塞注册），用官方 ctx.get()。
       const getService = () => {
@@ -1238,9 +1236,35 @@ window.__ModuleLoader__.load({
         }
       }
 
-      guard('section', () => registerSection(ctx, makeLoader(getService), t))
-      guard('header', () => registerHeaderAction(ctx, getService, t))
-      guard('sidebar', () => registerSidebarTab(ctx, getService, t))
+      // 1) Remote contribution：先做能力检测；失败只记 mountError，下面照常注册。
+      let mountError = null
+      let unmount = null
+      if (typeof ctx.remote?.$mount !== 'function') {
+        mountError = 'CAPABILITY_MISSING: ctx.remote.$mount'
+        log('warn', 'remote', 'mount', `error=${mountError}`)
+      } else {
+        try {
+          unmount = await ctx.remote.$mount(REMOTE_CONTRIBUTION)
+          log('info', 'remote', 'mount', 'status=ok')
+        } catch (error) {
+          mountError = error instanceof Error ? error.message : String(error)
+          const stack =
+            error instanceof Error && error.stack ? String(error.stack).replace(/\s+/g, ' ').slice(0, 600) : ''
+          log('error', 'remote', 'mount', `error=${mountError}${stack ? ` stack=${stack}` : ''}`)
+        }
+      }
+      // $mount 返回卸载函数；绑定到本插件 effect，卸载/重载时回收命名空间服务。
+      if (typeof unmount === 'function') {
+        ctx.effect(() => () => unmount(), 'meetingstone: remote contribution')
+      }
+
+      const deps = { getService, mountError }
+      const mountFailure = mountError ? { code: 'REMOTE_MOUNT_FAILED', message: mountError } : undefined
+
+      // 2) 注册顺序：header → section → sidebar。header 永不因 mount 失败而缺失。
+      guard('header', 'register', () => registerHeaderAction(ctx, deps, t))
+      guard('section', 'register', () => registerSection(ctx, makeLoader(getService, mountFailure), t))
+      guard('sidebar', 'register', () => registerSidebarTab(ctx, deps, t))
     }
 
     exports.apply = apply
@@ -1251,6 +1275,8 @@ window.__ModuleLoader__.load({
       normalizeGlobal,
       unavailableSnapshot,
       renderSection,
+      renderRolePane,
+      RoleReadonlyCard,
       CliList,
       CliPaths,
       ChannelModels,
@@ -1258,10 +1284,8 @@ window.__ModuleLoader__.load({
       REMOTE_INJECT,
       TAB_ID,
       HEADER_ACTION_ID,
-      makeSessionLoader,
-      applySessionOverride,
-      clearSessionOverride,
-      OVERRIDABLE_FIELDS,
+      PLUGIN_VERSION,
+      makeLoader,
     }
     return module.exports
   },

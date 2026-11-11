@@ -1,6 +1,13 @@
 // @ts-check
 /**
  * 右侧栏「当前会话角色编辑」的 Host 侧远程方法（纯逻辑，无 I/O 之外的副作用）。
+ *
+ * ⚠️ 暂不接入客户端（2026-11-11）：本模块只保留纯逻辑与单测，**不再注册为
+ * Remote 方法**。真机证据：手写带参 descriptor 被宿主 Gateway 拒绝——
+ * `generated Remote meetingstone/getSessionConfig field "sessionId" has no
+ * strict codec`；strict codec 需要 zod 类型符号，手写 host 无法伪造，
+ * `src-json` 参数也被 `requireStrictInputs` 拒绝。等宿主提供生成式 Remote
+ * （typert generator）后再接。右侧栏面板当前为只读 `list()` 渲染。
  */
 import { resolveEffectiveConfig, normalizeFieldPath } from '../session/config.js'
 import { isValidRoleId } from '../roles/ids.js'

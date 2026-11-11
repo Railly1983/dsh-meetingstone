@@ -243,6 +243,7 @@ async function loadClientHarness(values = {}) {
   const registrations = []
   const mounted = []
   const injectCalls = []
+  const logs = []
   const remoteValue =
     values.remoteValue !== undefined
       ? values.remoteValue
@@ -256,6 +257,9 @@ async function loadClientHarness(values = {}) {
                 aliases: ['SS'],
                 enabled: true,
                 availability: 'available',
+                channelId: 'ch-acp-flash',
+                provider: 'acp',
+                model: 'flash-1',
               },
             ],
             channels: [{ channelId: 'ch-acp-flash', kind: 'acp-cli' }],
@@ -263,8 +267,23 @@ async function loadClientHarness(values = {}) {
           },
         }
 
+  // 有状态的极简 React：支持 useState 更新 + 手动 reset 后重渲染，用于验证点击提示。
   const fakeReact = {
-    useState: (initial) => [initial, () => {}],
+    _hooks: [],
+    _index: 0,
+    reset() {
+      this._index = 0
+    },
+    useState(initial) {
+      const i = this._index++
+      if (this._hooks.length <= i) this._hooks[i] = initial
+      return [
+        this._hooks[i],
+        (next) => {
+          this._hooks[i] = typeof next === 'function' ? next(this._hooks[i]) : next
+        },
+      ]
+    },
     useEffect: () => {},
     useId: () => 'stub-id',
   }
@@ -300,39 +319,16 @@ async function loadClientHarness(values = {}) {
   const exports = captured.factory(fakeRequire)
   const sidebarTabRegisters = []
   const sidebarOpenCalls = []
-  const sessionRemoteCalls = []
-  const SAMPLE_SESSION_VIEW = {
-    effective: {
-      roles: [{ roleId: 'role-sashi', name: '沙僧', aliases: ['SS'], channel: { model: 'm1' } }],
-      channels: [],
-      defaultRoleId: undefined,
-      dispatchNotes: '',
-      projectRules: [],
-    },
-    overrides: { 'role-sashi': { channel: { model: 'm1' } } },
-    sources: { roles: { 'role-sashi': { layer: 'session', fields: { 'channel.model': 'session' } } } },
-  }
   const remote = {
     async $mount(contribution) {
       mounted.push(contribution)
       if (values.mountError) throw values.mountError
       return async () => {}
     },
+    // 只暴露无参 list；带参会话方法已从客户端移除。
     meetingstone: {
       async list() {
         return remoteValue
-      },
-      async getSessionConfig(sessionId) {
-        sessionRemoteCalls.push(['getSessionConfig', sessionId])
-        return { ok: true, value: SAMPLE_SESSION_VIEW }
-      },
-      async setSessionOverride(sessionId, roleId, field, value) {
-        sessionRemoteCalls.push(['setSessionOverride', sessionId, roleId, field, value])
-        return { ok: true, value: { written: true, patch: { channel: { model: value } } } }
-      },
-      async clearSessionOverride(sessionId, roleId, field) {
-        sessionRemoteCalls.push(['clearSessionOverride', sessionId, roleId, field])
-        return { ok: true, value: { removed: true } }
       },
     },
     pluginInventory: {
@@ -356,15 +352,20 @@ async function loadClientHarness(values = {}) {
       bind: () => (key) => key,
       register: () => () => {},
     },
-    slots: {
-      inject(_name, fn) {
-        fn()
-      },
-      register(options, Component) {
-        registrations.push({ options, Component })
-        return () => {}
-      },
-    },
+    slots: values.omitSlots
+      ? undefined
+      : {
+          inject(_name, fn) {
+            fn()
+          },
+          register(options, Component) {
+            if (values.failRegisterFor && options.name === values.failRegisterFor) {
+              throw new Error(`register ${options.name} boom`)
+            }
+            registrations.push({ options, Component })
+            return () => {}
+          },
+        },
     sidebarRight: {
       openTab(kind, options) {
         sidebarOpenCalls.push(kind, options)
@@ -388,8 +389,18 @@ async function loadClientHarness(values = {}) {
       if (key === 'sidebarRight') return ctx.sidebarRight
       return undefined
     },
-    remote,
-    logger: { info() {}, warn() {} },
+    remote: values.omitRemote ? {} : remote,
+    logger: {
+      info(line) {
+        logs.push(['info', line])
+      },
+      warn(line) {
+        logs.push(['warn', line])
+      },
+      error(line) {
+        logs.push(['error', line])
+      },
+    },
   }
 
   await exports.apply(ctx)
@@ -401,7 +412,8 @@ async function loadClientHarness(values = {}) {
     remote,
     sidebarTabRegisters,
     sidebarOpenCalls,
-    sessionRemoteCalls,
+    react: fakeReact,
+    logs,
   }
 }
 
@@ -424,12 +436,13 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
 
   assert.equal(mounted.length, 1)
   assert.equal(mounted[0].package, 'dsh-meetingstone')
-  // 现有 1 个只读方法 + 3 个会话级方法，共 4 个 descriptor。
-  assert.equal(mounted[0].descriptors.length, 4)
+  // 只保留无参 list：带参会话方法在真机被 Gateway strict codec 拒绝（0.2.0 回退）。
+  assert.equal(mounted[0].descriptors.length, 1)
   assert.deepEqual(
-    mounted[0].descriptors.map((d) => d.method).sort(),
-    ['clearSessionOverride', 'getSessionConfig', 'list', 'setSessionOverride'],
+    mounted[0].descriptors.map((d) => d.method),
+    ['list'],
   )
+  assert.deepEqual(mounted[0].descriptors[0].parameters, [], 'list 必须无参')
   const listDesc = mounted[0].descriptors.find((d) => d.method === 'list')
   assert.deepEqual(listDesc, {
     id: 'dsh-meetingstone#meetingstone/list',
@@ -450,9 +463,9 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
       aliases: ['SS'],
       enabled: true,
       availability: 'available',
-      channelId: '',
-      provider: '',
-      model: '',
+      channelId: 'ch-acp-flash',
+      provider: 'acp',
+      model: 'flash-1',
       reasoning: '',
     },
   ])
@@ -473,7 +486,8 @@ test('Browser half：Remote 失败时 list() 抛错，页面走 loadFailed 而�
   const { registrations } = await loadClientHarness({
     remoteValue: { ok: false, error: { code: 'TYPERT_UNAVAILABLE', message: 'no host' } },
   })
-  const injected = registrations[0].options.inject()
+  const section = registrations.find((r) => r.options.name === 'settings.section')
+  const injected = section.options.inject()
   await assert.rejects(() => injected.list(), /TYPERT_UNAVAILABLE/)
 })
 
@@ -539,6 +553,7 @@ test('Browser half：normalizeGlobal 收窄全局配置/CLI 数据', async () =>
     {
       cli: 'codex',
       label: 'codex',
+      category: 'external',
       installed: true,
       path: '',
       version: '1.2.3',
@@ -550,16 +565,86 @@ test('Browser half：normalizeGlobal 收窄全局配置/CLI 数据', async () =>
   assert.equal(global.cliError, null)
 })
 
-test('Browser half：$mount 失败时仍注册 section，并以 unavailable 快照解释原因', async () => {
-  const { registrations, injectCalls } = await loadClientHarness({
+test('Browser half：$mount 失败时 header/section/sidebar 都注册，header 不消失且可提示', async () => {
+  const { registrations, injectCalls, react } = await loadClientHarness({
     mountError: new Error('mount boom'),
   })
-  assert.equal(registrations.length, 1)
   assert.equal(injectCalls.length, 0, 'mount 失败不得进入动态注入')
-  const snapshot = await registrations[0].options.inject().list()
+  const names = registrations.map((r) => r.options.name)
+  assert.deepEqual(names, [
+    'conversation.session.header.actions',
+    'settings.section',
+    'sidebar.right.pane.tab',
+    'sidebar.right.pane.tab.title',
+  ])
+  assert.equal(registrations[0].options.name, 'conversation.session.header.actions', 'header 必须最先注册')
+
+  const section = registrations.find((r) => r.options.name === 'settings.section')
+  const snapshot = await section.options.inject().list()
   assert.equal(snapshot.unavailable.code, 'REMOTE_MOUNT_FAILED')
   assert.match(snapshot.unavailable.message, /mount boom/)
   assert.deepEqual(snapshot.roles, [])
+
+  const pane = registrations.find((r) => r.options.name === 'sidebar.right.pane.tab')
+  const paneSnapshot = await pane.options.inject('sess-1').list()
+  assert.equal(paneSnapshot.unavailable.code, 'REMOTE_MOUNT_FAILED')
+
+  // header 仍在：render 时 remoteReady=false，点击显示「远程不可用」。
+  const header = registrations[0]
+  const props = header.options.inject('sess-h1')
+  assert.equal(props.remoteReady, false)
+  react.reset()
+  const first = header.Component(props)
+  const button = first.props.children.find((c) => c && c.type === 'button')
+  assert.equal(button.props.title, 'remoteUnavailableHint')
+  button.props.onClick()
+  react.reset()
+  const strings = []
+  collectStrings(header.Component(props), strings)
+  assert.ok(strings.includes('remoteUnavailableHint'), '点击后出现远程不可用提示')
+})
+
+test('Browser half：单个模块注册失败不影响其他模块（独立 guard）', async () => {
+  const { registrations, logs } = await loadClientHarness({ failRegisterFor: 'settings.section' })
+  const names = registrations.map((r) => r.options.name)
+  assert.ok(names.includes('conversation.session.header.actions'), 'header 不受 section 失败影响')
+  assert.ok(!names.includes('settings.section'), 'section 注册确实失败')
+  assert.ok(names.includes('sidebar.right.pane.tab'), 'sidebar 不受 section 失败影响')
+
+  const errorLine = logs.find(([level]) => level === 'error')?.[1] ?? ''
+  assert.match(errorLine, /^\[meetingstone\] gui module=section phase=register version=0\.1\.0-alpha /)
+  assert.match(errorLine, /register settings\.section boom/)
+  assert.match(errorLine, /stack=/)
+  assert.doesNotMatch(errorLine, /token|secret|password|api[_-]?key/i, '日志不记录凭证')
+})
+
+test('Browser half：缺少 slots 能力时 apply 不抛，三个模块各自记录错误', async () => {
+  const { registrations, logs } = await loadClientHarness({ omitSlots: true })
+  assert.deepEqual(registrations, [])
+  const errors = logs.filter(([level]) => level === 'error').map(([, line]) => line)
+  assert.equal(errors.length, 3, 'header / section / sidebar 各一条，互不影响')
+  for (const line of errors) {
+    assert.match(line, /^\[meetingstone\] gui module=(header|section|sidebar) phase=register version=0\.1\.0-alpha /)
+    assert.match(line, /CAPABILITY_MISSING/)
+    assert.doesNotMatch(line, /token|secret|password|api[_-]?key/i, '日志不记录凭证')
+  }
+})
+
+test('Browser half：GUI 注册日志统一格式（模块/阶段/版本），成功也记录', async () => {
+  const { logs } = await loadClientHarness()
+  const infos = logs.filter(([level]) => level === 'info').map(([, line]) => line)
+  for (const [module, phase] of [
+    ['remote', 'mount'],
+    ['header', 'register'],
+    ['section', 'register'],
+    ['sidebar', 'register'],
+  ]) {
+    assert.ok(
+      infos.includes(`[meetingstone] gui module=${module} phase=${phase} version=0.1.0-alpha status=ok`),
+      `缺少 ${module}/${phase} 日志`,
+    )
+  }
+  assert.ok(infos.every((line) => !/token|secret|password|api[_-]?key/i.test(line)), '日志不记录凭证')
 })
 
 test('Browser half：顶部集合石入口（conversation.session.header.actions）注册，点击打开右侧栏', async () => {
@@ -578,11 +663,13 @@ test('Browser half：顶部集合石入口（conversation.session.header.actions
   // 模拟 host 用 inject(sessionId) 拿到 props 并渲染，再触发点击。
   const props = options.inject('sess-h1')
   assert.equal(props.sessionId, 'sess-h1')
+  assert.equal(props.remoteReady, true, 'remote 就绪时入口可用')
   assert.equal(typeof props.openRolePanel, 'function')
   const element = Component(props)
-  assert.equal(element.type, 'button', '入口是图标按钮')
-  assert.equal(typeof element.props.onClick, 'function')
-  element.props.onClick()
+  const button = element.props.children.find((c) => c && c.type === 'button')
+  assert.ok(button, '入口是图标按钮')
+  assert.equal(typeof button.props.onClick, 'function')
+  button.props.onClick()
   assert.deepEqual(sidebarOpenCalls, ['meetingstone-roles', { params: {} }], '点击应打开右侧栏 tab（openTab(kind, {params})）')
 })
 
@@ -609,39 +696,37 @@ test('Browser half：右侧栏两步式注册（sidebarRightTabs + 两个 keyed 
   assert.equal(typeof pane[0].Component, 'function')
 })
 
-test('Browser half：右侧栏 pane 通过 remote 方法读取/写入会话角色覆盖', async () => {
-  const { exports, remote, sessionRemoteCalls } = await loadClientHarness()
-  const service = remote.meetingstone
+test('Browser half：右侧栏 pane 只读渲染角色名/别名/可用性/通道，无写操作控件', async () => {
+  const { exports, registrations } = await loadClientHarness()
+  const pane = registrations.find((r) => r.options.name === 'sidebar.right.pane.tab')
+  const props = pane.options.inject('sess-p1')
+  assert.equal(typeof props.list, 'function')
+  const snapshot = await props.list()
+  assert.equal(snapshot.roles[0].roleId, 'role-sashi')
 
-  const loader = exports.__test.makeSessionLoader(service)
-  const view = await loader('sess-p1')
-  assert.deepEqual(sessionRemoteCalls[0], ['getSessionConfig', 'sess-p1'])
-  assert.equal(view.effective.roles[0].roleId, 'role-sashi')
-
-  await exports.__test.applySessionOverride(service, 'sess-p1', 'role-sashi', 'model', 'm-x')
-  assert.deepEqual(
-    sessionRemoteCalls[sessionRemoteCalls.length - 1],
-    ['setSessionOverride', 'sess-p1', 'role-sashi', 'model', 'm-x'],
-  )
-
-  await exports.__test.clearSessionOverride(service, 'sess-p1', 'role-sashi', 'model')
-  assert.deepEqual(
-    sessionRemoteCalls[sessionRemoteCalls.length - 1],
-    ['clearSessionOverride', 'sess-p1', 'role-sashi', 'model'],
-  )
+  const t = (k) => k
+  const tree = exports.__test.renderRolePane(t, snapshot)
+  const strings = []
+  collectStringsDeep(tree, strings)
+  assert.ok(strings.includes('沙僧'), '角色名可见')
+  assert.ok(strings.includes('SS'), '别名可见')
+  assert.ok(strings.includes('available'), '可用性可见')
+  assert.ok(strings.includes('ch-acp-flash · acp · flash-1'), '通道可见')
+  assert.ok(strings.includes('paneReadonlyNote'), '顶部只读说明可见')
+  assert.ok(!findNode(tree, (n) => n.type === 'input'), '只读面板不得有输入框')
+  assert.ok(!strings.includes('restore'), '不得有恢复继承按钮')
+  assert.ok(!strings.includes('saved'), '不得有保存状态')
+  assert.ok(!strings.includes('manageRoles'), '面板内不得出现编辑入口')
 })
 
-test('Browser half：remote 方法失败时（ok!==true）loader 抛错而非伪装', async () => {
+test('Browser half：list 失败（ok!==true）时 loader 抛错而非伪装', async () => {
   const { exports } = await loadClientHarness()
-  const failingService = {
-    async getSessionConfig() {
+  const loader = exports.__test.makeLoader({
+    async list() {
       return { ok: false, error: { code: 'SESSION_GUI_SESSION_ROOT_UNKNOWN', message: 'no root' } }
     },
-  }
-  await assert.rejects(
-    () => exports.__test.makeSessionLoader(failingService)('sess-z'),
-    /SESSION_GUI_SESSION_ROOT_UNKNOWN/,
-  )
+  })
+  await assert.rejects(() => loader(), /SESSION_GUI_SESSION_ROOT_UNKNOWN/)
 })
 
 test('client 源文件：无占位数据，且命名空间读取走 ctx.get 惰性获取', async () => {
@@ -654,6 +739,9 @@ test('client 源文件：无占位数据，且命名空间读取走 ctx.get 惰�
   assert.doesNotMatch(source, /ctx\.inject\(\[REMOTE_INJECT\]/, '不得把注册阻塞在 ctx.inject 回调')
   assert.match(source, /ctx\.get\(/, '命名空间服务应通过 ctx.get 惰性获取')
   assert.match(source, /service\.list\(\)/, '数据读取应发生在惰性解析出的服务上')
+  // 0.2.0 回退：带参会话 Remote 方法不得再出现在客户端。
+  assert.doesNotMatch(source, /method: '(getSessionConfig|setSessionOverride|clearSessionOverride)'/)
+  assert.doesNotMatch(source, /service\.(getSessionConfig|setSessionOverride|clearSessionOverride)\(/)
 })
 
 // 递归收集 JSX 树中的文本节点。
@@ -670,6 +758,33 @@ function collectStrings(node, acc) {
   if (node && typeof node === 'object') {
     const props = node.props || {}
     if (props.children !== undefined) collectStrings(props.children, acc)
+  }
+}
+
+/**
+ * 收集文本并展开“纯渲染组件”（如 CliList / RoleReadonlyCard）：
+ * stub jsx 不会真正调用函数组件，需要测试手动展开才能看到其 children。
+ */
+function collectStringsDeep(node, acc) {
+  if (node === null || node === undefined) return
+  if (typeof node === 'string' || typeof node === 'number') {
+    acc.push(String(node))
+    return
+  }
+  if (Array.isArray(node)) {
+    node.forEach((c) => collectStringsDeep(c, acc))
+    return
+  }
+  if (typeof node === 'object') {
+    const props = node.props || {}
+    if (typeof node.type === 'function' && props.children === undefined) {
+      const rendered = node.type(props)
+      if (rendered !== undefined) {
+        collectStringsDeep(rendered, acc)
+        return
+      }
+    }
+    if (props.children !== undefined) collectStringsDeep(props.children, acc)
   }
 }
 
@@ -713,12 +828,18 @@ test('Browser half：V1 三区结构 + 删除区块不再渲染 + 错误条件 +
   // —— 默认（高级折叠） ——
   const collapsed = exports.__test.renderSection(t, snapshot, { advancedOpen: false, openRoles: noop })
   const collapsedStrings = []
-  collectStrings(collapsed, collapsedStrings)
+  collectStringsDeep(collapsed, collapsedStrings)
 
   // 三区标题存在
   assert.ok(collapsedStrings.includes('cli'), '区1 CLI 连接标题存在')
   assert.ok(collapsedStrings.includes('collab'), '区2 默认协作配置标题存在')
   assert.ok(collapsedStrings.includes('advanced'), '区3 高级设置标题存在')
+
+  // CLI 连接区分宿主 / 外部，且保持一行一个（无完整路径）
+  assert.ok(collapsedStrings.includes('categoryHost'), '宿主分类标签存在')
+  assert.ok(collapsedStrings.includes('categoryExternal'), '外部 CLI 分类标签存在')
+  assert.ok(collapsedStrings.includes('hostName'), '宿主行名称存在')
+  assert.ok(!collapsedStrings.includes('cliPaths'), '主页面不显示 CLI 完整路径')
 
   // 删除的区块不再渲染
   assert.ok(!collapsedStrings.includes('models'), '默认模型区域整体删除（标题不再渲染）')
@@ -735,19 +856,25 @@ test('Browser half：V1 三区结构 + 删除区块不再渲染 + 错误条件 +
   )
 
   // 通道模型列表移入高级：折叠时不可见
-  assert.ok(!collapsedStrings.includes('channelModels'), '通道模型列表移入高级（折叠时不可见）')
+  assert.ok(!collapsedStrings.includes('channelInstances'), '通道实例列表移入高级（折叠时不可见）')
 
   // 高级默认折叠：展开后可见
   const expanded = exports.__test.renderSection(t, snapshot, { advancedOpen: true, openRoles: noop })
   const expandedStrings = []
-  collectStrings(expanded, expandedStrings)
-  assert.ok(expandedStrings.includes('channelModels'), '高级展开后通道模型映射可见')
+  collectStringsDeep(expanded, expandedStrings)
+  assert.ok(expandedStrings.includes('channelInstances'), '高级展开后通道实例可见')
   assert.ok(expandedStrings.includes('cliPaths'), '高级展开后 CLI 完整路径可见')
   assert.ok(expandedStrings.includes('configFile'), '高级展开后配置文件入口可见')
   assert.ok(expandedStrings.includes('isolation'), '高级展开后默认隔离可见')
   assert.ok(!collapsedStrings.includes('cliPaths'), '高级折叠时 CLI 完整路径不可见')
   assert.ok(!collapsedStrings.includes('configFile'), '高级折叠时配置文件入口不可见')
   assert.ok(!collapsedStrings.includes('isolation'), '高级折叠时默认隔离不可见')
+
+  // 不显式传 advancedOpen 时也必须默认收起。
+  const defaultTree = exports.__test.renderSection(t, snapshot, { openRoles: noop })
+  const defaultStrings = []
+  collectStringsDeep(defaultTree, defaultStrings)
+  assert.ok(!defaultStrings.includes('cliPaths'), '高级区默认收起（不传 advancedOpen）')
 
   // 折叠切换按钮存在且 aria-expanded=false（默认折叠）
   assert.ok(
@@ -770,17 +897,47 @@ test('Browser half：V1 三区结构 + 删除区块不再渲染 + 错误条件 +
     '协作区有「管理角色」入口按钮',
   )
 
-  // 错误条件显示：有错误 → 一条 alert 警告 + 查看详情；无错误 → 不占位、不渲染 alert
+  // 错误条件显示：首屏一行摘要；详情默认折叠；无错误不占位。
   const withError = {
     ...snapshot,
     lastError: { code: 'ROLE_NOT_FOUND', message: '没有这个角色', at: '2026-11-11T00:00:00.000Z', source: 'dispatch' },
   }
-  const errTree = exports.__test.renderSection(t, withError, { advancedOpen: true, openRoles: noop })
+  const errCollapsed = exports.__test.renderSection(t, withError, {
+    advancedOpen: true,
+    errorOpen: false,
+    openRoles: noop,
+  })
   const errStrings = []
-  collectStrings(errTree, errStrings)
-  assert.ok(findNode(errTree, (n) => n.props && n.props.role === 'alert'), '有错误时渲染 alert 警告')
-  assert.ok(errStrings.join(' ').includes('ROLE_NOT_FOUND'), '错误码可见')
+  collectStringsDeep(errCollapsed, errStrings)
+  assert.ok(findNode(errCollapsed, (n) => n.props && n.props.role === 'alert'), '有错误时渲染 alert 警告')
+  assert.ok(errStrings.join(' ').includes('ROLE_NOT_FOUND'), '错误码在摘要中可见')
   assert.ok(errStrings.includes('errorDetails'), '查看详情入口存在')
+  assert.ok(!errStrings.includes('errorHideDetails'), '默认不显示收起详情')
+  assert.ok(!errStrings.includes('2026-11-11T00:00:00.000Z'), '详情（时间）默认折叠')
+  assert.ok(!errStrings.includes('ROLE_NOT_FOUND · dispatch'), '详情（来源）默认折叠')
+  assert.ok(
+    findNode(
+      errCollapsed,
+      (n) =>
+        n.props &&
+        n.props.style &&
+        n.props.style.whiteSpace === 'nowrap' &&
+        String(n.props.children).includes('ROLE_NOT_FOUND'),
+    ),
+    '摘要必须是一行（nowrap + ellipsis）',
+  )
+
+  const errExpanded = exports.__test.renderSection(t, withError, {
+    advancedOpen: true,
+    errorOpen: true,
+    openRoles: noop,
+  })
+  const errExpandedStrings = []
+  collectStringsDeep(errExpanded, errExpandedStrings)
+  assert.ok(errExpandedStrings.includes('errorHideDetails'), '展开后按钮变为收起详情')
+  assert.ok(errExpandedStrings.includes('2026-11-11T00:00:00.000Z'), '展开后显示时间')
+  assert.ok(errExpandedStrings.includes('ROLE_NOT_FOUND · dispatch'), '展开后显示来源')
+
   assert.ok(
     !findNode(collapsed, (n) => n.props && n.props.role === 'alert'),
     '无错误时不渲染 alert（不占位、不显示「无」）',
