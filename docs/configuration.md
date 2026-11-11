@@ -309,6 +309,10 @@ routingRules:
 浼氳瘽涓婁笅鏂囨槸鏈夐檺棰勭畻锛屼互涓嬮粯璁ゅ€兼寜瀹¤缁撹鏀剁揣锛涢渶瑕佸畬鏁村唴瀹规椂蹇呴』鏄惧紡绱㈠彇銆?
 
 | 宸ュ叿 | 榛樿杩斿洖 | 瀹屾暣/璇︾粏妯″紡 |
+
+> **Token 口径**：Subagents 面板的 `tok` = `uncachedInput + output + cacheRead + cacheWrite`，按整条持久日志累计；fork 会话包含父会话历史（`154M / 4 秒` 即此），耗时只算子会话自身。**不可用于成本、额度或子 Agent 归属核算**；替代口径（账本字节、`ownEvents` 截断、四桶分价、Provider 账单）见 [`docs/audit/token-stats.md`](audit/token-stats.md)。
+
+| 工具 | 默认返回 | 完整/详细模式 |
 | --- | --- | --- |
 | `meetingstone_get_task` | `status` / `stopReason` / `resultBytes` / `jobId` / `recordPath`锛涙湁缁撴瀯鍖?`summary` 鏃跺彧鍥?summary/resultStatus/openIssues/handoff锛坄resultOmitted:true`锛夛紝鍚﹀垯鍥炵粨鏋滈 1KiB + 鏈?512B | `full:true` 杩斿洖瀹屾暣 `result`锛沗output` 涓?`result` 鐩稿悓鏃跺彧鍥炰竴浠斤紙瀛楁鍚嶇粺涓€涓?`result`锛?|
 | `meetingstone_get_run_artifact` | 瀹屾暣缁撴灉鏂囨湰锛坄.meetingstone/runs/<childId>.json` 鐨?`result`锛?| 鐢?`headBytes`/`tailBytes` 鍙栭灏撅紝鎴?`lineFrom`/`lineTo`锛? 璧枫€佸惈绔偣锛夊彇琛岃寖鍥?|
@@ -472,6 +476,15 @@ routingRules:
 - 浠诲姟缁堟€侊紙瀹屾垚/澶辫触/鍙栨秷/鎻掍欢鍗歌浇锛変細 resolve Job 鐨?`done`锛沗meetingstone_cancel_task` 浼樺厛璧?
   `ctx.jobs.kill()` 鈫?Job 鐨?`cancel`锛屽啀鍥炶惤鍒伴€傞厤鍣ㄥ師璺緞锛屼繚璇侀潰鏉夸笌宸ュ叿鍋滄鐨勬槸鍚屼竴涓换鍔°€?
 - 鎻掍欢鏈韩**涓嶆嫢鏈?* Jobs 闈㈡澘锛涢潰鏉跨敱瀹夸富 `@deepseek-ai/dsh-tool-jobs` 鎻愪緵銆?
+
+- **Jobs 不可用时派单照常**：没有 `ctx.jobs`、或 `jobs.start` 抛错（例如当前 composition 没加载
+  `@deepseek-ai/dsh-tool-jobs`，没有 controller 服务该 owner）时，只记一条 warning，不建 Job、不伪造 `jobId`。
+- 任务终态（完成/失败/取消/插件卸载）会 resolve Job 的 `done`；`meetingstone_cancel_task` 优先走
+  `ctx.jobs.kill()` → Job 的 `cancel`，再回落到适配器原路径，保证面板与工具停止的是同一个任务。
+- 插件本身**不拥有** Jobs 面板；面板由宿主 `@deepseek-ai/dsh-tool-jobs` 提供。
+- **三个原生面板各管一摊**：Todo = 项目级工作包与里程碑，Background Tasks = 本插件派的宿主 Job，
+  Subagents = Agent 执行会话；**派单不建 Todo**。职责边界、命名规则与宿主 API 证据见
+  [`docs/gui-0.2.0.md`](gui-0.2.0.md) §6，本文件不重复。
 
 ## 9. 绀轰緥
 

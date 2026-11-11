@@ -54,6 +54,14 @@
 
 ## 4. 澶辫触锛氬厛鍒嗙被锛屽啀鍐冲畾
 
+优先用 `meetingstone_wait` **一次等齐**：`childIds` 传本批全部任务，`timeoutMs` 给一个上限
+（默认 300000、最大 600000），一次调用等到全部完成或超时。超时的任务回 `status:'running'` +
+`timedOut:true`，未知 `childId` 回 `UNKNOWN_CHILD` 并立即返回；已完成的立即返回，未完成的只等
+宿主结算通知，不忙等。**不要在高频循环里反复 wait 或拿它当轮询**，字段见
+[配置参考](configuration.md) §7，错误码见 §5。
+
+## 4. 失败：先分类，再决定
+
 澶辫触涓嶆槸"鍐嶈瘯涓€娆?灏卞畬浜嗐€傛彃浠朵細鎶婂け璐ュ綊鍏ヤ笅琛ㄧ殑**鐧藉悕鍗?*锛岃惤鐩?`failureClass` 骞剁粰鍑轰竴鍙?
 `hint`锛涗富鎺ф嵁姝ゅ喅瀹氱瓑銆佹崲瑙掕壊杩樻槸鍏堟煡鏃ュ織銆傚缓璁敱涓诲鑰呮媿鏉匡紝**涓嶈嚜鍔ㄦ墽琛?*锛?
 
@@ -137,6 +145,22 @@ node scripts/token-ledger.mjs --dir <path>  # 鎸囧畾 runs 鐩綍锛堥粯�
 [`docs/plan/2026-11-11-ledger-baseline.md`](plan/2026-11-11-ledger-baseline.md)銆?
 
 ## 涓嶅湪鏈鑼冭寖鍥达紙鏄庣‘涓嶅仛锛?
+
+## 6. Token 数字的可信边界
+
+Subagents 面板显示的 `tok` 是 `uncachedInput + output + cacheRead + cacheWrite` 四桶之和，
+按**整条持久日志累计**；fork 会话包含父会话历史（`154M tok / 4 秒` 即此：token 继承父前缀，
+耗时只算子会话自身）。**不可用于成本、额度或子 Agent 归属核算**。
+
+- 为什么：cache 命中与未命中按 1:1 相加、跨调用重复累计、四桶未乘单价；fork 会把父会话的
+  同一批 token 在父子面板各显示一次。
+- 可用于：展示“累计处理量 / 吞吐”，但必须标注“累计、含 cache 重读”。
+- 替代口径：账本字节（§5 的 `resultBytes`，字节不是 token）、`ownEvents` 截断后的 usage、
+  四桶分价、Provider 账单。
+
+完整推导、三例对账与未验证项见 [`docs/audit/token-stats.md`](audit/token-stats.md)。
+
+## 不在本规范范围（明确不做）
 
 浠ヤ笅鍑犻」璇勫杩囦絾**鐮嶆帀**锛堟寚涓嶅啓杩涙湰銆屽崗浣滅害瀹?/ 鎻愮ず璇嶃€嶆枃妗ｏ級锛屼笉瑕佽ˉ杩涙潵锛屼篃涓嶇畻"娌″啓瀹?锛?
 
