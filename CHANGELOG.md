@@ -23,6 +23,12 @@
 - 已知限制见 docs/worktree-isolation.md「已知限制」
 
 ### Added
+- **P0-D 进行中重复任务去重**：`dispatch` 按指纹（项目 / 角色 ID / provider / 规范化任务内容 /
+  含 TaskSpec 结构化字段 / `git rev-parse HEAD` 版本 / 状态桶 / isolation 等关键参数）只对进行中
+  任务去重；命中返回既有 `taskRef` + `deduplicated:true` + 当前状态，不创建第二个子任务、不占额度、
+  不建工作树。版本取不到或信息不足时正常新建（宁可重复也不误合）；索引仅内存、终态清理、
+  并发「先占位再启动」用受控 pending promise 保证只创建一个。规则与误判边界见
+  [配置参考 §7.5](configuration.md)；新增 `tests/dedup.test.mjs`（16 项）
 - **并行多任务（任务级工作树隔离）**（2026-11-11 悟空裁决，路 2）：
   - 新增 `src/worktree.js`：自建 `git worktree`（literal argv、清 `GIT_*`、`GIT_TERMINAL_PROMPT=0`、
     30s 超时、输出上限、按 git common-dir 进程内互斥）；路径

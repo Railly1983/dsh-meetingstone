@@ -841,12 +841,16 @@ test('总额度 4（插件层）：跨项目合计超限被拒', async () => {
       maxParallelWritesTotal: 4,
     })
     const dispatch = tool('meetingstone_dispatch')
+    // P0-D：本用例要测「占满额度」，必须派 4 个**互不相同**的进行中任务；
+    // 若用同一 task，相同请求会被去重命中、只占 2 个额度，测的就不是额度了。
+    let seq = 0
     for (const root of [repoA.root, repoA.root, repoB.root, repoB.root]) {
-      const res = await dispatch.execute({ role: 'SS', task: 'x' }, execFor(root))
+      seq += 1
+      const res = await dispatch.execute({ role: 'SS', task: `额度任务-${seq}` }, execFor(root))
       assert.equal(res.ok, true, JSON.stringify(res))
     }
     // 第五个放到第三个项目：前四个已占满全局额度 4，立即拒绝
-    const fifth = await dispatch.execute({ role: 'SS', task: 'x' }, execFor(repoC.root))
+    const fifth = await dispatch.execute({ role: 'SS', task: '额度任务-5' }, execFor(repoC.root))
     assert.equal(fifth.ok, false)
     assert.equal(fifth.code, DISPATCH_ERRORS.WRITE_LIMIT_TOTAL)
   } finally {

@@ -482,7 +482,9 @@ export function registerTools(ctx, deps) {
         '按角色把一次任务派发给宿主 provider。默认每个任务在独立 git 工作树里执行（默认并行上限 2/项目、4/全局）；' +
         'isolation=none 时退回主工作区串行。工作树只隔离文件布局，不是权限沙箱。' +
         '可以只传 role+task（旧用法），也可以带 title/objective/scope/acceptance/contextPack 等结构化简报；' +
-        '使用任一结构化字段时 title 必填，声明 scope 时必须给 acceptance。简单查询不需要 scope/evidence。',
+        '使用任一结构化字段时 title 必填，声明 scope 时必须给 acceptance。简单查询不需要 scope/evidence。' +
+        '完全相同的进行中任务会返回既有 taskRef（deduplicated:true），不创建第二个子任务；' +
+        '版本指纹取不到或信息不足以证明相同时照常新建（宁可重复也不误合）。',
       parameters: {
         role: { type: 'string', required: true, description: '角色名、别名或 roleId' },
         task: { type: 'string', required: true, description: '任务内容' },
@@ -634,6 +636,17 @@ export function registerTools(ctx, deps) {
             roleId: result.role?.roleId ?? null,
             roleName: result.role?.name ?? null,
             isolation: result.isolation ?? null,
+            // P0-D：命中相同进行中任务 → taskRef 已是原值（原 childId / jobId），
+            // 只补 deduplicated 标记、当前状态与可选 deduplicatedFrom，不新建子任务。
+            ...(result.deduplicated === true
+              ? {
+                  deduplicated: true,
+                  ...(typeof result.status === 'string' ? { status: result.status } : {}),
+                  ...(result.deduplicatedFrom != null
+                    ? { deduplicatedFrom: result.deduplicatedFrom }
+                    : {}),
+                }
+              : {}),
           }
         }
         if (Array.isArray(effective.projectErrors) && effective.projectErrors.length > 0) {
