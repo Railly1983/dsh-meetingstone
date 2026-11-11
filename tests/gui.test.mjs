@@ -375,6 +375,11 @@ async function loadClientHarness(values = {}) {
         return () => {}
       },
     },
+    // 动态取名空间服务：生产代码用 ctx.get('remote.meetingstone')，不阻塞注册。
+    get(key) {
+      if (key === 'remote.meetingstone') return remote.meetingstone
+      return undefined
+    },
     remote,
     logger: { info() {}, warn() {} },
   }
@@ -405,8 +410,8 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
   assert.equal(typeof Component, 'function')
   assert.equal(options.label(), 'nav')
   assert.deepEqual(exports.inject, ['slots', 'locale', 'remote'])
-  // 动态注入：mount 后必须声明命名空间服务 `remote.meetingstone` 才读取。
-  assert.deepEqual(injectCalls, [['remote.meetingstone']])
+  // 0.1.0-alpha 真机事故回归：注册必须**立即**发生，不能等 ctx.inject 回调。
+  assert.deepEqual(injectCalls, [], '不应把注册阻塞在 ctx.inject 回调里')
   assert.equal(exports.__test.REMOTE_INJECT, 'remote.meetingstone')
 
   assert.equal(mounted.length, 1)
@@ -631,14 +636,16 @@ test('Browser half：remote 方法失败时（ok!==true）loader 抛错而非伪
   )
 })
 
-test('client 源文件：无占位数据，且命名空间读取走动态注入', async () => {
+test('client 源文件：无占位数据，且命名空间读取走 ctx.get 惰性获取', async () => {
   const source = await readFile(join(root, 'src/client/index.js'), 'utf8')
   assert.doesNotMatch(source, /SNAPSHOT/, '不应保留占位 SNAPSHOT')
   assert.doesNotMatch(source, /占位数据/, '不应保留占位文案')
   // 修复前的裸访问（父 fiber 未声明 remote.meetingstone）必须消失。
   assert.doesNotMatch(source, /ctx\.remote\[REMOTE_SERVICE\]\.list\(\)/)
-  assert.match(source, /ctx\.inject\(\[REMOTE_INJECT\]/, '必须在 mount 后动态注入命名空间服务')
-  assert.match(source, /service\.list\(\)/, '数据读取应发生在就绪子 ctx 捕获的服务上')
+  // 0.1.0-alpha 回归：不能把注册阻塞在 ctx.inject 回调里（会导致整块 UI 消失）。
+  assert.doesNotMatch(source, /ctx\.inject\(\[REMOTE_INJECT\]/, '不得把注册阻塞在 ctx.inject 回调')
+  assert.match(source, /ctx\.get\(/, '命名空间服务应通过 ctx.get 惰性获取')
+  assert.match(source, /service\.list\(\)/, '数据读取应发生在惰性解析出的服务上')
 })
 
 // 递归收集 JSX 树中的文本节点。

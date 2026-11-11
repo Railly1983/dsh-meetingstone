@@ -20,6 +20,9 @@ V1 范围冻结（docs/V1-SCOPE.md）：四个工作包 + 不做清单。
 - 上下文重放上限 16 KiB
 - 模型由角色定义决定，设置页不再展示默认模型/通道模型
 
+### Fixed
+- 设置页与对话顶部集合石入口不显示：slot 注册不再阻塞在 `ctx.inject(['remote.meetingstone'])` 回调里，改为立即注册 + `ctx.get()` 惰性取服务
+
 ### Known limitations
 - 自动路由、效率账本为实验/开发工具，不属于 V1 卖点
 - Subagents 面板 Token 为累计值（含 fork 继承），不可用于成本/额度

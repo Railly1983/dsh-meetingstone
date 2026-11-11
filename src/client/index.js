@@ -742,12 +742,20 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 数据加载器。`service` 必须是已就绪的 `remote.meetingstone` 命名空间服务；
-     * 由调用方保证「可用后才注册」，这里不再做未声明注入的裸访问。
-     * @param {any} service
+     * 数据加载器。`serviceOrGet` 可以是服务实例，也可以是返回服务的函数。
+     *
+     * 真机教训（0.1.0-alpha）：把 `slot` 注册整段放进 `ctx.inject(['remote.meetingstone'], cb)`
+     * 会导致 cb 永不执行时「设置页与顶部入口都不出现」——命名空间服务由 $mount 在子 fiber
+     * provide，父 fiber 的 inject 不保证被唤醒。改为：注册永远立即发生，读取服务时用
+     * `ctx.get()` 动态取；取不到就返回 unavailable 快照，页面仍可见并解释原因。
+     * @param {any | (() => any | null)} serviceOrGet
      */
-    function makeLoader(service) {
+    function makeLoader(serviceOrGet) {
       return async () => {
+        const service = typeof serviceOrGet === 'function' ? serviceOrGet() : serviceOrGet
+        if (!service || typeof service.list !== 'function') {
+          return unavailableSnapshot('REMOTE_UNAVAILABLE', 'remote.meetingstone 尚未就绪')
+        }
         const result = await service.list()
         if (!result || result.ok !== true) {
           const failure = result && result.error ? result.error : {}
@@ -960,6 +968,26 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /**
+     * 惰性服务代理：render 时 `remote.meetingstone` 可能还没就绪，
+     * 每次方法调用时再取；取不到抛可诊断错误（由 UI 显示"读取失败"）。
+     * @param {() => any | null} getService
+     */
+    function lazyRemoteService(getService) {
+      const call = (/** @type {string} */ name) => (...args) => {
+        const service = getService()
+        if (!service || typeof service[name] !== 'function') {
+          throw new Error('REMOTE_UNAVAILABLE: remote.meetingstone 尚未就绪')
+        }
+        return service[name](...args)
+      }
+      return {
+        getSessionConfig: call('getSessionConfig'),
+        setSessionOverride: call('setSessionOverride'),
+        clearSessionOverride: call('clearSessionOverride'),
+      }
+    }
+
     /** 右侧栏「当前会话角色」面板：拉取视图 → 渲染角色覆盖卡 → 写回。 */
     function SidebarRolePane({ t, sessionId, service }) {
       const [state, setState] = react.useState({ status: 'loading' })
@@ -1063,10 +1091,10 @@ window.__ModuleLoader__.load({
      * 两步式注册右侧栏 tab：先 `sidebarRightTabs.register` 注册 tab，再注册两个
      * keyed seat（内容 + 标题，scope session）。
      * @param {any} slotCtx
-     * @param {any} service
+     * @param {() => any | null} getService 动态取 remote.meetingstone（可能尚未就绪）
      * @param {(key: string) => string} t
      */
-    function registerSidebarTab(slotCtx, service, t) {
+    function registerSidebarTab(slotCtx, getService, t) {
       // 1) tab 本体
       if (typeof slotCtx.sidebarRightTabs?.register === 'function') {
         slotCtx.sidebarRightTabs.register({
@@ -1083,7 +1111,11 @@ window.__ModuleLoader__.load({
             name: 'sidebar.right.pane.tab',
             id: TAB_ID,
             locale: NS,
-            inject: (/** @type {string} */ sessionId) => ({ sessionId, service, t }),
+            inject: (/** @type {string} */ sessionId) => ({
+              sessionId,
+              service: lazyRemoteService(getService),
+              t,
+            }),
           },
           SidebarRolePane,
         ),
@@ -1102,16 +1134,13 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 挂载 section。inject 与 register 形状对齐官方 settings-plugins。
+     * 挂载 section。注册与 `remote.meetingstone` 的就绪**解耦**：
      *
-     * 顺序是硬要求（Cordis 4.1.0 的 inject 语义）：
-     *   1. 先用模块级 `inject: ['remote']` 挂载贡献 → 命名空间服务 `remote.meetingstone`
-     *      在独立子 fiber 中 provide（api-gateway client.browser.js:1773-1785,1961,2074）；
-     *   2. 再用 `ctx.inject(['remote.meetingstone'], cb)` 动态声明依赖：Cordis 会等该服务
-     *      就绪后才执行 cb（registry.ts:300-302、fiber.ts:603-628）。cb 内读
-     *      `ctx.remote.meetingstone` 才是合法的已声明访问；
-     *   3. section 的 slot 注册与数据读取都放在 cb 里，服务不可用就不会裸访问/抛错。
-     * 挂载失败时仍注册 section，但 loader 返回 unavailable 快照，页面可见且解释原因。
+     * 0.1.0-alpha 真机事故：把 slot 注册放进 `ctx.inject(['remote.meetingstone'], cb)`，
+     * 该服务由 $mount 在子 fiber provide，父 fiber 的注入回调并不保证被唤醒；
+     * 结果是设置页与对话顶部入口**都不出现**（用户看到的就是这个）。
+     * 现在：$mount 之后立即注册 section / header / sidebar，服务读取走 `ctx.get()` 惰性获取；
+     * 取不到时显示 unavailable 快照，而不是让整个 UI 消失。
      */
     async function apply(ctx) {
       const t = ctx.locale.bind(NS)
@@ -1129,12 +1158,20 @@ window.__ModuleLoader__.load({
       // $mount 返回卸载函数；绑定到本插件 effect，卸载/重载时回收命名空间服务。
       ctx.effect(() => () => unmount(), 'meetingstone: remote contribution')
 
-      ctx.inject([REMOTE_INJECT], (readyCtx) => {
-        const service = readyCtx.remote[REMOTE_SERVICE]
-        registerSection(readyCtx, makeLoader(service), t)
-        registerHeaderAction(readyCtx, service, t)
-        registerSidebarTab(readyCtx, service, t)
-      })
+      // 动态取名空间服务：不在 fiber.inject 里声明（会阻塞注册），用官方 ctx.get()。
+      const getService = () => {
+        try {
+          const key = Array.isArray(REMOTE_INJECT) ? REMOTE_INJECT[0] : REMOTE_INJECT
+          const fromGet = typeof ctx.get === 'function' ? ctx.get(key) : undefined
+          return fromGet ?? null
+        } catch {
+          return null
+        }
+      }
+
+      registerSection(ctx, makeLoader(getService), t)
+      registerHeaderAction(ctx, getService, t)
+      registerSidebarTab(ctx, getService, t)
     }
 
     exports.apply = apply
