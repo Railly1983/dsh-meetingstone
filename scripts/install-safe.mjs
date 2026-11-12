@@ -1,15 +1,20 @@
 #!/usr/bin/env node
 /**
- * 安全安装：Canary 启动验证 → 安装到 desktop → 重启 → 崩溃自动回滚。
+ * 安全安装：Canary 启动验证 → 安装到 desktop → 由独立 watcher 重启并验收（崩溃自动回滚）。
  *
  * 用法：
- *   node scripts/install-safe.mjs --tgz C:\...\dsh-meetingstone-0.1.0-alpha.tgz
+ *   node scripts/install-safe.mjs --tgz C:\...\dsh-meetingstone-0.1.0-alpha.2.tgz
  *   node scripts/install-safe.mjs --tgz <new.tgz> --previous <old.tgz>
  *
- * 退出码：0 成功；1 Canary 失败（未安装）；2 安装后启动崩溃并已回滚；3 安装/重启流程错误。
+ * 退出码：0 已安装并交由 watcher 重启验收；1 Canary 失败（未安装）；3 安装/启动 watcher 失败。
+ *
+ * 为什么重启放在独立 watcher：
+ *   本进程是 DSH 的子进程，直接重启 DSH 会把自己一起杀掉，无法再做崩溃检测与回滚。
+ *   watcher 通过 WMI 的 Win32_Process.Create 启动，脱离 DSH 进程树。
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, readdirSync, statSync } from 'node:fs'
+import { readdirSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const args = process.argv.slice(2)
@@ -29,7 +34,13 @@ const tgz = opt('tgz')
 const previous = opt('previous')
 const skipRestart = args.includes('--no-restart')
 
-if (!tgz || !existsSync(tgz)) {
+if (!tgz) {
+  console.error('install-safe: --tgz <path> is required')
+  process.exit(1)
+}
+try {
+  statSync(tgz)
+} catch {
   console.error(`install-safe: tgz not found: ${tgz}`)
   process.exit(1)
 }
@@ -48,18 +59,6 @@ function install(target) {
   const remove = sh(`"${DSH}" plugin --profile desktop remove dsh-meetingstone`)
   const add = sh(`"${DSH}" plugin --profile desktop add "${target}"`)
   return { remove, add }
-}
-
-function latestCrashTime() {
-  const dir = join(process.env.APPDATA ?? '', '@deepseek-ai', 'dsh-desktop', 'logs')
-  try {
-    const files = readdirSync(dir)
-      .filter((name) => name.startsWith('crash-') && name.endsWith('.log'))
-      .map((name) => statSync(join(dir, name)).mtimeMs)
-    return files.length ? Math.max(...files) : 0
-  } catch {
-    return 0
-  }
 }
 
 // 1) Canary
@@ -88,51 +87,57 @@ if (result.add.status !== 0) {
 console.log('installed.')
 
 if (skipRestart) {
-  console.log('install-safe: --no-restart, done.')
+  console.log('install-safe: --no-restart, done. Restart manually to verify.')
   process.exit(0)
 }
 
-// 3) 重启并观察崩溃日志
-console.log('[3/3] restart and watch for crash …')
-sh(
-  'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "D:/MeetingStone/scripts/restart-dsh.ps1"',
-  60000,
-)
-const deadline = Date.now() + 40000
-let crashed = false
-while (Date.now() < deadline) {
-  await new Promise((resolve) => setTimeout(resolve, 1000))
-  if (latestCrashTime() > startedAt) {
-    crashed = true
-    break
-  }
-}
-
+// 3) 独立 watcher 重启并验收
 const fallback =
   previous ??
   readdirSync(PACKAGES)
     .filter((name) => name.endsWith('.tgz') && join(PACKAGES, name) !== tgz)
     .sort()
     .pop()
-
-if (!crashed) {
-  console.log('PASS install-safe: booted without new crash log')
-  process.exit(0)
-}
-
-console.error('FAIL install-safe: crash log appeared after install; rolling back …')
 if (!fallback) {
-  console.error('No previous tgz found; manual rollback required.')
-  process.exit(2)
+  console.error('install-safe: no previous tgz for rollback; refusing auto-restart.')
+  process.exit(3)
 }
-const rollback = install(join(PACKAGES, fallback))
-if (rollback.add.status !== 0) {
-  console.error(`Rollback failed; reinstall manually: ${fallback}`)
-  process.exit(2)
-}
-sh(
-  'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "D:/MeetingStone/scripts/restart-dsh.ps1"',
+
+const resultFile = join(tmpdir(), `ms-install-safe-${Date.now()}.result`)
+const watcherArgs = [
+  '-NoProfile',
+  '-WindowStyle',
+  'Hidden',
+  '-ExecutionPolicy',
+  'Bypass',
+  '-File',
+  '"D:/MeetingStone/scripts/post-install-watch.ps1"',
+  '-NewTgz',
+  `"${tgz}"`,
+  '-PrevTgz',
+  `"${join(PACKAGES, fallback)}"`,
+  '-StartMs',
+  String(startedAt),
+  '-ResultFile',
+  `"${resultFile}"`,
+].join(' ')
+
+const wmiCommand =
+  'powershell.exe ' +
+  watcherArgs.replace(/'/g, "''") +
+  ''
+const outer = `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='${wmiCommand}'} | Out-Null`
+const spawned = sh(
+  `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "${outer}"`,
   60000,
 )
-console.error(`install-safe: rolled back to ${fallback}`)
-process.exit(2)
+if (spawned.status !== 0) {
+  console.error('install-safe: failed to start detached watcher')
+  console.error((spawned.stderr || spawned.stdout).split('\n').slice(-6).join('\n'))
+  process.exit(3)
+}
+
+console.log('[3/3] detached watcher will restart DSH and verify boot.')
+console.log(`install-safe: result file: ${resultFile}`)
+console.log(`install-safe: rollback target: ${join(PACKAGES, fallback)}`)
+process.exit(0)
