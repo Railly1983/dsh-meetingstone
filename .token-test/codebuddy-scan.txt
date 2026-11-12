@@ -1,0 +1,24 @@
+﻿e-4b18-b89c-cfa3e7f351a4   01a1cdbd req=  4 prompt=  128686 uncached=   60846 cached=   67840 out=  4751 hit= 52.7% span=61s   tools={} model=hy3
+    # 1 prompt=  25822 cached=    512 uncached=  25310 out= 2119
+    # 2 prompt=  33165 cached=      0 uncached=  33165 out= 1178
+    # 3 prompt=  34491 cached=  33024 uncached=   1467 out=  679
+    # 4 prompt=  35208 cached=  34304 uncached=    904 out=  775
+c-4cbf-9508-04328fa85804   01a1cdbd req=  5 prompt=  155773 uncached=   58557 cached=   97216 out=  2397 hit= 62.4% span=29s   tools={} model=hy3
+    # 1 prompt=  25955 cached=    512 uncached=  25443 out=  526
+    # 2 prompt=  31723 cached=      0 uncached=  31723 out=  728
+    # 3 prompt=  32477 cached=  31616 uncached=    861 out=   96
+    # 4 prompt=  32602 cached=  32384 uncached=    218 out=  350
+    # 5 prompt=  33016 cached=  32704 uncached=    312 out=  697
+5-44f3-92b0-aee2514aaf76   01a1cdbc req=  2 prompt=   56516 uncached=   27716 cached=   28800 out=  3544 hit= 51.0% span=22s   tools={} model=deepseek-v4.1-flash
+    # 1 prompt=  25526 cached=   3328 uncached=  22198 out=   79
+    # 2 prompt=  30990 cached=  25472 uncached=   5518 out= 3465
+6-43f3-9e4e-2ada11fd5153   01a1cdbc req=  3 prompt=   89817 uncached=   29913 cached=   59904 out=  4171 hit= 66.7% span=21s   tools={} model=deepseek-v4.1-flash
+    # 1 prompt=  25660 cached=   3328 uncached=  22332 out=  568
+    # 2 prompt=  30430 cached=  26112 uncached=   4318 out=   96
+    # 3 prompt=  33727 cached=  30464 uncached=   3263 out= 3507
+8-4c71-9b3e-7e2b9e59b171   01a1cdbb req=  2 prompt=   54780 uncached=   25596 cached=   29184 out=  2841 hit= 53.3% span=15s   tools={} model=deepseek-v4.1-flash
+    # 1 prompt=  25596 cached=   3328 uncached=  22268 out=  387
+    # 2 prompt=  29184 cached=  25856 uncached=   3328 out= 2454
+1-4c0c-96e2-376b8670eebf   01a1cdbb req=  2 prompt=   55473 uncached=   26545 cached=   28928 out=  2331 hit= 52.1% span=14s   tools={} model=deepseek-v4.1-flash
+    # 1 prompt=  25587 cached=   3328 uncached=  22259 out=   97
+    # 2 prompt=  29886 cached=  25600 uncached=   4286 out= 2234
