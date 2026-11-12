@@ -1,6 +1,6 @@
 {
   "name": "dsh-meetingstone",
-  "version": "0.1.0-alpha",
+  "version": "0.1.0-alpha.2",
   "description": "A lightweight cross-CLI agent role and dispatch plugin for DeepSeek Harness.",
   "type": "module",
   "main": "src/index.js",
@@ -27,7 +27,9 @@
     "check:package": "node scripts/verify-package.mjs",
     "release:check": "node scripts/release-check.mjs",
     "acceptance": "node scripts/acceptance-windows.mjs",
-    "verify": "node scripts/run-tests.mjs && node scripts/verify-host-schema.mjs && node scripts/verify-manifest.mjs && node scripts/verify-package.mjs"
+    "verify": "node scripts/run-tests.mjs && node scripts/verify-host-schema.mjs && node scripts/verify-manifest.mjs && node scripts/verify-package.mjs",
+    "boot:canary": "node scripts/boot-canary.mjs",
+    "install:safe": "node scripts/install-safe.mjs"
   },
   "dsh": {
     "bundle": {

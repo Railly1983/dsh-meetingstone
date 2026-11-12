@@ -42,8 +42,28 @@ window.__ModuleLoader__.load({
     var exports = module.exports
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
 
-    let jsxRuntime = require('react/jsx-runtime')
-    let react = require('react')
+
+    /** 顶层 require 失败也不能让入口激活失败（宿主按 entry 判死）。 */
+    function safeRequire(name, fallback) {
+      try {
+        return require(name)
+      } catch (error) {
+        try {
+          console.error('[meetingstone] client require failed:', name, error)
+        } catch {}
+        return fallback
+      }
+    }
+
+    let jsxRuntime = safeRequire('react/jsx-runtime', { jsx: () => null, jsxs: () => null })
+    let react = safeRequire('react', {
+      createElement: () => null,
+      useState: (value) => [value, () => {}],
+      useEffect: () => {},
+      useMemo: (factory) => factory(),
+      useCallback: (fn) => fn,
+      useRef: () => ({ current: null }),
+    })
     let jsx = jsxRuntime.jsx
     let jsxs = jsxRuntime.jsxs
 
@@ -3037,6 +3057,16 @@ window.__ModuleLoader__.load({
      * 拖垮宿主启动。日志不记录任何凭证（只记 error message 与 stack）。
      */
     async function apply(ctx) {
+      try {
+        await applyGuarded(ctx)
+      } catch (error) {
+        try {
+          console.error('[meetingstone] GUI apply failed (swallowed to protect boot):', error)
+        } catch {}
+      }
+    }
+
+    async function applyGuarded(ctx) {
       const t = ctx.locale.bind(NS)
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'meetingstone: section dictionaries')
 
