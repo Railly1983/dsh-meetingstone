@@ -289,17 +289,44 @@ function callOnFinish(holder) {
  * @param {string} args.childId
  * @param {number} args.startedAt
  */
-function buildRunBase({ input, role, provider, childId, startedAt }) {
+export function buildRunBase({ input, role, provider, childId, startedAt }) {
   // P0-B：TaskSpec / ContextPack 摘要（截断后落盘，供 list_runs / get_task 展示标题）
   const taskSpec = summarizeTaskSpec(input?.taskSpec)
   const contextPack = summarizeContextPack(input?.contextPack)
+  // 生效模型：**必须同时看 model 和 llmModel**（2026-11-12 路由矩阵缺口 2）。
+  //
+  // 历史实现只读 `role.channel.model`，但 in-process 通道的模型声明在 `llmModel`
+  // （见 src/config.js 的 ChannelInstanceSchema 与 buildChildAgentOptions 的注释）。
+  // 后果：八戒（ch-inprocess）的 run 记录里 model 恒为 null，
+  // **路由证据无法闭环** —— 明明派单时确实钉了 workbuddy/deepseek-v4.1-flash，
+  // 记录里却看不到，只能靠静态推断。
+  const channel = role?.channel
+  const effectiveModel =
+    (typeof channel?.llmModel === 'string' && channel.llmModel.trim()
+      ? channel.llmModel.trim()
+      : null) ??
+    (typeof channel?.model === 'string' && channel.model.trim() ? channel.model.trim() : null)
+  // 生效 provider：in-process 用 llmProvider（宿主 LLM provider），外部 CLI 用 provider。
+  // 两者语义不同：前者是「跑哪个模型的网关」，后者是「用哪个子进程协议」。
+  const effectiveLlmProvider =
+    typeof channel?.llmProvider === 'string' && channel.llmProvider.trim()
+      ? channel.llmProvider.trim()
+      : null
+  const effectiveReasoning =
+    typeof channel?.reasoning === 'string' && channel.reasoning.trim()
+      ? channel.reasoning.trim()
+      : null
   return {
     childId,
     projectRoot: typeof input?.context?.projectRoot === 'string' ? input.context.projectRoot : null,
     role: role?.roleId ?? null,
     channel: role?.channel?.kind ?? null,
     provider,
-    model: role?.channel?.model ?? null,
+    model: effectiveModel,
+    // 路由证据闭环（2026-11-12）：把「跑在哪个 LLM 网关」和「思考强度」也落盘。
+    // 此前它们只在内存里，run 记录看不到 → 路由矩阵只能静态证明，无法动态验证。
+    ...(effectiveLlmProvider ? { llmProvider: effectiveLlmProvider } : {}),
+    ...(effectiveReasoning ? { reasoning: effectiveReasoning } : {}),
     status: 'running',
     createdAt: startedAt,
     startedAt,
