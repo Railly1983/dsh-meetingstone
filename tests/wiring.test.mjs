@@ -223,17 +223,23 @@ test('list_roles 按当前会话项目根读取 .meetingstone.json（项目角�
     assert.equal(globalOnly.roles.length, 2)
     assert.equal(globalOnly.projectScoped, true, '注入了 resolveRegistry 就应标记为项目域可用')
 
-    // 给出会话项目根 → 项目角色出现，且全局角色的字段被覆盖
+    // B3b（2026-11-12 用户决定）：角色只有全局一层。
+    // 项目 `.meetingstone.json` 里的 roles/roleOverrides 不再参与角色合并
+    // （曾经会把界面改过的全局角色覆盖回旧值，表现为「改了不生效」）。
     const exec = { agent: { session: { header: { cwd: dir } } } }
     const scoped = await listTool.execute({}, exec)
     const ids = scoped.roles.map((r) => r.roleId).sort()
-    assert.deepEqual(ids, ['role-reviewer', 'role-sashi', 'role-scout'], '项目新增角色应出现')
+    assert.deepEqual(ids, ['role-reviewer', 'role-sashi'], '项目文件里的角色不应再出现')
 
     const sashi = scoped.roles.find((r) => r.roleId === 'role-sashi')
     assert.equal(sashi.setting, undefined, '默认紧凑视图不返回角色设定')
     const verbose = await listTool.execute({ verbose: true }, exec)
     const sashiVerbose = verbose.roles.find((r) => r.roleId === 'role-sashi')
-    assert.equal(sashiVerbose.setting, '项目内改为复核', 'verbose:true 才返回项目覆盖后的设定')
+    assert.notEqual(
+      sashiVerbose.setting,
+      '项目内改为复核',
+      '项目 roleOverrides 不应再覆盖全局设定',
+    )
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

@@ -26,12 +26,9 @@ import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import { createNodeProjectConfigStore } from './project/load.js'
 import { resolveEffectiveConfig } from './session/config.js'
-import { createNodeSessionOverrideStore } from './session/store.js'
 import { createRunStore } from './run-store.js'
 import { createWorktreeManager } from './worktree.js'
-import { createGuiState, registerGuiRemote, roleView, channelDetailView } from './gui/host.js'
-import { createSessionGuiApi } from './gui/session.js'
-import { createSessionRootResolver } from './gui/session-root.js'
+import { createGuiState, registerGuiRemote } from './gui/host.js'
 
 /**
  * 宿主运行时把 `@deepseek-ai/dsh-tools` 作为 shared package 提供。
@@ -102,37 +99,8 @@ export function apply(ctx, config = {}) {
     else console.warn(line)
   }
 
-  // 角色来源：全局配置 + 当前项目根的 `.meetingstone.json` + 当前会话覆盖
-  // （`.meetingstone/sessions/<sessionId>.json`，按 mtime 缓存项目文件）。
+  // 角色来源（B3）：全局配置 + 项目根 `.meetingstone.json`；会话级覆盖已整体下线。
   const projectStore = createNodeProjectConfigStore()
-  const sessionStore = createNodeSessionOverrideStore()
-
-  /**
-   * sessionId → 项目根 映射。派单/工具执行时由 `resolveRegistry` 记录，作为
-   * 官方 live Session/Agent 查询的兜底（新会话未派单时由 `ctx.sessions.get()`
-   * 的 `header.cwd` 直接解析，见 src/gui/session-root.js）。
-   * @type {Map<string, string>}
-   */
-  const sessionRoots = new Map()
-
-  /**
-   * 会话级配置 GUI 的 Host 逻辑（get/set/clear）。传输层 strict 定义在
-   * `src/gui/host.js` 注册；本对象只做继承解析、白名单校验与落盘。
-   */
-  const sessionGuiApi = createSessionGuiApi({
-    cfg,
-    globalRaw: config,
-    projectStore,
-    sessionStore,
-    resolveProjectRoot: createSessionRootResolver({
-      ctx,
-      fallback: (sessionId) => sessionRoots.get(sessionId) ?? null,
-    }),
-    // 详情页选项只来自真实通道表；不另建模型注册表。
-    channels: (cfg.channels ?? []).map(channelDetailView),
-    // 三色/就绪/额度与设置页同源（deriveRoleView）。
-    roleState: (role, sources) => roleView(role, ctx, sources),
-  })
 
   /** @type {import('./roles/registry.js').RoleRegistry} */
   const globalRegistry = createRegistry({ globalRoles: cfg.roles ?? [] })
@@ -231,28 +199,19 @@ export function apply(ctx, config = {}) {
   async function resolveRegistry(exec) {
     const projectRoot = exec?.agent?.session?.header?.cwd
     const sessionId = exec?.agent?.session?.id
-    // 记录 sessionId → 项目根，供右侧栏远程方法定位会话配置。
-    if (typeof projectRoot === 'string' && projectRoot && typeof sessionId === 'string' && sessionId) {
-      sessionRoots.set(sessionId, projectRoot)
-    }
+    // B3b：角色只有全局一层。项目 `.meetingstone.json` 不再参与角色合并
+    // （曾经会把界面里改过的全局角色覆盖回旧值，表现为「改了不生效」）。
+    // 项目文件仍承载 projectRules / dispatchNotes 等非角色配置。
     const loaded = projectStore.get(projectRoot, cfg.projectConfigFile)
-    // 没有会话 id 时不应用会话覆盖（宁可不生效，也不张冠李戴到别的会话）。
-    const sessionLoaded =
-      typeof sessionId === 'string' && sessionId
-        ? sessionStore.get(projectRoot, sessionId)
-        : { config: undefined, errors: [] }
     const resolved = resolveEffectiveConfig({
       global: cfg,
       globalRaw: config,
-      project: loaded.config,
-      session: sessionLoaded.config,
     })
     // 生效角色表已经合并完毕；注册表只负责解析与别名冲突判定。
     const registry = createRegistry({ globalRoles: resolved.effective.roles })
-    // 项目文件解析错误 + 会话文件错误 + 继承/覆盖错误 + 注册表语义错误
+    // 项目文件解析错误 + 继承/覆盖错误 + 注册表语义错误
     const projectErrors = [
       ...(loaded.errors ?? []),
-      ...(sessionLoaded.errors ?? []),
       ...(resolved.errors ?? []),
       ...(registry.errors ?? []),
     ]
@@ -261,7 +220,7 @@ export function apply(ctx, config = {}) {
     return {
       registry,
       projectErrors,
-      // P1-B：自动路由的兜底角色按「全局 → 项目 → 会话」继承；规则表只来自插件全局配置。
+      // P1-B：自动路由的兜底角色按「全局 → 项目」继承；规则表只来自插件全局配置。
       defaultRoleId: resolved.effective.defaultRoleId ?? cfg.defaultRoleId,
       routingRules: Array.isArray(cfg.routingRules) ? cfg.routingRules : [],
       // 供后续 UI 显示“继承/覆盖”；工具当前不返回，避免扩大回执。
@@ -475,7 +434,6 @@ export function apply(ctx, config = {}) {
     // 跳过 strict 方法，不影响工具与派单（设置页会显示“读取失败”，不会假装有数据）。
     const guiRemote = registerGuiRemote(ctx, {
       snapshot: () => gui.fullSnapshot(),
-      sessionApi: sessionGuiApi,
       configApi,
     })
     const remoteStatus =
