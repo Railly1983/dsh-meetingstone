@@ -634,3 +634,65 @@ npm run verify               # exit 0（host-schema / manifest / package）
 - **真机未验证 Remote 的 7 个 descriptor**：新增 3 个 strict 方法已过真实
   `ctx.typert.register()` 单测，但真实 Gateway 往返仍待隔离 profile 验证；若出现
   `has no strict codec`，按 §8.4 的日志定位。
+
+## 11. B1 修复：设置页内联全局角色管理（2026-11-12，task-6）
+
+> 对应 PDF 第 1 条。B0（`docs/plan/2026-11-12-b0-native-roles.md`）判 **no-go**：
+> 原生 agent-preset 只服务 in-process、无「别名→CLI/模型/强度」路由层 → 继续用自建角色库。
+> 本节只做**入口 + 视图**，不改角色编辑器字段（CLI→模型→强度联动归 B2/task-7）。
+
+### 11.1 问题与根因
+
+- 现象：设置页区 2「管理角色」点了之后跳到**会话级**右侧栏角色面板。
+- 根因：`settings.section` 是 **root** slot（无 sessionId），旧实现 `openRoles`
+  → `openRolePanelOf` → `sidebarRight.openTab(TAB_KIND, { params: {} })`，而 tab 注册在
+  `sidebar.right.pane.tab`（**scope=session**，`inject(sessionId)`）；无 sessionId 时面板
+  只能显示会话视角，语义与入口不符。
+- 数据层并不缺：写路径 `updateGlobalRole` / `sanitizeRolePatch` 已就绪；
+  缺的是 `roleView` 的 `description/prompt/source` 投影 + 设置页内联全局视图。
+
+### 11.2 实现（入口 + 视图）
+
+1. **Host `roleView` 扩字段**（`src/gui/host.js`）：新增
+   `description`、`prompt`、`kind`、`sourceLayer`、`fieldSources`（键与
+   `src/session/config.js` 的 `sources.roles[].fields` 一致；未知→`default`，不猜）。
+   供设置页内联管理器读取/编辑，也供 B2 复用同一字段模型。
+2. **Client `normalizeSnapshot`**（`src/client/index.js`）：保留上述字段 +
+   `state`（三色派生）+ 嵌套 `channel`（`draftOfRole()` 直接可用）；`fieldSources` 按
+   三层枚举收窄。
+3. **设置页入口改为内联**：`settings.section` inject 删除 `openRoles`，新增
+   `updateGlobalRole`（走既有 strict Remote，不新建写 API）；区 2「管理角色」按钮
+   只切换本页 `managerOpen`，**不调用 `sidebarRight.openTab`、不离开设置页**。
+4. **新增 `renderGlobalRoleManager`**：设置页内联列表 ↔ 全局详情（标题带「全局」标识；
+   说明「写 profile、影响所有会话；会话覆盖请在右侧栏调整」）；保存复用
+   `buildGlobalPatch` + `saveGlobalPatch`（二次确认，一次 patch 写入）。
+5. **右侧栏只保留会话覆盖**：`SidebarRolePane` 移除 session/global scope 切换与
+   global 写分支（`showScope:false`），列表开关与详情保存都只写当前会话差异。
+   两个入口数据源不同：设置页 = 无参 `list()` 全局快照；右侧栏 = strict
+   `getSessionConfig(sessionId)` 三层生效视图。
+
+### 11.3 边界（不是遗漏）
+
+- **只能编辑现有全局角色**：写 API `updateGlobalRole` 只做 update
+  （`GLOBAL_CONFIG_ROLE_NOT_FOUND`），global writer **没有** create/delete 语义；
+  「新增/删除全局角色」需要新的写 API（未在 B1 新建，D1 前需单独立项裁决）。
+- 全局层仍不能「清空字段」：Prompt/名称留空视为无效输入（沿用 §10 边界）。
+- 会话覆盖入口仍只在右侧栏；全局视图不再提供会话覆盖，反之亦然。
+
+### 11.4 测试
+
+- `tests/gui.test.mjs`：设置页 inject 形状（无 `openRoles`、有 `updateGlobalRole`）、
+  内联管理器列表/详情渲染、**点击区 2 不产生 `openTab` 调用**、右侧栏无 scope 按钮。
+- `tests/gui-u2-u3.test.mjs`：`renderGlobalRoleManager` 列表/详情/空态、
+  `saveGlobalPatch` 一次写入 + 失败不 reload。
+- 结果：GUI 相关 45 项全过；全量 `npm test` 554 项（+3，0 fail；并发任务改动带来的
+  临时失败不属于本次改动）。
+
+### 11.5 未验证项
+
+- **真机渲染未验证**：未启动 DSH 桌面端、未改 profile、未重启；内联面板外观、
+  `aria-expanded` 行为、`select` 选项与真实 `updateGlobalRole` 网关往返均只做
+  stub/单测断言。
+- **多角色列表滚动/长文本**：未做真机长列表验证。
+- **B2 联动**：CLI→模型→强度联动、去「通道」措辞不在本节；字段模型已就绪，
+  由 task-7 接手。

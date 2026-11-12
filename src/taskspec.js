@@ -27,6 +27,7 @@ const STRUCTURED_FIELDS = Object.freeze([
   'roleHint',
   'outputBudget',
   'contextPack',
+  'artifactPolicy',
 ])
 
 /** 落盘摘要的单条上限（字符数，不是字节）。 */
@@ -231,6 +232,19 @@ export function validateTaskSpec(args) {
     }
   }
 
+  // artifactPolicy（C1 契约 §5 / C3）：只读/审计派单的落盘例外。
+  // "none" = 不落 full 产物、禁止写工作区；"runs" = 只允许写 .meetingstone/runs/。
+  // 缺省（不传）= 由记录层按 "runs" 处理，保持既有行为不变。
+  /** @type {'none' | 'runs' | null} */
+  let artifactPolicy = null
+  if (source.artifactPolicy !== undefined && source.artifactPolicy !== null) {
+    if (source.artifactPolicy !== 'none' && source.artifactPolicy !== 'runs') {
+      reject('artifactPolicy', '必须是 "none" | "runs"')
+    } else {
+      artifactPolicy = source.artifactPolicy
+    }
+  }
+
   // ContextPack：可选；只校验形状，不强制要求任何子字段
   let contextPack = null
   if (source.contextPack !== undefined && source.contextPack !== null) {
@@ -308,6 +322,7 @@ export function validateTaskSpec(args) {
       contextRefs,
       roleHint,
       outputBudget,
+      ...(artifactPolicy ? { artifactPolicy } : {}),
     },
     contextPack,
   }
@@ -350,6 +365,8 @@ export function renderTaskBrief(spec, contextPack) {
     for (const item of spec.contextRefs) lines.push(`- ${item}`)
   }
   if (spec.roleHint) lines.push(`roleHint: ${spec.roleHint}`)
+  // C1 §5：落盘策略进入简报，子 Agent 必须按它决定是否写产物文件。
+  if (spec.artifactPolicy) lines.push(`artifactPolicy: ${spec.artifactPolicy}`)
   // 保护字段（§8）：有就原样出现在简报里，不依赖自由文本描述。
   for (const key of ['permissions', 'permissionPreset', 'safetyPolicy']) {
     const value = spec[key]
@@ -449,6 +466,10 @@ export function summarizeTaskSpec(spec) {
     summary.permissionPreset = spec.permissionPreset
   }
   if (spec.safetyPolicy !== undefined && spec.safetyPolicy !== null) summary.safetyPolicy = spec.safetyPolicy
+  // artifactPolicy 是任务约束（C1 §5）：原样落盘，不随摘要丢失。
+  if (spec.artifactPolicy === 'none' || spec.artifactPolicy === 'runs') {
+    summary.artifactPolicy = spec.artifactPolicy
+  }
   return summary
 }
 

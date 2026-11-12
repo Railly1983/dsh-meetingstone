@@ -501,3 +501,102 @@ test('回写 overlap 不丢旧记录的 changedFilesTotal（截断记录被重�
     await rm(root, { recursive: true, force: true })
   }
 })
+
+// ─── C3：Runs 证据字段（taskId / artifactPolicy / upstreamChildId / durationMs） ──────
+
+test('C3：taskId / artifactPolicy / upstreamChildId / durationMs 落盘；旧记录读取兼容', async () => {
+  const root = await tempRoot()
+  try {
+    const store = createRunStore({ root })
+    await store.writeRun({
+      childId: ID,
+      status: 'completed',
+      startedAt: 1000,
+      finishedAt: 3500,
+      taskId: 'task-42',
+      artifactPolicy: 'runs',
+      upstreamChildId: 'prev-child',
+      result: 'PONG',
+    })
+    const record = await store.loadRun(ID)
+    assert.equal(record.taskId, 'task-42')
+    assert.equal(record.artifactPolicy, 'runs')
+    assert.equal(record.upstreamChildId, 'prev-child')
+    assert.equal(record.durationMs, 2500)
+
+    // 旧 schema 记录（没有新字段）仍可读：读取为 null/缺省，不抛错、不改写
+    const dir = join(root, RUNS_RELATIVE_DIR)
+    const legacyPath = join(dir, 'legacy-run.json')
+    await writeFile(
+      legacyPath,
+      JSON.stringify({ childId: 'legacy-run', status: 'completed', result: 'OLD', createdAt: 1 }),
+      'utf8',
+    )
+    const legacy = await store.loadRun('legacy-run')
+    // 旧记录没有这些字段：读取保持缺省（不伪造 null、更不回写）
+    assert.equal(legacy.taskId, undefined)
+    assert.equal(legacy.artifactPolicy, undefined)
+    assert.equal(legacy.upstreamChildId, undefined)
+    assert.equal(Object.hasOwn(legacy, 'durationMs'), false)
+    assert.equal(legacy.result, 'OLD')
+    const raw = JSON.parse(await readFile(legacyPath, 'utf8'))
+    assert.equal(Object.hasOwn(raw, 'taskId'), false, '读取旧记录不得回写新字段')
+
+    const listed = (await store.listRuns()).find((item) => item.childId === ID)
+    assert.equal(listed.taskId, 'task-42')
+    assert.equal(listed.artifactPolicy, 'runs')
+    assert.equal(listed.upstreamChildId, 'prev-child')
+    assert.equal(listed.durationMs, 2500)
+
+    const legacyListed = (await store.listRuns()).find((item) => item.childId === 'legacy-run')
+    assert.equal(legacyListed.taskId, null, '旧记录在 list_runs 中同样兼容')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('C3：只读派单（artifactPolicy=none）出现 artifacts → 标记违规，但不改任务状态', async () => {
+  const root = await tempRoot()
+  try {
+    const store = createRunStore({ root })
+    // artifactPolicy 缺省时可从 TaskSpec 摘要取得（权威来源）
+    await store.writeRun({
+      childId: 'readonly-run',
+      status: 'completed',
+      taskSpec: { title: '只读审计', artifactPolicy: 'none' },
+      artifacts: ['.meetingstone/runs/report.md'],
+      reportedArtifactPolicy: 'none',
+      result: '审计完成',
+    })
+    const record = await store.loadRun('readonly-run')
+    assert.equal(record.artifactPolicy, 'none', 'TaskSpec 的 artifactPolicy 是权威来源')
+    assert.equal(record.artifactPolicyViolation, true)
+    assert.equal(record.status, 'completed', '不得把契约违规伪装成失败')
+    assert.equal(record.reportedArtifactPolicy, 'none', '子 Agent 回显值单独落盘')
+
+    await store.writeRun({
+      childId: 'readonly-ok',
+      status: 'completed',
+      artifactPolicy: 'none',
+      result: '无产物',
+    })
+    const ok = await store.loadRun('readonly-ok')
+    assert.equal(ok.artifactPolicy, 'none')
+    assert.equal(Object.hasOwn(ok, 'artifactPolicyViolation'), false, '无违规时不写标记')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('C3：taskId 非法类型忽略、超长截断到 200 字符', async () => {
+  const root = await tempRoot()
+  try {
+    const store = createRunStore({ root })
+    await store.writeRun({ childId: 'bad-task', status: 'completed', taskId: 42 })
+    assert.equal((await store.loadRun('bad-task')).taskId, null)
+    await store.writeRun({ childId: 'long-task', status: 'completed', taskId: 'x'.repeat(500) })
+    assert.equal((await store.loadRun('long-task')).taskId.length, 200)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

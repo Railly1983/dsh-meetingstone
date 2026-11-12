@@ -101,7 +101,9 @@ test('updateRole / setRoleEnabled：字段级合并，保留未知字段，不�
   assert.equal(roleA.channel.kind, 'codex', 'channel 按字段合并')
   assert.equal(roleA.channel.futureChannel, true, 'channel 未知字段保留')
   assert.equal(roleA.futureRoleField, 'keep', '角色未知字段保留')
-  assert.equal(roleA.description, '新描述')
+  // B2：description 是迁移入口，写入统一落到 setting
+  assert.equal(roleA.setting, '新描述')
+  assert.equal(roleA.description, undefined, '不再持久化旧字段')
   assert.equal(editor.current.roles[1].name, 'B', '其他角色不变')
   assert.equal(editor.current.unknownTop, 'keep')
 

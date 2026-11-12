@@ -30,6 +30,7 @@
 import { createRequire } from 'node:module'
 import { roleAvailability } from '../dsh/register.js'
 import { deriveRoleView } from './state-model.js'
+import { buildCliCapabilities } from '../roles/capabilities.js'
 import { CLI_SPECS } from '../cli/probe.js'
 import { deriveCliState } from '../cli/preferences.js'
 import { createSessionRemoteHandlers } from './session-remote.js'
@@ -42,6 +43,24 @@ export const GUI_REMOTE_SERVICE = 'meetingstone'
 
 /** `@deepseek-ai/dsh-typert-protocol/remote-methods` 的版本。 */
 const REMOTE_METHOD_DESCRIPTOR_VERSION = 1
+
+/**
+ * 角色字段来源键（与 `src/session/config.js` 的 `sources.roles[].fields` 键一致）。
+ * B1：设置页内联全局角色管理按字段展示来源；未知/缺失一律 default，不猜。
+ */
+const ROLE_SOURCE_FIELDS = Object.freeze([
+  'name',
+  'aliases',
+  'description',
+  'prompt',
+  'enabled',
+  'channel.channelId',
+  'channel.kind',
+  'channel.provider',
+  'channel.cli',
+  'channel.model',
+  'channel.reasoning',
+])
 
 /**
  * 本插件暴露的全部 Remote 方法（SRC marker 与 strict 定义共用）。
@@ -141,10 +160,40 @@ export function roleView(role, ctx, sources = null) {
     availability: roleAvailability(role, ctx),
     sources,
   })
+  const roleId = typeof role?.roleId === 'string' ? role.roleId : ''
+  const sourceEntry =
+    sources && typeof sources === 'object' && sources.roles && typeof sources.roles === 'object'
+      ? sources.roles[roleId]
+      : null
+  const rawFields =
+    sourceEntry && typeof sourceEntry === 'object' && sourceEntry.fields && typeof sourceEntry.fields === 'object'
+      ? sourceEntry.fields
+      : {}
+  /** 字段级来源（B1：设置页全局角色管理展示用；未知一律 default，不猜）。 */
+  const fieldSources = {}
+  for (const field of ROLE_SOURCE_FIELDS) {
+    const value = rawFields[field]
+    fieldSources[field] = value === 'global' || value === 'project' || value === 'session' ? value : 'default'
+  }
+  const sourceLayer = sourceEntry && typeof sourceEntry === 'object' && typeof sourceEntry.layer === 'string'
+    ? sourceEntry.layer
+    : 'default'
   return {
-    roleId: typeof role?.roleId === 'string' ? role.roleId : '',
+    roleId,
     name: typeof role?.name === 'string' ? role.name : '',
     aliases: Array.isArray(role?.aliases) ? role.aliases.map(String) : [],
+    // B1：设置页「全局角色管理」内联编辑要读到这些字段（之前只投影展示/通道字段）。
+    // B2：description+prompt 已合并为单一 setting；旧字段保留为兼容镜像。
+    setting:
+      typeof role?.setting === 'string'
+        ? role.setting
+        : typeof role?.prompt === 'string' && role.prompt
+          ? role.prompt
+          : typeof role?.description === 'string'
+            ? role.description
+            : '',
+    description: typeof role?.description === 'string' ? role.description : '',
+    prompt: typeof role?.prompt === 'string' ? role.prompt : '',
     enabled: role?.enabled !== false,
     userPreference: state.userPreference,
     readiness: state.readiness,
@@ -154,9 +203,12 @@ export function roleView(role, ctx, sources = null) {
     availability: state.availability,
     // 角色引用的通道：设置页「默认模型」用它把默认角色解析到模型。
     channelId: typeof channel?.channelId === 'string' ? channel.channelId : '',
+    kind: typeof channel?.kind === 'string' ? channel.kind : '',
     provider: typeof channel?.provider === 'string' ? channel.provider : '',
     model: typeof channel?.model === 'string' ? channel.model : '',
     reasoning: typeof channel?.reasoning === 'string' ? channel.reasoning : '',
+    sourceLayer,
+    fieldSources,
   }
 }
 
@@ -368,6 +420,8 @@ export function createGuiState({
           : '.meetingstone.json',
       limits: limitsView(source.limits),
       channels: Array.isArray(channels) ? channels.map(channelDetailView) : [],
+      // B2：角色编辑器只需「CLI → 模型 → 强度」；能力只来自已配置组合（不伪造）
+      capabilities: buildCliCapabilities(Array.isArray(channels) ? channels : []),
       cli: usingStates ? states.map(cliStateView) : Array.isArray(cli) ? cli.map(cliView) : null,
       // 只有新路径才追加，旧快照的 deepEqual 契约保持不变。
       ...(usingStates

@@ -312,18 +312,11 @@ function matchRoleForRule(rule, candidates) {
     }
   }
   for (const role of candidates) {
-    const description = roleToken(role.description)
-    if (!description) continue
-    const hit = keywords.find((keyword) => tokenContains(description, keyword))
-    if (hit) return { role, how: `角色描述含「${hit}」` }
-  }
-  // 最后才看人设：老配置里职责说明可能很泛（如「什么都会干」），具体能力写在 prompt 里。
-  // 这是弱信号兜底，只在标识/别名/描述都没命中时使用。
-  for (const role of candidates) {
-    const prompt = roleToken(role.prompt)
-    if (!prompt) continue
-    const hit = keywords.find((keyword) => tokenContains(prompt, keyword))
-    if (hit) return { role, how: `角色人设含「${hit}」` }
+    // B2：description 与 prompt 已合并为单一「角色设定」；旧字段作为兜底读取。
+    const setting = roleToken(role.setting || role.prompt || role.description)
+    if (!setting) continue
+    const hit = keywords.find((keyword) => tokenContains(setting, keyword))
+    if (hit) return { role, how: `角色设定含「${hit}」` }
   }
   return null
 }

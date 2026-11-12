@@ -441,7 +441,10 @@ test('meetingstone_list_roles：默认紧凑；verbose 才给来源/描述，ava
   const verbose = await registered[0].execute({ verbose: true })
   assert.equal(verbose.roles[0].source, 'unknown', 'registry 未暴露来源，不得编造')
   assert.equal(verbose.roles[0].hasPrompt, false)
-  assert.equal(verbose.roles[0].channel.kind, 'acp-cli')
+  // B2：不再暴露「通道」概念；verbose 给 CLI / 模型 / 强度
+  assert.equal(verbose.roles[0].cli, 'acp-cli')
+  assert.equal(Object.hasOwn(verbose.roles[0], 'channel'), false, 'verbose 不再返回 channel')
+  assert.equal(Object.hasOwn(verbose.roles[0], 'setting'), true)
 })
 
 test('meetingstone_dispatch：直接返回 dispatcher 的结果，并把入参透传', async () => {

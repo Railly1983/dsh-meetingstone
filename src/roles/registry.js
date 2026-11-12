@@ -36,12 +36,17 @@ import { isValidRoleId, normalizeAlias } from './ids.js'
 /**
  * 一个角色。
  *
+ * B2（PDF 第 2 条）：`description` + `prompt` 合并为单一 `setting`（角色设定）。
+ * 为兼容既有调用方，归一化后仍投影出 `description`/`prompt` 两个**只读镜像**
+ * （值都等于 setting，不参与持久化）；配置/UI 只认 setting。
+ *
  * @typedef {object} Role
  * @property {string} roleId
  * @property {string} name
  * @property {string[]} aliases
- * @property {string} description
- * @property {string} [prompt] 人设/工作守则；派单时作为前缀注入
+ * @property {string} setting 角色设定（职责 + 人设/守则，派单时作为提示词前缀）
+ * @property {string} description 兼容镜像：等于 setting（旧调用方仍可读）
+ * @property {string} [prompt] 兼容镜像：等于 setting（为空时不出现）
  * @property {RoleChannel} channel
  * @property {boolean} enabled
  * @property {string | null} fallbackRoleId
@@ -185,6 +190,17 @@ function readChannel(value, errors, roleId, opts = {}) {
 }
 
 /**
+ * 读取角色设定（B2）：新字段 setting 优先，旧配置的 prompt/description 迁移。
+ * @param {Record<string, unknown>} input
+ * @returns {string}
+ */
+function readSetting(input) {
+  if (typeof input.setting === 'string') return input.setting
+  if (typeof input.prompt === 'string' && input.prompt.trim()) return input.prompt
+  return typeof input.description === 'string' ? input.description : ''
+}
+
+/**
  * 把一个原始条目读成完整角色；任何硬错误都会让该条目被丢弃。
  *
  * @param {unknown} raw
@@ -218,13 +234,16 @@ function readRole(raw, errors) {
 
   // permissionPreset 已随只读通道一起移除（2026-11-11）：未知字段按 schema 约定忽略。
   const timeout = Number(input.timeoutMs)
+  const setting = readSetting(input)
 
   return {
     roleId: id,
     name,
     aliases: readAliases(input.aliases),
-    description: typeof input.description === 'string' ? input.description : '',
-    ...(typeof input.prompt === 'string' && input.prompt.trim() ? { prompt: input.prompt } : {}),
+    setting,
+    // 兼容镜像：旧调用方仍读 description/prompt；二者都不是独立配置项（B2）。
+    description: setting,
+    ...(setting ? { prompt: setting } : {}),
     channel: readChannel(input.channel, errors, id),
     // 已合并好的角色表（三层继承的结果）会带上来源；没带时按全局处理。
     source:
@@ -277,11 +296,17 @@ function mergeRole(base, patch, errors) {
   }
 
   if (Object.hasOwn(input, 'aliases')) next.aliases = readAliases(input.aliases)
-  if (Object.hasOwn(input, 'description') && typeof input.description === 'string') {
-    next.description = input.description
-  }
-  if (Object.hasOwn(input, 'prompt') && typeof input.prompt === 'string' && input.prompt.trim()) {
-    next.prompt = input.prompt
+  // B2：setting 是唯一设定字段；旧字段（description/prompt）作为迁移来源。
+  const hasSettingPatch =
+    Object.hasOwn(input, 'setting') ||
+    Object.hasOwn(input, 'description') ||
+    Object.hasOwn(input, 'prompt')
+  if (hasSettingPatch) {
+    const patched = readSetting(input)
+    next.setting = patched
+    next.description = patched
+    if (patched) next.prompt = patched
+    else delete next.prompt
   }
   if (Object.hasOwn(input, 'channel')) {
     // 通道按字段合并：只改 model 时不该把 provider/cli/kind 抹掉

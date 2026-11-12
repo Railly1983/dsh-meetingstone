@@ -230,10 +230,10 @@ test('list_roles 按当前会话项目根读取 .meetingstone.json（项目角�
     assert.deepEqual(ids, ['role-reviewer', 'role-sashi', 'role-scout'], '项目新增角色应出现')
 
     const sashi = scoped.roles.find((r) => r.roleId === 'role-sashi')
-    assert.equal(sashi.description, undefined, '默认紧凑视图不返回 description')
+    assert.equal(sashi.setting, undefined, '默认紧凑视图不返回角色设定')
     const verbose = await listTool.execute({ verbose: true }, exec)
     const sashiVerbose = verbose.roles.find((r) => r.roleId === 'role-sashi')
-    assert.equal(sashiVerbose.description, '项目内改为复核', 'verbose:true 才返回项目覆盖后的描述')
+    assert.equal(sashiVerbose.setting, '项目内改为复核', 'verbose:true 才返回项目覆盖后的设定')
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -279,11 +279,13 @@ test('list_roles verbose:true 暴露配置透明度字段（职责/人设/通道
   const listTool = tools.find((t) => t.name === 'meetingstone_list_roles')
   const res = await listTool.execute({ verbose: true })
   const byId = Object.fromEntries((res?.roles ?? res).map((r) => [r.roleId, r]))
-  assert.equal(byId['role-sashi'].description, '技术骨干')
+  // B2：description+prompt 合并为单一设定；角色不再暴露「通道」
+  assert.equal(byId['role-sashi'].setting, '你是技术骨干。')
   assert.equal(byId['role-sashi'].hasPrompt, true)
   assert.equal(byId['role-sashi'].channelId, 'ch-acp')
   assert.equal(byId['role-sashi'].model, 'hy4')
-  assert.equal(byId['role-xiaobai'].hasPrompt, false, '没配人设要如实 false')
+  assert.equal(byId['role-sashi'].cli, 'acp-cli')
+  assert.equal(byId['role-xiaobai'].setting, '杂活')
   assert.equal(byId['role-xiaobai'].channelId, undefined)
 })
 

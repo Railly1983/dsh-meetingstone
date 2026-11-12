@@ -80,8 +80,11 @@ export const RoleSchema = compile(
     roleId: S.string().required().description('稳定 ID，如 role-sashi；改名不变'),
     name: S.string().required().description('显示名称'),
     aliases: S.array(S.string()).default([]).description('简称/别名，全局唯一'),
-    description: S.string().default('').description('职责说明（人类可读）'),
-    prompt: S.string().description('角色人设/工作守则；派单时作为前缀注入子 Agent 的提示词'),
+    // B2（PDF 第 2 条）：description 与 prompt 合并为单一「角色设定」。
+    // 旧配置里的 description/prompt 在 normalizeConfig 里迁移到 setting，不丢内容。
+    setting: S.string()
+      .default('')
+      .description('角色设定：职责说明 + 人设/工作守则（原 description+prompt 合并；派单时作为提示词前缀）'),
     channel: ChannelSchema,
     enabled: S.boolean().default(true).description('停用后不得派单'),
     fallbackRoleId: S.string().description('备用角色（第一版只提示，不自动接替）'),
@@ -155,6 +158,39 @@ export const Config = compile(
 const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 
 /**
+ * B2 迁移：旧角色条目的 `description` + `prompt` → 单一 `setting`（C1/PDF 第 2 条）。
+ *
+ * - 旧配置里 `prompt` 是人设正文，优先取它；没有 prompt 时取 description。
+ * - 迁移后不保留旧键（避免持久化再写两份）；原值不丢，写在 setting 里。
+ * - 已是新结构（有 setting）时原样保留。
+ *
+ * @param {unknown} raw
+ * @returns {unknown}
+ */
+export function migrateRoleSetting(raw) {
+  if (!isPlainObject(raw)) return raw
+  const input = { .../** @type {Record<string, unknown>} */ (raw) }
+  const hasSetting = typeof input.setting === 'string' && input.setting.trim() !== ''
+  if (!hasSetting) {
+    const prompt = typeof input.prompt === 'string' && input.prompt.trim() ? input.prompt : ''
+    const description = typeof input.description === 'string' ? input.description : ''
+    input.setting = prompt || description
+  }
+  delete input.prompt
+  delete input.description
+  return input
+}
+
+/**
+ * B2 迁移：角色数组逐项迁移 setting。
+ * @param {unknown} roles
+ * @returns {unknown}
+ */
+export function migrateRolesSetting(roles) {
+  return Array.isArray(roles) ? roles.map(migrateRoleSetting) : roles
+}
+
+/**
  * 把用户给的原始配置规范化成安全值。
  * - 缺字段回退默认值
  * - 非法值抛 `ValidationError`（上层决定降级策略）
@@ -172,6 +208,8 @@ export function normalizeConfig(raw) {
     if (sanitized === undefined) delete input.cliPreferences
     else input.cliPreferences = sanitized
   }
+  // B2：旧角色 description/prompt → setting（迁移后再校验；未知键由 schema 忽略）
+  if (Array.isArray(input.roles)) input.roles = migrateRolesSetting(input.roles)
   return Config(input)
 }
 

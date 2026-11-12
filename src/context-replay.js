@@ -130,6 +130,8 @@ export function collectProtectedFields(record, options = {}) {
     pack.permissions,
   )
   put('safetyPolicy', source.safetyPolicy, source.safety, spec.safetyPolicy, pack.safetyPolicy)
+  // C1 §5：落盘策略是任务约束，必须随重放原样保留（不得因截断丢失）。
+  put('artifactPolicy', source.artifactPolicy, spec.artifactPolicy, pack.artifactPolicy)
   put('doNotRepeat', source.doNotRepeat, spec.doNotRepeat, pack.doNotRepeat)
   return out
 }
@@ -301,6 +303,8 @@ export function formatContinuation(run) {
   return {
     text: lines.join('\n'),
     from: String(run.childId ?? 'unknown'),
+    // C3/D5：上游 childId 显式字段（旧记录无此字段时回退 null，不伪造）
+    upstreamChildId: typeof run.childId === 'string' && run.childId ? run.childId : null,
     status,
     truncated: truncated.truncated,
     // 实际注入的重放块字节数：落盘记录用它写 continuationBytes。

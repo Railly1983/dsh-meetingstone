@@ -838,6 +838,8 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
         ...(req.contextPack && typeof req.contextPack === 'object'
           ? { contextPack: req.contextPack }
           : {}),
+        // C3/§6：Team 任务外键（单向关联；仅随记录落盘，不写回 Team 任务板）
+        ...(typeof req.taskId === 'string' && req.taskId ? { taskId: req.taskId } : {}),
         // 隔离模式下 cwd 必须是工作树；显式传入的 cwd 不能绕过隔离
         cwd: taskCwd,
         timeoutMs: role.timeoutMs,

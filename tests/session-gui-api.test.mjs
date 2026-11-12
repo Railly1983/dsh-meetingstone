@@ -143,22 +143,22 @@ test('setSessionOverride：等于继承值 → 恢复继承（不落盘该字段
   assert.equal(view.sources.roles['role-sashi'].fields['channel.model'], 'global')
 })
 
-test('setSessionOverride：别名/描述/提供商/思考强度 各自的字段白名单', async () => {
+test('setSessionOverride：别名/设定/提供商/思考强度 各自的字段白名单', async () => {
   const { api } = makeApi()
   await api.setSessionOverride('sess-1', 'role-sashi', 'alias', '新别名')
-  await api.setSessionOverride('sess-1', 'role-sashi', 'description', '会话描述')
+  await api.setSessionOverride('sess-1', 'role-sashi', 'setting', '会话描述')
   await api.setSessionOverride('sess-1', 'role-sashi', 'provider', 'acp-2')
   await api.setSessionOverride('sess-1', 'role-sashi', 'reasoning', 'high')
 
   const view = api.getSessionConfig('sess-1')
   const r = view.effective.roles[0]
   assert.deepEqual(r.aliases, ['新别名'])
-  assert.equal(r.description, '会话描述')
+  assert.equal(r.setting, '会话描述')
   assert.equal(r.channel.provider, 'acp-2')
   assert.equal(r.channel.reasoning, 'high')
   assert.deepEqual(view.overrides['role-sashi'], {
     aliases: ['新别名'],
-    description: '会话描述',
+    setting: '会话描述',
     channel: { provider: 'acp-2', reasoning: 'high' },
   })
 })
@@ -166,11 +166,11 @@ test('setSessionOverride：别名/描述/提供商/思考强度 各自的字段�
 test('clearSessionOverride：恢复单字段 + 整角色', async () => {
   const { api } = makeApi()
   await api.setSessionOverride('sess-1', 'role-sashi', 'model', 'm-session')
-  await api.setSessionOverride('sess-1', 'role-sashi', 'description', '会话描述')
+  await api.setSessionOverride('sess-1', 'role-sashi', 'setting', '会话描述')
 
   const cleared = await api.clearSessionOverride('sess-1', 'role-sashi', 'model')
   assert.equal(cleared.config.roleOverrides['role-sashi'].channel?.model, undefined, '该字段已恢复继承')
-  assert.equal(cleared.config.roleOverrides['role-sashi'].description, '会话描述')
+  assert.equal(cleared.config.roleOverrides['role-sashi'].setting, '会话描述')
 
   const all = await api.clearSessionOverride('sess-1', 'role-sashi')
   assert.ok(!('role-sashi' in all.config.roleOverrides), '整角色恢复继承')

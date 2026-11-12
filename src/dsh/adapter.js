@@ -6,6 +6,7 @@ import { classifyFailure } from '../dispatch/failure.js'
 import { renderTaskBrief, summarizeContextPack, summarizeTaskSpec } from '../taskspec.js'
 import { parseStructuredResult, renderOutputContract, resultRecordFields } from '../result-contract.js'
 import { buildTaskLabel } from '../naming.js'
+import { resolveRoleChannel } from '../roles/capabilities.js'
 /**
  * DSH 接线层 · 适配器（阶段 2）。
  *
@@ -315,6 +316,17 @@ function buildRunBase({ input, role, provider, childId, startedAt }) {
         : typeof input?.worktree?.operationId === 'string'
           ? input.worktree.operationId
           : null,
+    // C3/§6：Team 任务外键（单向关联；不写回 Team 任务板）
+    ...(typeof input?.taskId === 'string' && input.taskId ? { taskId: input.taskId } : {}),
+    // C3/§5：落盘策略以 TaskSpec 为准（缺省 runs，显式写入记录，便于证据复核）
+    artifactPolicy:
+      input?.taskSpec?.artifactPolicy === 'none' || input?.taskSpec?.artifactPolicy === 'runs'
+        ? input.taskSpec.artifactPolicy
+        : 'runs',
+    // C3/D5：上游 childId（仅当带 continuation 且可解析时写）
+    ...(input?.continuation && typeof input.continuation.upstreamChildId === 'string' && input.continuation.upstreamChildId
+      ? { upstreamChildId: input.continuation.upstreamChildId }
+      : {}),
     worktree:
       input?.worktree && typeof input.worktree === 'object' ? input.worktree : null,
     isolation: input?.isolation === 'none' || input?.isolation === 'worktree' ? input.isolation : null,
@@ -348,18 +360,26 @@ function buildRunBase({ input, role, provider, childId, startedAt }) {
 function composePrompt(role, task, continuation = null, taskSpec = null, contextPack = null) {
   const name = typeof role?.name === 'string' ? role.name : ''
   const persona =
-    typeof role?.prompt === 'string' && role.prompt.trim()
-      ? role.prompt.trim()
-      : typeof role?.description === 'string' && role.description.trim()
-        ? role.description.trim()
-        : ''
+    // B2：description 与 prompt 已合并为单一 setting；旧字段只作兜底读取。
+    typeof role?.setting === 'string' && role.setting.trim()
+      ? role.setting.trim()
+      : typeof role?.prompt === 'string' && role.prompt.trim()
+        ? role.prompt.trim()
+        : typeof role?.description === 'string' && role.description.trim()
+          ? role.description.trim()
+          : ''
+  // C1 §5：只读/审计派单（artifactPolicy=none）使用不同的产物落盘契约。
+  const artifactPolicy =
+    taskSpec?.artifactPolicy === 'none' || taskSpec?.artifactPolicy === 'runs'
+      ? taskSpec.artifactPolicy
+      : null
   return composePromptWithContinuation({
     personaHead: name ? `你是「${name}」。` : '',
     persona,
     taskBrief: renderTaskBrief(taskSpec, contextPack),
     continuation: continuation && typeof continuation.text === 'string' ? continuation : null,
     task: String(task ?? ''),
-    outputContract: renderOutputContract(),
+    outputContract: renderOutputContract(artifactPolicy),
   })
 }
 
@@ -545,7 +565,9 @@ export function createDshAdapter(ctx, options = {}) {
 
   /** @type {Map<string, any>} */
   const channelsById = new Map()
-  for (const instance of options.channels ?? []) {
+  /** @type {any[]} 已配置执行组合（原样保留顺序，供能力解析使用） */
+  const channelList = Array.isArray(options.channels) ? options.channels : []
+  for (const instance of channelList) {
     if (instance && typeof instance.channelId === 'string' && instance.channelId) {
       channelsById.set(instance.channelId, instance)
     }
@@ -876,44 +898,53 @@ export function createDshAdapter(ctx, options = {}) {
 
   /** 启动一次委派。任何失败都抛，不吞、不降级。 */
   /**
-   * 解析一次派单的实际执行路由。
+   * 解析一次派单的实际执行路由（B2）。
    *
    * 规则（fail-closed）：
-   * - 没有 channelId：沿用角色声明的 provider/kind（老配置兼容）
-   * - 有 channelId：**以实例的 provider 为准**；角色声明的 provider/kind 与实例不一致就拒绝
-   *   （`CHANNEL_MISMATCH`），实例不存在就拒绝（`CHANNEL_NOT_FOUND`）
+   * - 有 channelId：以实例 provider 为准；角色声明的 provider/kind/model/reasoning 与实例不一致就拒绝
+   * - 无 channelId：按「CLI → 模型 → 强度」在已配置实例里找唯一匹配项（能力解析）；
+   *   找不到/多义都拒绝（MODEL_UNSUPPORTED / REASONING_UNSUPPORTED / CHANNEL_AMBIGUOUS）
+   * - 没有配置任何实例（旧路径/测试/极简 profile）：沿用角色声明的 provider/kind
    *
    * @param {any} role
-   * @returns {{ provider: string | null, instance: any | null }}
+   * @returns {{ provider: string | null, instance: any | null, role: any }}
    */
   function resolveRoute(role) {
-    const channelId = role?.channel?.channelId
-    if (!channelId) return { provider: providerNameFor(role), instance: null }
+    const list = channelList
+    // 旧路径兼容：没有任何已配置实例时，按角色声明的 kind/provider 解析（不引入新的失败）
+    if (list.length === 0) return { provider: providerNameFor(role), instance: null, role }
+    const resolved = resolveRoleChannel(role, list)
+    if (resolved.error) {
+      throw new Error(`${resolved.error.code}: ${resolved.error.message}`)
+    }
+    const channel = resolved.channel
+    const effectiveRole = channel
+      ? { ...role, channel: { ...(role && typeof role === 'object' ? role.channel : {}), ...channel } }
+      : role
+    const channelId = effectiveRole?.channel?.channelId
+    if (!channelId) {
+      // 实例表存在但角色没引用任何实例：退回 kind/provider（例如 in-process 的默认路径）
+      return { provider: providerNameFor(effectiveRole), instance: null, role: effectiveRole }
+    }
     const instance = channelsById.get(String(channelId))
     if (!instance) {
-      throw new Error(`CHANNEL_NOT_FOUND: 角色引用的通道实例 ${channelId} 不存在，拒绝启动`)
+      throw new Error(`CHANNEL_NOT_FOUND: 角色引用的执行组合 ${channelId} 不存在，拒绝启动`)
     }
     const instanceProvider =
       typeof instance.provider === 'string' && instance.provider.trim()
         ? instance.provider.trim()
         : /** @type {Record<string, string>} */ (PROVIDER_BY_KIND)[instance.kind] ?? null
     if (!instanceProvider) {
-      throw new Error(`CHANNEL_MISMATCH: 通道实例 ${channelId} 既没声明 provider 也没有已知 kind，拒绝启动`)
+      throw new Error(`CHANNEL_MISMATCH: 执行组合 ${channelId} 既没声明 provider 也没有已知 kind，拒绝启动`)
     }
     const declaredProvider = role?.channel?.provider
     if (typeof declaredProvider === 'string' && declaredProvider.trim() && declaredProvider.trim() !== instanceProvider) {
       throw new Error(
-        `CHANNEL_MISMATCH: 角色声明的 provider 是 ${declaredProvider}，但通道实例 ${channelId} 实际是 ${instanceProvider}；` +
-          '两者必须一致，否则会出现「配置写的是一个通道、实际跑的是另一个」。已拒绝启动',
+        `CHANNEL_MISMATCH: 角色声明的 provider 是 ${declaredProvider}，但执行组合 ${channelId} 实际是 ${instanceProvider}；` +
+          '两者必须一致，否则会出现「配置写的是一个组合、实际跑的是另一个」。已拒绝启动',
       )
     }
-    const declaredKind = role?.channel?.kind
-    if (typeof declaredKind === 'string' && declaredKind && instance.kind && declaredKind !== instance.kind) {
-      throw new Error(
-        `CHANNEL_MISMATCH: 角色声明的通道类型是 ${declaredKind}，但实例 ${channelId} 是 ${instance.kind}，已拒绝启动`,
-      )
-    }
-    return { provider: instanceProvider, instance }
+    return { provider: instanceProvider, instance, role: effectiveRole }
   }
 
   async function start(input) {
@@ -921,9 +952,11 @@ export function createDshAdapter(ctx, options = {}) {
       throw lifecycleError(ADAPTER_ERRORS.DISPOSED, '插件正在卸载，拒绝启动新任务')
     }
     const { role, task, cwd, timeoutMs } = input ?? {}
-    // 执行路由**必须**以引用的通道实例为准，不能只信角色自己的声明。
+    // 执行路由**必须**以解析出的执行组合为准，不能只信角色自己的声明。
     // 否则：角色写 channelId=A 实例 + provider=B，配置与实际执行的通道会不一致。
     const route = resolveRoute(role)
+    // B2：CLI/模型/强度 → 具体执行组合；后续记录与提示词都用解析后的角色。
+    const effectiveRole = route.role ?? role
     const provider = route.provider
     const subagents = safeService(ctx, 'subagents')
 
@@ -952,16 +985,16 @@ export function createDshAdapter(ctx, options = {}) {
     // 2.5 启动前置校验（P2 Gate 复核 P0）：约束不满足就**不启动**，而不是带病启动。
     //
     // (a) 模型/强度：官方 spec 不收 model/reasoning，模型只能由 **provider 行**承载（DD7 方案 B）。
-    //     角色的声明必须与所引用通道实例的配置一致；不一致就拒绝，避免"配置成功、执行没采用"。
-    const declaredModel = role?.channel?.model
-    const declaredReasoning = role?.channel?.reasoning
+    //     角色的声明必须与所引用执行组合的配置一致；不一致就拒绝，避免"配置成功、执行没采用"。
+    //     B2：无 channelId 时已由 resolveRoute 按 CLI→模型→强度解析出唯一组合。
+    const declaredModel = effectiveRole?.channel?.model
+    const declaredReasoning = effectiveRole?.channel?.reasoning
     if (declaredModel || declaredReasoning) {
-      const channelId = role?.channel?.channelId
+      const channelId = effectiveRole?.channel?.channelId
       if (!channelId) {
         throw new Error(
-          'MODEL_UNSUPPORTED: 角色声明了 model/reasoning，但没有指定 channelId。' +
-            '宿主的启动 spec 不接收模型，请先在插件配置的 channels 表里配置一个通道实例，' +
-            '再让角色通过 channel.channelId 引用它',
+          'MODEL_UNSUPPORTED: 角色声明了 model/reasoning，但没有可匹配的执行组合。' +
+            '请先在设置里为所选 CLI 配置模型/强度，再让角色选择该组合',
         )
       }
       const instance = channelsById.get(String(channelId))
@@ -1023,7 +1056,7 @@ export function createDshAdapter(ctx, options = {}) {
       // 官方字段：`SubagentActivationSpec.label` 会写进 `subagent/descriptor` 与
       // `subagent/catalog`，Subagents 面板行标题读的就是这个值（证据见
       // docs/gui-0.2.0.md §6）。命名统一为 `角色简称 · 简短目标（≤14 字）`。
-      label: buildTaskLabel(role, task, input?.taskSpec),
+      label: buildTaskLabel(effectiveRole, task, input?.taskSpec),
       delivery: 'caller',
       signal: controller.signal,
       request: {
@@ -1031,7 +1064,7 @@ export function createDshAdapter(ctx, options = {}) {
         prompt: [
           {
             type: 'text',
-            text: composePrompt(role, task, input?.continuation, input?.taskSpec, input?.contextPack),
+            text: composePrompt(effectiveRole, task, input?.continuation, input?.taskSpec, input?.contextPack),
           },
         ],
         ...(typeof cwd === 'string' && cwd ? { cwd } : {}),
@@ -1098,7 +1131,7 @@ export function createDshAdapter(ctx, options = {}) {
         )
       }
       const startedAt = now()
-      const lateRunBase = buildRunBase({ input, role, provider, childId: lateChildId, startedAt })
+      const lateRunBase = buildRunBase({ input, role: effectiveRole, provider, childId: lateChildId, startedAt })
       /** @type {any} */
       const lateHandle = {
         activation,
@@ -1158,7 +1191,7 @@ export function createDshAdapter(ctx, options = {}) {
       timer = setTimeout(() => controller.abort(new Error('meetingstone: timeout')), timeoutMs)
     }
     /** 落盘用的基础信息（不含终态），cancel 也需要它 */
-    const runBase = buildRunBase({ input, role, provider, childId, startedAt })
+    const runBase = buildRunBase({ input, role: effectiveRole, provider, childId, startedAt })
     // 先登记句柄，再建 Job：hooks.cancel 要能按 childId 找到同一个 activation。
     handles.set(childId, {
       activation,
@@ -1173,7 +1206,7 @@ export function createDshAdapter(ctx, options = {}) {
     // 5.1 原生 Jobs：失败只告警，绝不回滚已启动的 activation。
     const jobId = createDispatchJob({
       childId,
-      role,
+      role: effectiveRole,
       task,
       taskSpec: input?.taskSpec,
       parent,

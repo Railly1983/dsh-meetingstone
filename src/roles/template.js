@@ -81,7 +81,14 @@ export const FIVE_ROLE_TEMPLATE = Object.freeze(
       duty: '打杂、辅助、杂项实现',
       description: '牛马：主力干活、打杂、什么都会干（会的杂）',
     },
-  ].map((role) => Object.freeze({ ...role, aliases: Object.freeze([...role.aliases]) })),
+  ].map((role) =>
+    Object.freeze({
+      ...role,
+      // B2：description 与 prompt 合并后的单一设定（模板角色还没有独立人设，先用职责说明）
+      setting: role.description,
+      aliases: Object.freeze([...role.aliases]),
+    }),
+  ),
 )
 
 /** @param {unknown} value */
@@ -132,6 +139,7 @@ export function createTemplateRoles({ hostCapability } = {}) {
     aliases: [...role.aliases],
     duty: role.duty,
     description: role.description,
+    setting: role.setting,
     setupState: TEMPLATE_SETUP.PENDING,
     setupLabel: TEMPLATE_PENDING_LABEL,
     setupReason: reason,

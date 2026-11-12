@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 集合石 0.2.0 · GUI 只读 section（浏览器 half，接真实 Host 数据）。
  *
  * 本文件不是 Node 模块，而是宿主 client module system 直接当脚本加载的
@@ -386,6 +386,20 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** CLI 能力矩阵收窄（B2）：Host 已聚合；结构不对的项一律丢弃。 */
+    function normalizeCapabilities(value) {
+      return asArray(value).map((row) => ({
+        cli: asString(row?.cli),
+        label: asString(row?.label) || asString(row?.cli),
+        models: asArray(row?.models).map((item) => ({
+          model: asString(item?.model),
+          efforts: asArray(item?.efforts).map(String),
+        })),
+        efforts: asArray(row?.efforts).map(String),
+        reasoningSupported: row?.reasoningSupported === true,
+      }))
+    }
+
     /** 全局配置视图；缺字段回退到空串/默认值，不猜。 */
     function normalizeGlobal(value) {
       const source = asObject(value)
@@ -406,6 +420,8 @@ window.__ModuleLoader__.load({
         channels: asArray(source.channels)
           .filter((channel) => channel && typeof channel === 'object')
           .map(normalizeChannelDetail),
+        // B2：CLI→模型→强度 能力矩阵（Host 已按已配置组合聚合；缺失时客户端从 channels 现场推导）
+        capabilities: normalizeCapabilities(source.capabilities),
         cli: normalizeCli(source.cli),
         cliError: asString(source.cliError) || null,
       }
@@ -424,17 +440,41 @@ window.__ModuleLoader__.load({
       return {
         roles: roles
           .filter((role) => role && typeof role === 'object')
-          .map((role) => ({
-            roleId: asString(role.roleId),
-            name: asString(role.name),
-            aliases: asArray(role.aliases).map(String),
-            enabled: role.enabled !== false,
-            availability: asString(role.availability) || 'unknown',
-            channelId: asString(role.channelId),
-            provider: asString(role.provider),
-            model: asString(role.model),
-            reasoning: asString(role.reasoning),
-          })),
+          .map((role) => {
+            const kind = asString(role.kind)
+            const channelId = asString(role.channelId)
+            return {
+              roleId: asString(role.roleId),
+              name: asString(role.name),
+              aliases: asArray(role.aliases).map(String),
+              // B1：设置页内联全局角色管理要能直接编辑这些字段（Host roleView 已投影）。
+              // B2：description+prompt 合并为单一 setting；旧字段保留为兼容镜像。
+              setting:
+                asString(role.setting) || asString(role.prompt) || asString(role.description),
+              description: asString(role.description),
+              prompt: asString(role.prompt),
+              enabled: role.enabled !== false,
+              availability: asString(role.availability) || 'unknown',
+              channelId,
+              kind,
+              provider: asString(role.provider),
+              model: asString(role.model),
+              reasoning: asString(role.reasoning),
+              sourceLayer: SOURCE_LAYERS.has(asString(role.sourceLayer))
+                ? asString(role.sourceLayer)
+                : 'default',
+              fieldSources: normalizeFieldSources(role.fieldSources),
+              state: normalizeRoleState(role),
+              // draftOfRole() 读嵌套 channel；这里保留扁平字段同时给出嵌套形状。
+              channel: {
+                channelId,
+                kind,
+                provider: asString(role.provider),
+                model: asString(role.model),
+                reasoning: asString(role.reasoning),
+              },
+            }
+          }),
         channels: channels
           .filter((channel) => channel && typeof channel === 'object')
           .map((channel) => ({
@@ -467,6 +507,32 @@ window.__ModuleLoader__.load({
 
     /** 来源层只认三层继承的固定枚举；其余一律 unknown（不猜）。 */
     const SOURCE_LAYERS = new Set(['global', 'project', 'session'])
+
+    /** 角色字段来源键（与 Host `roleView().fieldSources` 一致）。 */
+    const ROLE_SOURCE_FIELDS = [
+      'name',
+      'aliases',
+      'setting',
+      'enabled',
+      'channel.channelId',
+      'channel.kind',
+      'channel.provider',
+      'channel.cli',
+      'channel.model',
+      'channel.reasoning',
+    ]
+
+    /** 字段来源映射收窄：缺失/未知 → default（不把未知来源猜成 global）。 */
+    function normalizeFieldSources(value) {
+      const source = asObject(value)
+      /** @type {Record<string, string>} */
+      const out = {}
+      for (const key of ROLE_SOURCE_FIELDS) {
+        const layer = source[key]
+        out[key] = SOURCE_LAYERS.has(layer) ? layer : 'default'
+      }
+      return out
+    }
 
     /** 三色/就绪/额度只认稳定枚举（Host `deriveRoleView` 的产物）。 */
     function normalizeRoleState(value) {
@@ -509,7 +575,7 @@ window.__ModuleLoader__.load({
         const roleId = asString(asObject(item).roleId)
         if (roleId) stateById.set(roleId, state)
       }
-      const fieldKeys = ['name', 'aliases', 'description', 'prompt', 'enabled']
+      const fieldKeys = ['name', 'aliases', 'setting', 'enabled']
       const channelKeys = ['channelId', 'kind', 'provider', 'cli', 'model', 'reasoning']
 
       /** @type {any[]} */
@@ -545,6 +611,9 @@ window.__ModuleLoader__.load({
             roleId,
             name: asString(role.name),
             aliases: asArray(role.aliases).map(String),
+            // B2：单一角色设定；旧字段作为兼容镜像
+            setting:
+              asString(role.setting) || asString(role.prompt) || asString(role.description),
             description: asString(role.description),
             prompt: asString(role.prompt),
             enabled: role.enabled !== false,
@@ -572,8 +641,10 @@ window.__ModuleLoader__.load({
         defaultRoleSource: SOURCE_LAYERS.has(asString(sources.defaultRoleId))
           ? asString(sources.defaultRoleId)
           : 'default',
-        // 详情页下拉只列真实通道实例；空数组表示「待配置」，不补造模型表。
+        // 详情页下拉只列真实已配置组合；空数组表示「待配置」，不补造模型表。
         channels: asArray(source.channels).map(normalizeChannelOption),
+        // B2：CLI→模型→强度 能力矩阵（Host 可选提供；缺失时从 channels 现场推导）
+        capabilities: normalizeCapabilities(source.capabilities),
         warnings: asArray(source.warnings)
           .filter((item) => item && typeof item === 'object')
           .map((item) => ({
@@ -971,7 +1042,7 @@ window.__ModuleLoader__.load({
       unavailable: '远程数据不可用',
       cli: 'CLI 连接',
       roles: '全局角色库',
-      channels: '通道',
+      channels: '执行组合',
       models: '默认模型',
       limits: '额度与并发策略',
       rules: '全局调度规则',
@@ -980,7 +1051,7 @@ window.__ModuleLoader__.load({
       notSet: '未设置',
       available: '可用',
       disabled: '已停用',
-      providerUnavailable: '通道不可用',
+      providerUnavailable: '执行组合不可用',
       ambiguous: '别名冲突',
       unknown: '未知',
       installed: '已安装',
@@ -990,7 +1061,7 @@ window.__ModuleLoader__.load({
       noCli: '未获取到本机 CLI 探测结果',
       cliTimeout: 'CLI 探测超时（下次打开将复用缓存）',
       defaultRole: '默认角色',
-      noChannels: '未配置通道实例',
+      noChannels: '未配置执行组合',
       model: '模型',
       reasoning: '思考强度',
       parallelLimit: '并行写任务上限',
@@ -1006,11 +1077,18 @@ window.__ModuleLoader__.load({
       collab: '默认协作配置',
       advanced: '高级设置',
       manageRoles: '管理角色',
+      globalRolesTitle: '全局角色管理',
+      globalRolesNote:
+        '此面板直接编辑**全局**角色（写入 profile），保存后对所有会话生效；本会话的临时覆盖请在右侧栏「本对话角色」调整。',
+      globalRolesEmpty: '全局配置里还没有角色',
+      globalRoleBadge: '全局',
+      managerClose: '收起',
+      managerOpenLabel: '打开全局角色管理',
       roleCount: '角色数量',
       openAdvanced: '展开',
       closeAdvanced: '收起',
       cliPaths: 'CLI 完整路径',
-      channelInstances: '通道实例',
+      channelInstances: '执行组合',
       configFile: '配置文件',
       openConfig: '打开配置文件',
       diagLog: '诊断日志位于 .meetingstone/runs',
@@ -1032,7 +1110,7 @@ window.__ModuleLoader__.load({
       openPanel: '打开集合石角色面板',
       noRoles: '当前没有可用角色',
       aliasLabel: '别名',
-      channelLabel: '通道',
+      channelLabel: 'CLI',
       roleIdLabel: '角色 ID',
       sourceLabel: '来源',
       sourceGlobal: '全局',
@@ -1049,7 +1127,7 @@ window.__ModuleLoader__.load({
       cliSection: '外部 CLI 连接',
       rolesSection: '默认角色配置',
       templateName: '取经五人组',
-      templateDesc: '唐僧、悟空、八戒、沙僧、小白五人各司其职；模型与通道按角色单独配置。',
+      templateDesc: '唐僧、悟空、八戒、沙僧、小白五人各司其职；模型与思考强度按角色单独配置。',
       cliSwitchLabel: '启用',
       cliOff: '关闭',
       cliOn: '开启',
@@ -1081,12 +1159,14 @@ window.__ModuleLoader__.load({
       fieldName: '名称',
       fieldAliases: '简称',
       fieldDescription: '描述',
-      fieldChannel: 'CLI / 通道',
+      fieldSetting: '角色设定',
+      fieldCli: 'CLI',
+      fieldChannel: 'CLI',
       fieldModel: '模型',
       fieldReasoning: '思考强度',
       fieldPrompt: '角色 Prompt',
       fieldUnset: '未设置',
-      channelUnset: '未指定通道（继承）',
+      channelUnset: '未指定组合（继承）',
       unsupported: '不支持',
       pendingConfig: '待配置',
       restoreInherit: '恢复继承',
@@ -1097,8 +1177,8 @@ window.__ModuleLoader__.load({
       confirmGlobal: '确认写入全局配置？',
       confirm: '确认',
       cancel: '取消',
-      noModelOptions: '当前通道没有配置模型',
-      noReasoningOptions: '当前通道没有配置思考强度',
+      noModelOptions: '当前 CLI 没有可选模型',
+      noReasoningOptions: '当前 CLI/模型不支持思考强度',
       sourceColumn: '来源',
       detailInvalidName: '名称不能为空',
       detailInvalidPrompt: 'Prompt 不能为空；如需恢复继承请用「恢复继承」',
@@ -1116,7 +1196,7 @@ window.__ModuleLoader__.load({
       unavailable: 'Remote data unavailable',
       cli: 'CLI connections',
       roles: 'Global role library',
-      channels: 'Channels',
+      channels: 'Execution combos',
       models: 'Default models',
       limits: 'Quota & concurrency',
       rules: 'Global dispatch rules',
@@ -1125,7 +1205,7 @@ window.__ModuleLoader__.load({
       notSet: 'Not set',
       available: 'Available',
       disabled: 'Disabled',
-      providerUnavailable: 'Channel unavailable',
+      providerUnavailable: 'Execution combo unavailable',
       ambiguous: 'Alias conflict',
       unknown: 'Unknown',
       installed: 'Installed',
@@ -1135,7 +1215,7 @@ window.__ModuleLoader__.load({
       noCli: 'No local CLI probe result available',
       cliTimeout: 'CLI probe timed out (cache will be reused next time)',
       defaultRole: 'Default role',
-      noChannels: 'No channel instance configured',
+      noChannels: 'No execution combo configured',
       model: 'Model',
       reasoning: 'Reasoning',
       parallelLimit: 'Parallel write limit',
@@ -1151,11 +1231,18 @@ window.__ModuleLoader__.load({
       collab: 'Default collaboration',
       advanced: 'Advanced',
       manageRoles: 'Manage roles',
+      globalRolesTitle: 'Global roles',
+      globalRolesNote:
+        'This panel edits **global** roles (written to the profile) and affects every session; use the right-sidebar conversation roles for per-session overrides.',
+      globalRolesEmpty: 'No roles in the global configuration yet',
+      globalRoleBadge: 'Global',
+      managerClose: 'Collapse',
+      managerOpenLabel: 'Open global role management',
       roleCount: 'Role count',
       openAdvanced: 'Expand',
       closeAdvanced: 'Collapse',
       cliPaths: 'CLI full paths',
-      channelInstances: 'Channel instances',
+      channelInstances: 'Execution combos',
       configFile: 'Config file',
       openConfig: 'Open config file',
       diagLog: 'Diagnostic logs are under .meetingstone/runs',
@@ -1177,7 +1264,7 @@ window.__ModuleLoader__.load({
       openPanel: 'Open MeetingStone role panel',
       noRoles: 'No roles available',
       aliasLabel: 'Aliases',
-      channelLabel: 'Channel',
+      channelLabel: 'CLI',
       roleIdLabel: 'Role ID',
       sourceLabel: 'Source',
       sourceGlobal: 'Global',
@@ -1224,12 +1311,14 @@ window.__ModuleLoader__.load({
       fieldName: 'Name',
       fieldAliases: 'Aliases',
       fieldDescription: 'Description',
-      fieldChannel: 'CLI / channel',
+      fieldSetting: 'Role setting',
+      fieldCli: 'CLI',
+      fieldChannel: 'CLI',
       fieldModel: 'Model',
       fieldReasoning: 'Reasoning',
       fieldPrompt: 'Role prompt',
       fieldUnset: 'Not set',
-      channelUnset: 'No channel (inherit)',
+      channelUnset: 'No combo (inherit)',
       unsupported: 'Unsupported',
       pendingConfig: 'Pending configuration',
       restoreInherit: 'Restore inheritance',
@@ -1240,8 +1329,8 @@ window.__ModuleLoader__.load({
       confirmGlobal: 'Write to global configuration?',
       confirm: 'Confirm',
       cancel: 'Cancel',
-      noModelOptions: 'No model configured for this channel',
-      noReasoningOptions: 'No reasoning configured for this channel',
+      noModelOptions: 'No model available for this CLI',
+      noReasoningOptions: 'This CLI/model does not support reasoning effort',
       sourceColumn: 'Source',
       detailInvalidName: 'Name cannot be empty',
       detailInvalidPrompt: 'Prompt cannot be empty; use Restore inheritance instead',
@@ -1396,7 +1485,9 @@ window.__ModuleLoader__.load({
      *   cliPending?: Record<string, boolean>,
      *   cliFailures?: Record<string, any>,
      *   errorOpen?: boolean,
-     *   openRoles?: () => void,
+     *   managerOpen?: boolean,
+     *   onToggleManager?: () => void,
+     *   manager?: object,
      *   onToggleCli?: (cli: string, next: boolean) => void,
      *   onRetryCli?: (cli: string) => void,
      *   onToggleError?: () => void,
@@ -1410,7 +1501,10 @@ window.__ModuleLoader__.load({
       const pending = asObject(opts.cliPending)
       const failures = asObject(opts.cliFailures)
       const errorOpen = opts.errorOpen === true
-      const openRoles = typeof opts.openRoles === 'function' ? opts.openRoles : () => {}
+      const managerOpen = opts.managerOpen === true
+      const onToggleManager =
+        typeof opts.onToggleManager === 'function' ? opts.onToggleManager : () => {}
+      const managerOpts = asObject(opts.manager)
       const onToggleCli = typeof opts.onToggleCli === 'function' ? opts.onToggleCli : () => {}
       const onRetryCli = typeof opts.onRetryCli === 'function' ? opts.onRetryCli : () => {}
       const onToggleError = typeof opts.onToggleError === 'function' ? opts.onToggleError : () => {}
@@ -1504,8 +1598,10 @@ window.__ModuleLoader__.load({
               jsx('button', {
                 type: 'button',
                 style: linkButton,
-                onClick: openRoles,
-                children: t('manageRoles'),
+                'aria-expanded': managerOpen,
+                'aria-label': managerOpen ? t('managerClose') : t('managerOpenLabel'),
+                onClick: onToggleManager,
+                children: managerOpen ? t('managerClose') : t('manageRoles'),
               }),
             ],
           }),
@@ -1520,6 +1616,140 @@ window.__ModuleLoader__.load({
           cliCard,
           jsx('h3', { style: heading, children: t('rolesSection') }),
           templateCard,
+          // B1：全局角色管理内联在本页展开，不打开右侧栏会话面板、不跳转。
+          managerOpen ? renderGlobalRoleManager(t, snapshot, managerOpts) : null,
+        ],
+      })
+    }
+
+    /**
+     * 设置页「全局角色管理」（B1）：**内联**在设置页展开，不离开当前页、不打开右侧栏。
+     *
+     * 数据源是无参 `list()` 快照里的**全局** roles（Host `roleView` 已投影
+     * description/prompt/fieldSources）；写路径复用既有 `updateGlobalRole`
+     * （S2 global writer，字段合并），保存前二次确认。会话覆盖与本面板无关，
+     * 仍只在右侧栏「本对话角色」里调整。
+     *
+     * @param {(key: string) => string} t
+     * @param {any} snapshot `normalizeSnapshot()` 的产物
+     * @param {{
+     *   selectedRoleId?: string,
+     *   draft?: any,
+     *   onSelect?: Function,
+     *   onBack?: Function,
+     *   onDraft?: Function,
+     *   onSave?: Function,
+     *   onCancelConfirm?: Function,
+     *   onClose?: Function,
+     *   saving?: boolean,
+     *   confirming?: boolean,
+     *   error?: any,
+     * }} [opts]
+     */
+    function renderGlobalRoleManager(t, snapshot, opts = {}) {
+      const roles = asArray(snapshot?.roles)
+      const globalChannels = asArray(snapshot?.global?.channels)
+      // 详情下拉只列真实通道实例：优先用 global.channels（含 model/reasoning），
+      // 退回归一化后的 snapshot.channels（只有 channelId/kind）。
+      const view = {
+        ...(snapshot && typeof snapshot === 'object' ? snapshot : {}),
+        roles,
+        channels: globalChannels.length > 0 ? globalChannels : asArray(snapshot?.channels),
+      }
+      const selectedRoleId = asString(opts.selectedRoleId)
+      const onSelect = typeof opts.onSelect === 'function' ? opts.onSelect : () => {}
+      const onClose = typeof opts.onClose === 'function' ? opts.onClose : () => {}
+      const header = jsxs('div', {
+        style: alignRow,
+        children: [
+          jsx('h3', { style: { ...heading, fontSize: 13 }, children: t('globalRolesTitle') }),
+          jsx('span', { style: grow }),
+          jsx(Tag, { tone: 'info', children: t('globalRoleBadge') }),
+        ],
+      })
+      const note = jsx('p', { style: noteStyle, children: t('globalRolesNote') })
+      if (selectedRoleId) {
+        return jsxs('div', {
+          style: { ...card, display: 'flex', flexDirection: 'column', gap: 6 },
+          children: [
+            header,
+            note,
+            renderRoleDetail(t, view, selectedRoleId, {
+              scope: 'global',
+              draft: opts.draft ?? undefined,
+              saving: opts.saving === true,
+              confirming: opts.confirming === true,
+              error: opts.error,
+              showScope: false,
+              onBack: opts.onBack,
+              onDraft: opts.onDraft,
+              onSave: opts.onSave,
+              onCancelConfirm: opts.onCancelConfirm,
+            }),
+          ],
+        })
+      }
+      return jsxs('div', {
+        style: { ...card, display: 'flex', flexDirection: 'column', gap: 6 },
+        children: [
+          header,
+          note,
+          roles.length === 0
+            ? jsx('p', { style: noteStyle, children: t('globalRolesEmpty') })
+            : jsx('div', {
+                style: list,
+                children: roles.map((role) =>
+                  jsxs(
+                    'div',
+                    {
+                      style: {
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 10,
+                        padding: '6px 0',
+                        borderTop: '0.5px solid var(--dsw-alias-border-l4)',
+                      },
+                      children: [
+                        jsx('button', {
+                          type: 'button',
+                          style: {
+                            background: 'none',
+                            border: 'none',
+                            padding: 0,
+                            textAlign: 'left',
+                            fontFamily: 'inherit',
+                            fontSize: 13,
+                            lineHeight: '20px',
+                            fontWeight: 600,
+                            color: C.primary,
+                            cursor: 'pointer',
+                            wordBreak: 'break-word',
+                            flex: 1,
+                            minWidth: 0,
+                          },
+                          'aria-label': `${t('roleOpenDetail')}: ${role.name || role.roleId}`,
+                          onClick: () => onSelect(role.roleId),
+                          children: role.name || role.roleId || t('unknown'),
+                        }),
+                        jsx('span', {
+                          style: { ...meta, color: C.tertiary },
+                          children: role.enabled === true ? t('roleEnabled') : t('roleDisabled'),
+                        }),
+                      ],
+                    },
+                    role.roleId || role.name,
+                  ),
+                ),
+              }),
+          jsx('div', {
+            style: { display: 'flex', justifyContent: 'flex-end' },
+            children: jsx('button', {
+              type: 'button',
+              style: linkButton,
+              onClick: onClose,
+              children: t('managerClose'),
+            }),
+          }),
         ],
       })
     }
@@ -1539,12 +1769,19 @@ window.__ModuleLoader__.load({
      * 设置页组件：两区 + 错误摘条件显示。
      * CLI 开关失败不做乐观更新：失败时开关保持关闭，并显示一行摘要/人工步骤/重新检测。
      */
-    function Section({ t, list: load, openRoles, setCliEnabled, refreshCli }) {
+    function Section({ t, list: load, updateGlobalRole, setCliEnabled, refreshCli }) {
       const [state, setState] = react.useState({ status: 'loading' })
       const [errorOpen, setErrorOpen] = react.useState(false)
       const [cliStates, setCliStates] = react.useState(null)
       const [cliPending, setCliPending] = react.useState({})
       const [cliFailures, setCliFailures] = react.useState({})
+      // B1：设置页内联全局角色管理（不打开右侧栏会话面板）。
+      const [managerOpen, setManagerOpen] = react.useState(false)
+      const [managerRoleId, setManagerRoleId] = react.useState('')
+      const [managerDraft, setManagerDraft] = react.useState(null)
+      const [managerSaving, setManagerSaving] = react.useState(false)
+      const [managerConfirming, setManagerConfirming] = react.useState(false)
+      const [managerError, setManagerError] = react.useState(null)
 
       react.useEffect(() => {
         let current = true
@@ -1657,6 +1894,105 @@ window.__ModuleLoader__.load({
         }))
       }
 
+      // ── B1：设置页内联全局角色管理（不打开右侧栏、不离开设置页） ─────────────
+      /** 重新拉无参 list() 快照（全局管理保存后刷新）。 */
+      async function reloadSnapshot() {
+        const snapshot = await load()
+        setState({ status: 'ready', snapshot })
+        return { ok: true, view: snapshot }
+      }
+
+      function closeManager() {
+        setManagerOpen(false)
+        setManagerRoleId('')
+        setManagerDraft(null)
+        setManagerConfirming(false)
+        setManagerError(null)
+      }
+
+      function toggleManager() {
+        if (managerOpen) {
+          closeManager()
+          return
+        }
+        setManagerOpen(true)
+        setManagerRoleId('')
+        setManagerDraft(null)
+        setManagerConfirming(false)
+        setManagerError(null)
+      }
+
+      function selectManagerRole(roleId) {
+        const role = asArray(state.snapshot?.roles).find((item) => item.roleId === roleId)
+        setManagerRoleId(roleId)
+        setManagerDraft(role ? draftOfRole(role) : null)
+        setManagerConfirming(false)
+        setManagerError(null)
+      }
+
+      function backToManagerList() {
+        setManagerRoleId('')
+        setManagerDraft(null)
+        setManagerConfirming(false)
+        setManagerError(null)
+      }
+
+      function updateManagerDraft(field, value) {
+        setManagerDraft((previous) => {
+          const next = { ...(previous ?? {}), [field]: value }
+          if (field === 'channelId') {
+            const instance = asArray(state.snapshot?.global?.channels).find(
+              (channel) => asString(channel.channelId) === asString(value),
+            )
+            next.model = instance ? asString(instance.model) : ''
+            next.reasoning = instance ? asString(instance.reasoning) : ''
+          }
+          return next
+        })
+        setManagerConfirming(false)
+        setManagerError(null)
+      }
+
+      /** 保存全局角色：一次 patch 写入（二次确认），复用 saveGlobalPatch。 */
+      async function saveManagerRole() {
+        const role = asArray(state.snapshot?.roles).find((item) => item.roleId === managerRoleId)
+        if (!role || !managerDraft) return
+        if (typeof updateGlobalRole !== 'function') {
+          setManagerError({ code: 'REMOTE_UNAVAILABLE', message: t('remoteUnavailableHint') })
+          return
+        }
+        if (!managerConfirming) {
+          setManagerConfirming(true)
+          return
+        }
+        const built = buildGlobalPatch(t, role, managerDraft, state.snapshot?.global?.channels)
+        if (built.error) {
+          setManagerConfirming(false)
+          setManagerError({ code: 'DETAIL_INVALID', message: built.error })
+          return
+        }
+        if (Object.keys(built.patch).length === 0) {
+          setManagerConfirming(false)
+          setManagerError({ code: 'DETAIL_NO_CHANGES', message: t('detailNoChanges') })
+          return
+        }
+        setManagerSaving(true)
+        const result = await saveGlobalPatch({
+          roleId: managerRoleId,
+          patch: built.patch,
+          updateGlobalRole,
+          reload: reloadSnapshot,
+        })
+        setManagerSaving(false)
+        setManagerConfirming(false)
+        if (result.ok !== true) {
+          setManagerError(result.error)
+          return
+        }
+        const nextRole = asArray(result.view?.roles).find((item) => item.roleId === managerRoleId)
+        setManagerDraft(nextRole ? draftOfRole(nextRole) : null)
+      }
+
       if (state.status === 'loading') {
         return jsx('div', {
           style: root,
@@ -1695,7 +2031,21 @@ window.__ModuleLoader__.load({
                 cliPending,
                 cliFailures,
                 errorOpen,
-                openRoles,
+                managerOpen,
+                onToggleManager: toggleManager,
+                manager: {
+                  selectedRoleId: managerRoleId,
+                  draft: managerDraft,
+                  saving: managerSaving,
+                  confirming: managerConfirming,
+                  error: managerError,
+                  onSelect: selectManagerRole,
+                  onBack: backToManagerList,
+                  onDraft: updateManagerDraft,
+                  onSave: saveManagerRole,
+                  onCancelConfirm: () => setManagerConfirming(false),
+                  onClose: closeManager,
+                },
                 onToggleCli: toggleCli,
                 onRetryCli: retryCli,
                 onToggleError: () => setErrorOpen(!errorOpen),
@@ -1805,14 +2155,13 @@ window.__ModuleLoader__.load({
                 typeof configActions.refreshCli === 'function'
                   ? configActions.refreshCli(cli, force)
                   : { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '配置远程未装配' } },
-              // 区 2「管理角色」入口：打开右侧栏会话角色面板（复用既有 TAB_ID）。
-              openRoles: () => {
-                try {
-                  openRolePanelOf(slotCtx)
-                } catch {
-                  /* 宿主未提供 open 时静默 */
-                }
-              },
+              // 区 2「管理角色」：设置页**内联**全局角色管理（B1）。
+              // 写路径复用 S2 global writer（字段合并 + 二次确认），不新建写 API；
+              // 会话覆盖仍只走右侧栏，两个入口不再互相跳转。
+              updateGlobalRole: (roleId, patch) =>
+                typeof configActions.updateGlobalRole === 'function'
+                  ? configActions.updateGlobalRole(roleId, patch)
+                  : { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '配置远程未装配' } },
             }),
           },
           Section,
@@ -2025,17 +2374,20 @@ window.__ModuleLoader__.load({
       })
     }
 
-    /** 详情 draft：只包含可编辑字段；初始化自生效角色。 */
+    /** 详情 draft：只包含可编辑字段；初始化自生效角色。
+     *  B2（PDF 第 2 条）：单一「角色设定」+ CLI → 模型 → 思考强度；不再有「通道」。
+     */
     function draftOfRole(role) {
       const channel = asObject(role?.channel)
+      const setting =
+        asString(role?.setting) || asString(role?.prompt) || asString(role?.description)
       return {
         name: asString(role?.name),
         aliases: asArray(role?.aliases).map(String).join(', '),
-        description: asString(role?.description),
-        prompt: asString(role?.prompt),
-        channelId: asString(channel.channelId),
-        model: asString(channel.model),
-        reasoning: asString(channel.reasoning),
+        setting,
+        cli: asString(channel.kind) || asString(role?.kind),
+        model: asString(channel.model) || asString(role?.model),
+        reasoning: asString(channel.reasoning) || asString(role?.reasoning),
       }
     }
 
@@ -2053,49 +2405,97 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 详情页的「模型 / 思考强度」选项：只来自真实通道实例。
-     * 选中了 channelId → 只列该实例声明的模型/强度；
-     * 未选 channelId → 列同 kind+provider 的实例值（去重）；都没有 → 空（显示待配置）。
+     * CLI 能力矩阵（B2）：优先用 host 快照里的 `global.capabilities`；
+     * 旧快照没有时从 channels 现场聚合（结果等价，不伪造）。
+     * @param {any} view
+     */
+    function capabilitiesOf(view) {
+      const fromHost = asArray(view?.global?.capabilities)
+      if (fromHost.length > 0) return fromHost
+      // 旧快照/侧栏视图没有 capabilities 时：优先用 global.channels（含模型/强度），再退化到 channels
+      const detailed = asArray(view?.global?.channels)
+      const channels = detailed.length > 0 ? detailed : asArray(view?.channels)
+      /** @type {Map<string, any>} */
+      const byCli = new Map()
+      for (const channel of channels) {
+        const cli = asString(channel?.kind)
+        if (!cli) continue
+        let row = byCli.get(cli)
+        if (!row) {
+          row = { cli, label: cli, models: new Map(), efforts: new Set() }
+          byCli.set(cli, row)
+        }
+        const model = asString(channel?.model)
+        const reasoning = asString(channel?.reasoning)
+        if (reasoning) row.efforts.add(reasoning)
+        if (!model) continue
+        let entry = row.models.get(model)
+        if (!entry) {
+          entry = { effects: [], efforts: new Set() }
+          row.models.set(model, entry)
+        }
+        if (reasoning) entry.efforts.add(reasoning)
+      }
+      return [...byCli.values()].map((row) => {
+        const models = [...row.models.entries()].map(([model, entry]) => ({
+          model,
+          efforts: [...entry.efforts],
+        }))
+        return {
+          cli: row.cli,
+          label: row.label,
+          models,
+          efforts: [...row.efforts],
+          reasoningSupported: row.efforts.size > 0,
+        }
+      })
+    }
+
+    /** 按「CLI + 模型 + 强度」在已配置组合里找唯一匹配项（找不到 → null，由保存时报待配置）。 */
+    function comboOf(draft, channels) {
+      const cli = asString(draft?.cli)
+      const model = asString(draft?.model)
+      const reasoning = asString(draft?.reasoning)
+      const list = asArray(channels)
+      if (!cli) return { instance: null, cli, model, reasoning }
+      const instance = list.find(
+        (item) =>
+          asString(item?.kind) === cli &&
+          (!model || asString(item?.model) === model) &&
+          (!reasoning || asString(item?.reasoning) === reasoning),
+      )
+      return { instance: instance ?? null, cli, model, reasoning }
+    }
+
+    /**
+     * 详情页的「CLI / 模型 / 思考强度」选项：只来自真实已配置组合。
+     * 联动：选 CLI → 该 CLI 的模型；选模型 → 该模型声明过的强度；没有声明 → 显示不支持。
      * @param {any} view
      * @param {any} role
      * @param {any} draft
      */
     function detailOptionsOf(view, role, draft) {
-      const channels = asArray(view?.channels)
-      const instance = channels.find(
-        (channel) => asString(channel.channelId) && channel.channelId === asString(draft?.channelId),
-      )
-      const channel = asObject(role?.channel)
-      let peers = []
-      if (instance) peers = [instance]
-      else if (channel.kind || channel.provider) {
-        peers = channels.filter(
-          (item) =>
-            (!channel.kind || item.kind === channel.kind) &&
-            (!channel.provider || item.provider === channel.provider),
-        )
-      }
-      const unique = (values) => {
-        const set = new Set()
-        for (const value of values) {
-          const text = asString(value)
-          if (text) set.add(text)
+      const capabilities = capabilitiesOf(view)
+      const cli = asString(draft?.cli) || asString(role?.channel?.kind) || asString(role?.kind)
+      const row = capabilities.find((item) => item.cli === cli) ?? null
+      const models = row ? row.models.map((item) => item.model) : []
+      const model = asString(draft?.model)
+      const effortSet = new Set()
+      if (row) {
+        for (const item of row.models) {
+          if (model && item.model !== model) continue
+          for (const effort of item.efforts) effortSet.add(effort)
         }
-        return [...set]
       }
-      const models = unique([
-        ...peers.map((item) => item.model),
-        asString(draft?.model),
-      ])
-      const reasonings = unique([
-        ...peers.map((item) => item.reasoning),
-        asString(draft?.reasoning),
-      ])
+      const efforts = [...effortSet]
       return {
-        channels,
-        instance: instance ?? null,
+        capabilities,
+        clis: capabilities,
+        row,
+        cli,
         models,
-        reasonings,
+        efforts,
+        reasoningSupported: efforts.length > 0,
       }
     }
 
@@ -2118,31 +2518,32 @@ window.__ModuleLoader__.load({
         changes.push({ field: 'aliases', value: aliases })
       }
 
-      const description = asString(draft?.description)
-      if (description !== asString(role?.description)) {
-        changes.push({ field: 'description', value: description })
+      // B2：单一角色设定（旧 description/prompt 合并）
+      const setting = asString(draft?.setting)
+      const currentSetting =
+        asString(role?.setting) || asString(role?.prompt) || asString(role?.description)
+      if (setting !== currentSetting) {
+        if (!setting.trim()) changes.push({ field: 'setting', restore: true })
+        else changes.push({ field: 'setting', value: setting })
       }
 
-      const prompt = asString(draft?.prompt)
-      if (prompt !== asString(role?.prompt)) {
-        if (!prompt.trim()) changes.push({ field: 'prompt', restore: true })
-        else changes.push({ field: 'prompt', value: prompt })
+      const combo = comboOf(draft, channels)
+      const targetChannelId = combo.instance ? asString(combo.instance.channelId) : ''
+      if (!combo.instance && (combo.cli || combo.model || combo.reasoning)) {
+        return { changes, error: t('pendingConfig') }
       }
-
-      const channelId = asString(draft?.channelId)
-      if (channelId !== asString(current.channelId)) {
-        if (!channelId) {
+      if (targetChannelId !== asString(current.channelId)) {
+        if (!targetChannelId) {
           for (const key of ['channelId', 'kind', 'provider', 'model', 'reasoning']) {
             changes.push({ field: `channel.${key}`, restore: true })
           }
         } else {
-          const instance = asArray(channels).find((item) => asString(item.channelId) === channelId)
-          if (!instance || (!asString(instance.provider) && !asString(instance.kind))) {
-            return { changes, error: t('pendingConfig') }
+          const instance = combo.instance
+          changes.push({ field: 'channel.channelId', value: targetChannelId })
+          if (asString(instance.kind)) changes.push({ field: 'channel.kind', value: asString(instance.kind) })
+          if (asString(instance.provider)) {
+            changes.push({ field: 'channel.provider', value: asString(instance.provider) })
           }
-          changes.push({ field: 'channel.channelId', value: channelId })
-          if (instance.kind) changes.push({ field: 'channel.kind', value: instance.kind })
-          if (instance.provider) changes.push({ field: 'channel.provider', value: instance.provider })
           for (const key of ['model', 'reasoning']) {
             const value = asString(instance[key])
             if (value) changes.push({ field: `channel.${key}`, value })
@@ -2176,30 +2577,27 @@ window.__ModuleLoader__.load({
       if (aliases.join('\u0000') !== asArray(role?.aliases).map(String).join('\u0000')) {
         patch.aliases = aliases
       }
-      const description = asString(draft?.description)
-      if (description !== asString(role?.description)) patch.description = description
-
-      const prompt = asString(draft?.prompt)
-      if (prompt !== asString(role?.prompt)) {
-        if (!prompt.trim()) return { patch, error: t('detailInvalidPrompt') }
-        patch.prompt = prompt
-      }
+      const setting = asString(draft?.setting)
+      const currentSetting =
+        asString(role?.setting) || asString(role?.prompt) || asString(role?.description)
+      if (setting !== currentSetting) patch.setting = setting
 
       const current = asObject(role?.channel)
-      const channelId = asString(draft?.channelId)
+      const combo = comboOf(draft, channels)
+      const targetChannelId = combo.instance ? asString(combo.instance.channelId) : ''
+      if (!combo.instance && (combo.cli || combo.model || combo.reasoning)) {
+        return { patch, error: t('pendingConfig') }
+      }
       /** @type {Record<string, string>} */
       const channelPatch = {}
-      if (channelId !== asString(current.channelId)) {
-        if (!channelId) return { patch, error: t('scopeGlobalBlocked') }
-        const instance = asArray(channels).find((item) => asString(item.channelId) === channelId)
-        if (!instance || (!asString(instance.provider) && !asString(instance.kind))) {
-          return { patch, error: t('pendingConfig') }
-        }
-        channelPatch.channelId = channelId
-        if (instance.kind) channelPatch.kind = instance.kind
-        if (instance.provider) channelPatch.provider = instance.provider
-        if (instance.model) channelPatch.model = instance.model
-        if (instance.reasoning) channelPatch.reasoning = instance.reasoning
+      if (targetChannelId !== asString(current.channelId)) {
+        if (!targetChannelId) return { patch, error: t('scopeGlobalBlocked') }
+        const instance = combo.instance
+        channelPatch.channelId = targetChannelId
+        if (asString(instance.kind)) channelPatch.kind = asString(instance.kind)
+        if (asString(instance.provider)) channelPatch.provider = asString(instance.provider)
+        if (asString(instance.model)) channelPatch.model = asString(instance.model)
+        if (asString(instance.reasoning)) channelPatch.reasoning = asString(instance.reasoning)
       } else {
         for (const key of ['model', 'reasoning']) {
           const value = asString(draft?.[key])
@@ -2297,6 +2695,7 @@ window.__ModuleLoader__.load({
      *   saving?: boolean,
      *   confirming?: boolean,
      *   error?: any,
+     *   showScope?: boolean,
      * }} [opts]
      */
     function renderRoleDetail(t, view, roleId, opts = {}) {
@@ -2311,6 +2710,9 @@ window.__ModuleLoader__.load({
         })
       }
       const scope = opts.scope === 'global' ? 'global' : 'session'
+      // B1：右侧栏会话面板不再显示 scope 切换（全局编辑只在设置页内联面板）；
+      // 设置页内联管理器也用它隐藏切换，避免出现「会话/全局」双入口。
+      const showScope = opts.showScope !== false
       const draft = opts.draft ?? draftOfRole(role)
       const options = detailOptionsOf(view, role, draft)
       const disabled = opts.saving === true
@@ -2326,28 +2728,27 @@ window.__ModuleLoader__.load({
           onChange: (event) => onDraft(field, event?.target?.value ?? ''),
           ...extra,
         })
-      const channelControl = jsxs('select', {
-        style: inputStyle,
-        value: asString(draft.channelId),
-        disabled,
-        onChange: (event) => onDraft('channelId', event?.target?.value ?? ''),
-        children: [
-          jsx('option', { value: '', children: t('channelUnset') }),
-          ...options.channels.map((channel) =>
-            jsx(
-              'option',
-              {
-                value: asString(channel.channelId),
-                children:
-                  [asString(channel.channelId), asString(channel.kind), asString(channel.provider)]
-                    .filter(Boolean)
-                    .join(' · ') || asString(channel.channelId),
+      // B2：CLI → 模型 → 思考强度 三级联动（选项只来自已配置组合，不伪造）
+      const cliControl =
+        options.clis.length === 0
+          ? jsx('span', { style: noteStyle, children: t('pendingConfig') })
+          : jsxs('select', {
+              style: inputStyle,
+              value: asString(draft.cli),
+              disabled,
+              onChange: (event) => {
+                onDraft('cli', event?.target?.value ?? '')
+                onDraft('model', '')
+                onDraft('reasoning', '')
               },
-              `channel-${channel.channelId}`,
-            ),
-          ),
-        ],
-      })
+              children: options.clis.map((item) =>
+                jsx(
+                  'option',
+                  { value: item.cli, children: item.label || item.cli },
+                  `cli-${item.cli}`,
+                ),
+              ),
+            })
       const modelControl =
         options.models.length === 0
           ? jsx('span', { style: noteStyle, children: `${t('unsupported')} · ${t('noModelOptions')}` })
@@ -2355,19 +2756,26 @@ window.__ModuleLoader__.load({
               style: inputStyle,
               value: asString(draft.model),
               disabled,
-              onChange: (event) => onDraft('model', event?.target?.value ?? ''),
+              onChange: (event) => {
+                onDraft('model', event?.target?.value ?? '')
+                onDraft('reasoning', '')
+              },
               children: options.models.map((value) => jsx('option', { value, children: value }, `model-${value}`)),
             })
-      const reasoningControl =
-        options.reasonings.length === 0
-          ? jsx('span', { style: noteStyle, children: `${t('unsupported')} · ${t('noReasoningOptions')}` })
-          : jsxs('select', {
-              style: inputStyle,
-              value: asString(draft.reasoning),
-              disabled,
-              onChange: (event) => onDraft('reasoning', event?.target?.value ?? ''),
-              children: options.reasonings.map((value) => jsx('option', { value, children: value }, `reasoning-${value}`)),
-            })
+      const reasoningControl = !options.reasoningSupported
+        ? jsx('span', { style: noteStyle, children: `${t('unsupported')} · ${t('noReasoningOptions')}` })
+        : jsxs('select', {
+            style: inputStyle,
+            value: asString(draft.reasoning),
+            disabled,
+            onChange: (event) => onDraft('reasoning', event?.target?.value ?? ''),
+            children: [
+              jsx('option', { value: '', children: t('fieldUnset') }, 'reasoning-unset'),
+              ...options.efforts.map((value) =>
+                jsx('option', { value, children: value }, `reasoning-${value}`),
+              ),
+            ],
+          })
 
       const fields = [
         detailField(t, {
@@ -2388,26 +2796,33 @@ window.__ModuleLoader__.load({
           disabled,
           control: text('aliases', draft.aliases, { placeholder: t('detailInvalidAliases') }),
         }),
+        // B2：单一「角色设定」（原描述 + 角色 Prompt 合并）
         detailField(t, {
-          key: 'description',
-          label: t('fieldDescription'),
-          source: fieldSourceOf(view, roleId, 'description'),
-          canRestore: canRestore('description'),
-          onRestore: () => onRestore('description'),
+          key: 'setting',
+          label: t('fieldSetting'),
+          source: fieldSourceOf(view, roleId, 'setting'),
+          canRestore: canRestore('setting'),
+          onRestore: () => onRestore('setting'),
           disabled,
-          control: text('description', draft.description),
+          control: jsx('textarea', {
+            style: textareaStyle,
+            value: asString(draft.setting),
+            disabled,
+            onChange: (event) => onDraft('setting', event?.target?.value ?? ''),
+          }),
+        }),
+        // B2：CLI → 模型 → 思考强度（不再出现「通道」用户概念）
+        detailField(t, {
+          key: 'cli',
+          label: t('fieldCli'),
+          source: fieldSourceOf(view, roleId, 'channel.kind'),
+          canRestore: canRestore('channel.kind'),
+          onRestore: () => onRestore('channel.kind'),
+          disabled,
+          control: cliControl,
         }),
         detailField(t, {
-          key: 'channel.channelId',
-          label: t('fieldChannel'),
-          source: fieldSourceOf(view, roleId, 'channel.channelId'),
-          canRestore: canRestore('channel.channelId'),
-          onRestore: () => onRestore('channel.channelId'),
-          disabled,
-          control: channelControl,
-        }),
-        detailField(t, {
-          key: 'channel.model',
+          key: 'model',
           label: t('fieldModel'),
           source: fieldSourceOf(view, roleId, 'channel.model'),
           canRestore: canRestore('channel.model'),
@@ -2416,27 +2831,13 @@ window.__ModuleLoader__.load({
           control: modelControl,
         }),
         detailField(t, {
-          key: 'channel.reasoning',
+          key: 'reasoning',
           label: t('fieldReasoning'),
           source: fieldSourceOf(view, roleId, 'channel.reasoning'),
           canRestore: canRestore('channel.reasoning'),
           onRestore: () => onRestore('channel.reasoning'),
           disabled,
           control: reasoningControl,
-        }),
-        detailField(t, {
-          key: 'prompt',
-          label: t('fieldPrompt'),
-          source: fieldSourceOf(view, roleId, 'prompt'),
-          canRestore: canRestore('prompt'),
-          onRestore: () => onRestore('prompt'),
-          disabled,
-          control: jsx('textarea', {
-            style: textareaStyle,
-            value: asString(draft.prompt),
-            disabled,
-            onChange: (event) => onDraft('prompt', event?.target?.value ?? ''),
-          }),
         }),
       ]
 
@@ -2456,37 +2857,39 @@ window.__ModuleLoader__.load({
               jsx(Tag, { tone: roleColorTone(asObject(role.state).color), children: t('detailTitle') }),
             ],
           }),
-          jsxs('div', {
-            style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
-            children: [
-              jsx('button', {
-                type: 'button',
-                style: {
-                  ...scopeButton,
-                  background:
-                    scope === 'session'
-                      ? 'var(--dsw-alias-bg-module-platform)'
-                      : 'var(--dsw-alias-bg-layer-3)',
-                },
-                'aria-pressed': scope === 'session',
-                onClick: () => opts.onScope?.('session'),
-                children: t('scopeSession'),
-              }),
-              jsx('button', {
-                type: 'button',
-                style: {
-                  ...scopeButton,
-                  background:
-                    scope === 'global'
-                      ? 'var(--dsw-alias-bg-module-platform)'
-                      : 'var(--dsw-alias-bg-layer-3)',
-                },
-                'aria-pressed': scope === 'global',
-                onClick: () => opts.onScope?.('global'),
-                children: t('scopeGlobal'),
-              }),
-            ],
-          }),
+          showScope
+            ? jsxs('div', {
+                style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+                children: [
+                  jsx('button', {
+                    type: 'button',
+                    style: {
+                      ...scopeButton,
+                      background:
+                        scope === 'session'
+                          ? 'var(--dsw-alias-bg-module-platform)'
+                          : 'var(--dsw-alias-bg-layer-3)',
+                    },
+                    'aria-pressed': scope === 'session',
+                    onClick: () => opts.onScope?.('session'),
+                    children: t('scopeSession'),
+                  }),
+                  jsx('button', {
+                    type: 'button',
+                    style: {
+                      ...scopeButton,
+                      background:
+                        scope === 'global'
+                          ? 'var(--dsw-alias-bg-module-platform)'
+                          : 'var(--dsw-alias-bg-layer-3)',
+                    },
+                    'aria-pressed': scope === 'global',
+                    onClick: () => opts.onScope?.('global'),
+                    children: t('scopeGlobal'),
+                  }),
+                ],
+              })
+            : null,
           scope === 'global'
             ? jsxs('div', {
                 style: { display: 'flex', flexDirection: 'column', gap: 2 },
@@ -2541,7 +2944,7 @@ window.__ModuleLoader__.load({
 
     /**
      * 右侧栏角色面板：列表 ↔ 详情（同栏切换，不新造弹窗体系）。
-     * 列表开关只写当前会话；详情支持会话/全局两 scope。
+     * 列表开关只写当前会话；详情只写会话覆盖（全局编辑见设置页内联管理器）。
      */
     function renderRolePane(t, view, opts = {}) {
       const selectedRoleId = asString(opts.selectedRoleId)
@@ -2699,8 +3102,8 @@ window.__ModuleLoader__.load({
      *
      * - 列表开关只写**当前会话**覆盖（`setSessionOverride(...,'enabled',…)`），
      *   成功后 reload；失败不乐观更新。
-     * - 详情支持「本会话 / 全局」两 scope：会话只写差异；全局走 S2 global writer，
-     *   保存前必须二次确认。
+     * - 详情**只写会话覆盖**（逐字段差异）；全局角色编辑在设置页内联管理器（B1），
+     *   本面板不再提供「全局」scope，避免两个入口互相顶替。
      * - Remote 失败只显示一行错误摘要，不抛、不空白。
      */
     function SidebarRolePane({
@@ -2708,11 +3111,9 @@ window.__ModuleLoader__.load({
       loadSession,
       setOverride,
       clearOverride,
-      updateGlobalRole,
     }) {
       const [state, setState] = react.useState({ status: 'loading' })
       const [selectedRoleId, setSelectedRoleId] = react.useState('')
-      const [scope, setScope] = react.useState('session')
       const [draft, setDraft] = react.useState(null)
       const [pendingRoleIds, setPendingRoleIds] = react.useState([])
       const [saving, setSaving] = react.useState(false)
@@ -2772,7 +3173,6 @@ window.__ModuleLoader__.load({
 
       function selectRole(roleId) {
         setSelectedRoleId(roleId)
-        setScope('session')
         setConfirming(false)
         setActionError(null)
         resetDraft(state.view, roleId)
@@ -2781,12 +3181,6 @@ window.__ModuleLoader__.load({
       function backToList() {
         setSelectedRoleId('')
         setDraft(null)
-        setConfirming(false)
-        setActionError(null)
-      }
-
-      function changeScope(next) {
-        setScope(next === 'global' ? 'global' : 'session')
         setConfirming(false)
         setActionError(null)
       }
@@ -2841,43 +3235,13 @@ window.__ModuleLoader__.load({
         setSaving(false)
       }
 
-      /** 保存（会话=逐字段差异；全局=一次 patch + 二次确认）。 */
+      /**
+       * 保存（B1 起：**只写会话覆盖**；全局角色编辑移到设置页内联管理器）。
+       * 会话=逐字段差异；失败立即停止，不乐观更新。
+       */
       async function saveDetail() {
         const role = asArray(state.view?.roles).find((item) => item.roleId === selectedRoleId)
         if (!role || !draft) return
-
-        if (scope === 'global') {
-          if (!confirming) {
-            setConfirming(true)
-            return
-          }
-          const built = buildGlobalPatch(t, role, draft, state.view?.channels)
-          if (built.error) {
-            setConfirming(false)
-            setActionError({ code: 'DETAIL_INVALID', message: built.error })
-            return
-          }
-          if (Object.keys(built.patch).length === 0) {
-            setConfirming(false)
-            setActionError({ code: 'DETAIL_NO_CHANGES', message: t('detailNoChanges') })
-            return
-          }
-          setSaving(true)
-          const result = await saveGlobalPatch({
-            roleId: selectedRoleId,
-            patch: built.patch,
-            updateGlobalRole,
-            reload,
-          })
-          setSaving(false)
-          setConfirming(false)
-          if (result.ok !== true) {
-            setActionError(result.error)
-            return
-          }
-          resetDraft(result.view, selectedRoleId)
-          return
-        }
 
         const built = buildSessionChanges(t, role, draft, state.view?.channels)
         if (built.error) {
@@ -2913,16 +3277,17 @@ window.__ModuleLoader__.load({
         () =>
           renderRolePane(t, state.view, {
             selectedRoleId,
-            scope,
             draft,
             saving,
             confirming,
             error: actionError,
             pendingRoleIds,
             warning: warnings.length > 0 ? `${t('warningPrefix')}: ${warnings.join(' | ')}` : '',
+            // B1：右侧栏只做会话覆盖；全局角色只在设置页内联管理器里编辑。
+            scope: 'session',
+            showScope: false,
             onSelect: selectRole,
             onBack: backToList,
-            onScope: changeScope,
             onDraft: updateDraft,
             onSave: saveDetail,
             onRestore: restoreField,
@@ -3016,8 +3381,7 @@ window.__ModuleLoader__.load({
       const loadSession = makeSessionConfigLoader(deps.getService, deps.mountError)
       const sessionActions =
         deps.sessionActions ?? makeSessionActions(deps.getService, deps.mountError)
-      const configActions = deps.configActions ?? makeConfigActions(deps.getService, deps.mountError)
-      // 2) keyed seats（scope session）
+      // 2) keyed seats（scope session；B1 起右侧栏不再承载全局编辑）
       slotCtx.slots.inject('sidebar.right.pane.tab', () =>
         slotCtx.slots.register(
           {
@@ -3030,7 +3394,6 @@ window.__ModuleLoader__.load({
               setOverride: (roleId, field, value) =>
                 sessionActions.setOverride(sessionId, roleId, field, value),
               clearOverride: (roleId, field) => sessionActions.clearOverride(sessionId, roleId, field),
-              updateGlobalRole: (roleId, patch) => configActions.updateGlobalRole(roleId, patch),
               t,
             }),
           },
@@ -3171,6 +3534,7 @@ window.__ModuleLoader__.load({
       unavailableSnapshot,
       normalizeSessionConfigView,
       renderSection,
+      renderGlobalRoleManager,
       renderRolePane,
       renderRoleList,
       renderRoleDetail,

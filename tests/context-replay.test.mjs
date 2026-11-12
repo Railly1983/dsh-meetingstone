@@ -226,3 +226,57 @@ test('dispatch 工具：continuesFrom 找不到结果时直接失败，不静默
   assert.equal(out.code, 'CONTINUATION_NOT_FOUND')
   assert.equal(dispatched, false, '不得退化成普通派单')
 })
+
+// ─── C3：artifactPolicy 保护字段 + upstreamChildId + taskId 透传 ────────────────
+
+test('C3：重放块保留 artifactPolicy 保护字段，并显式携带 upstreamChildId', () => {
+  const out = formatContinuation({
+    childId: 'prev-readonly',
+    status: 'completed',
+    output: '只读审计完成',
+    taskSpec: { title: '只读审计', artifactPolicy: 'none' },
+  })
+  assert.equal(out.from, 'prev-readonly')
+  assert.equal(out.upstreamChildId, 'prev-readonly')
+  assert.equal(out.protected, true, 'artifactPolicy 属于保护字段，必须进入保护块')
+  assert.match(out.text, /artifactPolicy: none/)
+  assert.match(out.text, /\[STRUCTURED PROTECTION/)
+})
+
+test('C3：dispatch 工具透传 taskId 外键（空值忽略，不伪造）', async () => {
+  const registered = new Map()
+  const calls = []
+  registerTools(
+    { tools: { register: (spec) => registered.set(spec.name, spec) } },
+    {
+      registry: {
+        list: () => [],
+        resolve: () => ({
+          roleId: 'role-sashi',
+          name: '沙僧',
+          description: '',
+          channel: { kind: 'acp-cli' },
+          enabled: true,
+          timeoutMs: 1000,
+        }),
+        errors: [],
+      },
+      dispatcher: {
+        async dispatch(input) {
+          calls.push(input)
+          return { ok: true, taskRef: { childId: 'new-1' }, role: input.role }
+        },
+      },
+      probe: { probe: async () => ({}) },
+    },
+  )
+  const spec = registered.get('meetingstone_dispatch')
+  const exec = { agent: { session: { header: { cwd: 'D:/proj' } } } }
+
+  const out = await spec.execute({ role: 'SS', task: '干活', taskId: 'task-10' }, exec)
+  assert.equal(out.ok, true)
+  assert.equal(calls[0].taskId, 'task-10', 'taskId 必须透传到派单器（落 run 记录）')
+
+  await spec.execute({ role: 'SS', task: '干活', taskId: '   ' }, exec)
+  assert.equal(Object.hasOwn(calls[1], 'taskId'), false, '空 taskId 不得伪造外键')
+})

@@ -218,14 +218,25 @@ function toRoleView(role, ctx, options = {}) {
     availability: roleAvailability(role, ctx),
   }
   if (options.verbose !== true) return view
+  // B2：description/prompt 已合并为单一「角色设定」；raw 角色没 setting 时按旧字段兜底。
+  const setting =
+    typeof role.setting === 'string' && role.setting
+      ? role.setting
+      : typeof role.prompt === 'string' && role.prompt
+        ? role.prompt
+        : typeof role.description === 'string'
+          ? role.description
+          : ''
   return {
     ...view,
-    // 配置透明性：不返回 prompt 全文（可能很长），只给"有没有人设"和摘要
-    description: typeof role.description === 'string' ? role.description : '',
-    hasPrompt: typeof role.prompt === 'string' && role.prompt.trim() !== '',
-    channel: { ...role.channel },
-    ...(typeof role.channel?.channelId === 'string' ? { channelId: role.channel.channelId } : {}),
+    // 不返回全文，只给摘要与可执行组合。
+    setting: setting.slice(0, 200),
+    hasPrompt: Boolean(setting.trim()),
+    // 用户可见的「CLI / 模型 / 思考强度」（内部仍是 channel 结构，不再暴露通道概念）
+    cli: typeof role.channel?.kind === 'string' ? role.channel.kind : '',
     ...(typeof role.channel?.model === 'string' ? { model: role.channel.model } : {}),
+    ...(typeof role.channel?.reasoning === 'string' ? { effort: role.channel.reasoning } : {}),
+    ...(typeof role.channel?.channelId === 'string' ? { channelId: role.channel.channelId } : {}),
     source: typeof role.source === 'string' ? role.source : 'unknown',
   }
 }
@@ -603,6 +614,11 @@ export function registerTools(ctx, deps) {
           description:
             '上一次派单的 childId：把它的终态作为不可信上下文重放进本次任务（不是真续聊，子 Agent 没有上次的内部状态）',
         },
+        taskId: {
+          type: 'string',
+          description:
+            'Team 任务 id 外键（可选）：只落 run 记录供关联查询，不写回 Team 任务板（C1 §6）',
+        },
       },
       output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
       async execute(args, exec) {
@@ -721,6 +737,10 @@ export function registerTools(ctx, deps) {
           ...(typeof args?.cwd === 'string' ? { cwd: args.cwd } : {}),
           ...(args?.isolation ? { isolation: args.isolation } : {}),
           ...(continuation ? { continuation } : {}),
+          // C3/§6：Team 任务外键（单向；只落 run 记录，不写回 Team）
+          ...(typeof args?.taskId === 'string' && args.taskId.trim()
+            ? { taskId: args.taskId.trim().slice(0, 200) }
+            : {}),
           // 并发计数按项目隔离：不传的话 dispatcher 会把所有项目算成 default（真机审计发现）。
           // 必须归一化：Windows 大小写不敏感、尾斜杠等价，否则 'D:/P' 与 'd:/p/' 会被当成两个项目而绕过串行。
           ...(normalizeProjectKey(projectRoot) ? { projectKey: normalizeProjectKey(projectRoot) } : {}),

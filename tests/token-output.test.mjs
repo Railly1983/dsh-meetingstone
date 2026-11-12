@@ -260,7 +260,7 @@ test('dispatch 失败结果保持原样（错误上下文不能被瘦身丢掉�
   assert.deepEqual(out, failure)
 })
 
-test('list_roles 默认紧凑（5 个字段）；verbose:true 才回 description/channel/model/hasPrompt', async () => {
+test('list_roles 默认紧凑（5 个字段）；verbose:true 才回设定/CLI/模型/强度', async () => {
   const tools = makeTools()
   const compact = await tools.get(TOOL_NAMES.LIST_ROLES).execute({})
   assert.deepEqual(Object.keys(compact.roles[0]).sort(), [
@@ -273,11 +273,13 @@ test('list_roles 默认紧凑（5 个字段）；verbose:true 才回 description
 
   const verbose = await tools.get(TOOL_NAMES.LIST_ROLES).execute({ verbose: true })
   const role = verbose.roles[0]
-  assert.equal(role.description, '技术骨干')
+  // B2：description+prompt 合并为单一设定；用户可见 CLI/模型/强度，不再有「通道」
+  assert.equal(role.setting, '你是技术骨干。')
   assert.equal(role.hasPrompt, true)
   assert.equal(role.channelId, 'ch-acp')
   assert.equal(role.model, 'hy4')
-  assert.equal(role.channel.kind, 'acp-cli')
+  assert.equal(role.cli, 'acp-cli')
+  assert.equal(Object.hasOwn(role, 'channel'), false, '不得再返回 channel 结构')
   assert.equal(role.source, 'global')
 })
 

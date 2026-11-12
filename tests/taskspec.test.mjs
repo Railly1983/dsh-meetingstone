@@ -11,7 +11,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { TASKSPEC_ERROR, renderTaskBrief, validateTaskSpec } from '../src/taskspec.js'
+import { summarizeTaskSpec, TASKSPEC_ERROR, renderTaskBrief, validateTaskSpec } from '../src/taskspec.js'
 import { composePromptWithContinuation } from '../src/context-replay.js'
 import { renderOutputContract } from '../src/result-contract.js'
 import { registerTools, TOOL_NAMES } from '../src/dsh/register.js'
@@ -279,4 +279,44 @@ test('适配器：TaskSpec + ContextPack 进入提示词，且在人设之后、
   const iTask = text.indexOf('任务：审查登录模块')
   const iContract = text.indexOf('[OUTPUT CONTRACT — 必须遵守]')
   assert.ok(iPersona >= 0 && iSpec > iPersona && iPack > iSpec && iTask > iPack && iContract > iTask)
+})
+
+// ─── C3：artifactPolicy（C1 §5 只读/审计落盘例外） ────────────────────────────
+
+test('C3：artifactPolicy 只接受 none | runs，非法值显式拒绝', () => {
+  const bad = validateTaskSpec({ title: '只读审计', artifactPolicy: 'readonly' })
+  assert.equal(bad.ok, false)
+  assert.equal(bad.code, TASKSPEC_ERROR)
+  assert.ok(bad.fields.includes('artifactPolicy'))
+
+  // artifactPolicy 本身也是结构化字段：只传它（缺 title）必须进入结构化校验并报缺 title
+  const noTitle = validateTaskSpec({ artifactPolicy: 'none' })
+  assert.equal(noTitle.ok, false)
+  assert.ok(noTitle.fields.includes('title'))
+})
+
+test('C3：artifactPolicy=none 进入简报与落盘摘要，不被截断丢失', () => {
+  const result = validateTaskSpec({
+    title: '只读审计',
+    objective: '只读核对代码',
+    scope: { include: ['src/**'], exclude: ['tests/**'] },
+    acceptance: ['给出 file:line 证据'],
+    artifactPolicy: 'none',
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.spec.artifactPolicy, 'none')
+
+  const brief = renderTaskBrief(result.spec, result.contextPack)
+  assert.match(brief, /artifactPolicy: none/)
+
+  const summary = summarizeTaskSpec(result.spec)
+  assert.equal(summary.artifactPolicy, 'none', '保护字段不得随摘要丢失')
+
+  const runs = validateTaskSpec({ title: '写任务', artifactPolicy: 'runs' })
+  assert.equal(runs.spec.artifactPolicy, 'runs')
+  assert.equal(summarizeTaskSpec(runs.spec).artifactPolicy, 'runs')
+
+  const plain = validateTaskSpec({ title: '普通任务' })
+  assert.equal(Object.hasOwn(plain.spec, 'artifactPolicy'), false, '未声明时不写字段（零迁移）')
+  assert.equal(Object.hasOwn(summarizeTaskSpec(plain.spec), 'artifactPolicy'), false)
 })

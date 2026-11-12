@@ -16,8 +16,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  ARTIFACT_POLICIES,
   buildHandoff,
   parseStructuredResult,
+  renderOutputContract,
   resultRecordFields,
   SUMMARY_MAX_BYTES,
 } from '../src/result-contract.js'
@@ -294,4 +296,38 @@ test('artifact：NOT_FOUND / CORRUPT / INVALID_RANGE 错误码明确', async () 
   const badRange = await tool.execute({ childId: 'c1', lineFrom: 3, lineTo: 1 })
   assert.equal(badRange.ok, false)
   assert.equal(badRange.code, 'INVALID_RANGE')
+})
+
+// ─── C3：artifactPolicy（C1 §5 只读落盘例外） ─────────────────────────────────
+
+test('C3：结果回显 artifactPolicy 合法值 → reportedArtifactPolicy；非法值不冒充', () => {
+  assert.deepEqual(ARTIFACT_POLICIES, ['none', 'runs'])
+
+  const parsed = parseStructuredResult(
+    JSON.stringify({ ...STRUCTURED, artifactPolicy: 'none', artifacts: [] }),
+  )
+  assert.equal(parsed.artifactPolicy, 'none')
+  const fields = resultRecordFields(parsed)
+  assert.equal(fields.reportedArtifactPolicy, 'none', '回显值单独落盘，不覆盖权威字段')
+  assert.equal(Object.hasOwn(fields, 'artifactPolicy'), false, '权威 artifactPolicy 由 TaskSpec/记录层提供')
+
+  const illegal = parseStructuredResult(JSON.stringify({ ...STRUCTURED, artifactPolicy: 'readonly' }))
+  assert.equal(illegal.artifactPolicy, null, '非法策略不得冒充合法值')
+  const illegalFields = resultRecordFields(illegal)
+  assert.equal(Object.hasOwn(illegalFields, 'reportedArtifactPolicy'), false)
+})
+
+test('C3：只读派单输出契约禁止写工作区；缺省契约仍要求落 runs 目录', () => {
+  const none = renderOutputContract('none')
+  assert.match(none, /artifactPolicy=none/)
+  assert.match(none, /禁止写工作区/)
+  assert.match(none, /artifacts 必须为空数组/)
+  assert.equal(none.includes('完整内容写入项目产物目录'), false)
+
+  const fallback = renderOutputContract()
+  assert.match(fallback, /完整内容写入项目产物目录/)
+  assert.match(fallback, /artifactPolicy: 回显派单声明的落盘策略/)
+
+  const runs = renderOutputContract('runs')
+  assert.match(runs, /完整内容写入项目产物目录/)
 })

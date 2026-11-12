@@ -42,12 +42,14 @@ export const SESSION_CONFIG_KEYS = Object.freeze([
   'projectRules',
 ])
 
-/** 会话覆盖允许的角色字段（别名用 `alias` 或 `aliases` 都行）。 */
+/** 会话覆盖允许的角色字段（别名用 `alias` 或 `aliases` 都行；
+ *  B2：`setting` 是合并后的唯一设定字段，description/prompt 仅作旧字段迁移入口）。 */
 export const ROLE_PATCH_KEYS = Object.freeze([
   'roleId',
   'name',
   'alias',
   'aliases',
+  'setting',
   'description',
   'prompt',
   'channel',
@@ -66,12 +68,12 @@ export const CHANNEL_PATCH_KEYS = Object.freeze([
   'reasoning',
 ])
 
-/** 角色级字段（sources 用；别名统一记作 `aliases`）。 */
+/** 角色级字段（sources 用；别名统一记作 `aliases`）。
+ *  B2：description/prompt 已合并进 setting，不再作为独立来源字段（旧字段只在写入时迁移）。 */
 export const ROLE_SOURCE_FIELDS = Object.freeze([
   'name',
   'aliases',
-  'description',
-  'prompt',
+  'setting',
   'enabled',
   'fallbackRoleId',
   'timeoutMs',
@@ -264,12 +266,18 @@ export function sanitizeRolePatch(raw, options = {}) {
         else bad('name', '必须是非空字符串')
         break
       }
+      case 'setting':
+        if (typeof value === 'string') out.setting = value
+        else bad('setting', '必须是字符串')
+        break
       case 'description':
-        if (typeof value === 'string') out.description = value
+        // B2 迁移入口：旧字段统一写进 setting（不再维护两份）
+        if (typeof value === 'string') out.setting = value
         else bad('description', '必须是字符串')
         break
       case 'prompt':
-        if (typeof value === 'string' && value.trim()) out.prompt = value
+        // B2 迁移入口：旧 prompt 合并进 setting
+        if (typeof value === 'string' && value.trim()) out.setting = value
         else bad('prompt', '必须是非空字符串（恢复继承请用 clearOverride）')
         break
       case 'enabled':
@@ -467,7 +475,18 @@ export function diffRoleOverride(inherited, patch) {
   const restored = []
   for (const field of ROLE_SOURCE_FIELDS) {
     if (!Object.hasOwn(patch, field)) continue
-    if (deepEqual(patch[field], /** @type {any} */ (inherited)[field])) restored.push(field)
+    // B2：setting 的继承值可能是旧字段（prompt/description），按同一合并语义比较
+    const inheritedValue =
+      field === 'setting'
+        ? typeof inherited.setting === 'string'
+          ? inherited.setting
+          : typeof inherited.prompt === 'string' && inherited.prompt
+            ? inherited.prompt
+            : typeof inherited.description === 'string'
+              ? inherited.description
+              : undefined
+        : /** @type {any} */ (inherited)[field]
+    if (deepEqual(patch[field], inheritedValue)) restored.push(field)
     else out[field] = patch[field]
   }
   if (patch.channel) {
@@ -522,6 +541,8 @@ export function normalizeFieldPath(field) {
   const value = field.trim()
   if (!value) return null
   if (value === 'alias') return 'aliases'
+  // B2：旧字段迁移入口 —— description/prompt 都指向合并后的 setting
+  if (value === 'description' || value === 'prompt') return 'setting'
   if (ROLE_SOURCE_FIELDS.includes(value)) return value
   if (value.startsWith('channel.')) {
     const key = value.slice('channel.'.length)
@@ -576,6 +597,10 @@ export function fieldSource(sources, roleId, field = 'enabled') {
 function hasExplicit(raw, field) {
   if (!isPlainObject(raw)) return false
   if (field === 'aliases') return Object.hasOwn(raw, 'aliases') || Object.hasOwn(raw, 'alias')
+  // B2：setting 的显式来源也包含旧字段（description/prompt 会在写入/读取时迁移）
+  if (field === 'setting') {
+    return Object.hasOwn(raw, 'setting') || Object.hasOwn(raw, 'description') || Object.hasOwn(raw, 'prompt')
+  }
   return Object.hasOwn(raw, field)
 }
 

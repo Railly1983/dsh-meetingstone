@@ -22,6 +22,7 @@
  */
 
 import { CHANNEL_KINDS } from '../roles/registry.js'
+import { buildCliCapabilities, effortOptionsFor, modelOptionsFor } from '../roles/capabilities.js'
 import { fieldSource } from '../session/config.js'
 
 /** 用户偏好：来自显式 enabled 配置；默认值 -> unset。 */
@@ -336,3 +337,65 @@ export const STATE_MODEL_VALUES = Object.freeze({
   readiness: READINESS_VALUES,
   quota: QUOTA_VALUES,
 })
+
+// ─── B2：角色编辑器的「CLI → 模型 → 思考强度」联动（PDF 第 2 条） ──────────────
+//
+// 用户只面对 CLI/模型/强度；选项只来自已配置的执行组合（channels），
+// 没有声明的项标记「不支持」，不伪造能力。
+
+/**
+ * CLI 能力矩阵（给编辑器渲染下拉用）。
+ * @param {any[]} channels
+ * @returns {ReturnType<typeof buildCliCapabilities>}
+ */
+export function deriveCliOptions(channels = []) {
+  return buildCliCapabilities(channels)
+}
+
+/**
+ * 某 CLI 的模型选项（只来自已配置组合）。
+ * @param {string} cli
+ * @param {any[]} channels
+ * @returns {string[]}
+ */
+export function deriveModelOptions(cli, channels = []) {
+  return modelOptionsFor(cli, channels)
+}
+
+/**
+ * 某 CLI（+模型）的思考强度选项；`supported=false` 表示当前组合不支持。
+ * @param {string} cli
+ * @param {string | null | undefined} model
+ * @param {any[]} channels
+ */
+export function deriveEffortOptions(cli, model, channels = []) {
+  return effortOptionsFor(cli, model, channels)
+}
+
+/**
+ * 角色编辑器的字段视图：单一「设定」+ CLI/模型/强度（不再暴露「通道」）。
+ * @param {any} role
+ * @param {any[]} channels
+ */
+export function deriveRoleEditorFields(role, channels = []) {
+  const channel = role && typeof role === 'object' && role.channel && typeof role.channel === 'object' ? role.channel : {}
+  const cli = typeof channel.kind === 'string' ? channel.kind : ''
+  const model = typeof channel.model === 'string' ? channel.model : ''
+  const effort = typeof channel.reasoning === 'string' ? channel.reasoning : ''
+  const setting =
+    typeof role?.setting === 'string' && role.setting
+      ? role.setting
+      : typeof role?.prompt === 'string' && role.prompt
+        ? role.prompt
+        : typeof role?.description === 'string'
+          ? role.description
+          : ''
+  return {
+    setting,
+    cli,
+    model,
+    effort,
+    models: deriveModelOptions(cli, channels),
+    efforts: deriveEffortOptions(cli, model, channels),
+  }
+}

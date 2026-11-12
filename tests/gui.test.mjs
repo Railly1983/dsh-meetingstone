@@ -716,18 +716,59 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
   assert.ok(clearDesc.parameters.every((p) => p.codec.mode === 'strict' && p.codec.typeSymbol))
 
   const injected = options.inject()
+  // B1：设置页内联全局角色管理复用 updateGlobalRole 写路径；不再注入 openRoles
+  // （旧实现会把「管理角色」错跳到会话级右侧栏面板，settings.section 是 root 无 sessionId）。
+  assert.equal(typeof injected.updateGlobalRole, 'function', '设置页注入全局角色写入口')
+  assert.equal(injected.openRoles, undefined, '设置页不再注入 openRoles（不跳右侧栏）')
   const snapshot = await injected.list()
+  // B1：roleView 增补 description/prompt/fieldSources/sourceLayer/channel(嵌套)，
+  // 设置页内联全局角色管理需要这些字段（原实现只投影展示/通道字段）。
+  const allDefaultSources = Object.fromEntries(
+    [
+      'name',
+      'aliases',
+      'setting',
+      'enabled',
+      'channel.channelId',
+      'channel.kind',
+      'channel.provider',
+      'channel.cli',
+      'channel.model',
+      'channel.reasoning',
+    ].map((field) => [field, 'default']),
+  )
   assert.deepEqual(snapshot.roles, [
     {
       roleId: 'role-sashi',
       name: '沙僧',
       aliases: ['SS'],
+      setting: '',
+      description: '',
+      prompt: '',
       enabled: true,
       availability: 'available',
       channelId: 'ch-acp-flash',
+      kind: '',
       provider: 'acp',
       model: 'flash-1',
       reasoning: '',
+      sourceLayer: 'default',
+      fieldSources: allDefaultSources,
+      state: {
+        userPreference: 'unset',
+        readiness: 'unknown',
+        readinessReason: 'PROVIDER_EVIDENCE_MISSING',
+        quota: 'unknown',
+        color: 'gray',
+        availability: 'available',
+      },
+      channel: {
+        channelId: 'ch-acp-flash',
+        kind: '',
+        provider: 'acp',
+        model: 'flash-1',
+        reasoning: '',
+      },
     },
   ])
   assert.deepEqual(snapshot.channels, [{ channelId: 'ch-acp-flash', kind: 'acp-cli' }])
@@ -738,6 +779,7 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
     projectConfigFile: '.meetingstone.json',
     limits: { serializeWrites: true, maxParallelWritesTotal: 4, defaultIsolation: 'worktree' },
     channels: [],
+    capabilities: [],
     cli: null,
     cliError: null,
   })
@@ -760,6 +802,7 @@ test('Browser half：normalizeSnapshot 对脏数据回退为空数组/无错误'
     projectConfigFile: '.meetingstone.json',
     limits: { serializeWrites: true, maxParallelWritesTotal: 4, defaultIsolation: 'worktree' },
     channels: [],
+    capabilities: [],
     cli: null,
     cliError: null,
   }
@@ -860,6 +903,7 @@ test('Browser half：normalizeSessionConfigView 收窄脏数据（未知来源�
     defaultRoleId: '',
     defaultRoleSource: 'default',
     channels: [],
+    capabilities: [],
     warnings: [],
   })
 
@@ -1094,7 +1138,9 @@ test('Browser half：右侧栏列表只有名称 + 三色二态开关；详情�
   assert.equal(props.list, undefined, '侧栏不再消费无参 list 快照')
   assert.equal(typeof props.setOverride, 'function', '列表开关只写会话覆盖')
   assert.equal(typeof props.clearOverride, 'function', '字段可恢复继承')
-  assert.equal(typeof props.updateGlobalRole, 'function', '全局 scope 走 global writer')
+  // B1：右侧栏只承载会话覆盖；全局角色编辑已移到设置页内联管理器，
+  // 不再从这里注入 global writer（全局与会话入口彻底分离）。
+  assert.equal(props.updateGlobalRole, undefined, '右侧栏不再承载全局写入')
 
   const result = await props.loadSession()
   assert.deepEqual(sessionCalls, ['sess-p1'], '必须带 sessionId 调 strict getSessionConfig')
@@ -1128,19 +1174,24 @@ test('Browser half：右侧栏列表只有名称 + 三色二态开关；详情�
   const detailTree = exports.__test.renderRolePane(t, result.view, {
     selectedRoleId: 'role-sashi',
     scope: 'session',
+    showScope: false,
     draft: exports.__test.draftOfRole(role),
   })
   const detailStrings = []
   collectStringsDeep(detailTree, detailStrings)
-  for (const key of ['fieldName', 'fieldAliases', 'fieldDescription', 'fieldChannel', 'fieldModel', 'fieldReasoning', 'fieldPrompt']) {
+  // B2：单一角色设定 + CLI/模型/强度；不再有「通道」用户概念
+  for (const key of ['fieldName', 'fieldAliases', 'fieldSetting', 'fieldCli', 'fieldModel', 'fieldReasoning']) {
     assert.ok(detailStrings.includes(key), `详情字段 ${key} 可见`)
   }
   assert.ok(detailStrings.includes('sourceGlobal'), '字段来源（全局）可见')
   assert.ok(detailStrings.includes('sourceSession'), '字段来源（会话）可见')
   assert.ok(detailStrings.includes('restoreInherit'), '会话覆盖字段有恢复继承')
   assert.ok(findNodeDeep(detailTree, (node) => node.type === 'input'), '详情可编辑（input）')
-  assert.ok(findNodeDeep(detailTree, (node) => node.type === 'select'), '通道/模型是真实选项（select）')
-  assert.ok(findNodeDeep(detailTree, (node) => node.type === 'textarea'), 'Prompt 可编辑（textarea）')
+  assert.ok(findNodeDeep(detailTree, (node) => node.type === 'select'), 'CLI/模型是真实选项（select）')
+  assert.ok(findNodeDeep(detailTree, (node) => node.type === 'textarea'), '角色设定可编辑（textarea）')
+  // B1：不再渲染「本会话 / 全局」scope 切换按钮（全局编辑在设置页内联面板）。
+  assert.ok(!detailStrings.includes('scopeSession'), '右侧栏无会话 scope 按钮')
+  assert.ok(!detailStrings.includes('scopeGlobal'), '右侧栏无全局 scope 按钮')
 })
 
 
@@ -1489,6 +1540,74 @@ test('Browser half：设置页只剩两区（外部 CLI 连接 / 默认角色配
   assert.ok(failedStrings.includes('cliRetry'), '重新检测入口可见')
   const failedSwitches = collectNodes(failed, (node) => node.type === 'button' && node.props && node.props.role === 'switch')
   assert.equal(failedSwitches[0].props['aria-checked'], false, '失败后开关保持关（不做乐观假开启）')
+})
+
+test('B1：设置页「管理角色」内联展开全局角色管理（不打开右侧栏、无会话 scope）', async () => {
+  const { exports, registrations, sidebarOpenCalls } = await loadClientHarness()
+  const t = (k) => k
+  const section = registrations.find((r) => r.options.name === 'settings.section')
+  const injected = section.options.inject()
+  assert.equal(typeof injected.updateGlobalRole, 'function')
+  assert.equal(injected.openRoles, undefined, '不再注入会跳右侧栏的入口')
+
+  const snapshot = exports.__test.normalizeSnapshot({
+    roles: [
+      {
+        roleId: 'role-sashi',
+        name: '沙僧',
+        aliases: ['SS'],
+        description: '骨干',
+        prompt: '少说多做',
+        enabled: true,
+        channelId: 'ch-acp',
+        kind: 'acp-cli',
+        provider: 'acp',
+        model: 'm1',
+        reasoning: 'low',
+        sourceLayer: 'global',
+      },
+    ],
+    channels: [{ channelId: 'ch-acp', kind: 'acp-cli' }],
+    lastError: null,
+    global: {
+      channels: [{ channelId: 'ch-acp', kind: 'acp-cli', provider: 'acp', model: 'm1', reasoning: 'low' }],
+    },
+  })
+
+  // 列表态：内联在设置页渲染，不调用 sidebarRight.openTab。
+  const listTree = exports.__test.renderSection(t, snapshot, {
+    cliStates: [],
+    managerOpen: true,
+    manager: { onSelect: () => {} },
+  })
+  const listStrings = []
+  collectStringsDeep(listTree, listStrings)
+  assert.ok(listStrings.includes('globalRolesTitle'), '全局角色管理内联标题')
+  assert.ok(listStrings.includes('globalRolesNote'), '说明写全局、会话覆盖在右侧栏')
+  assert.ok(listStrings.includes('沙僧'), '全局角色列表可见')
+  assert.ok(listStrings.includes('globalRoleBadge'), '全局标识可见')
+  assert.deepEqual(sidebarOpenCalls, [], '设置页内联管理不打开右侧栏 tab')
+
+  // 详情态：全局 scope 字段可编辑，无 scope 切换按钮（入口分离）。
+  const detailTree = exports.__test.renderSection(t, snapshot, {
+    cliStates: [],
+    managerOpen: true,
+    manager: {
+      selectedRoleId: 'role-sashi',
+      draft: exports.__test.draftOfRole(snapshot.roles[0]),
+      onSelect: () => {},
+      onDraft: () => {},
+      onSave: () => {},
+    },
+  })
+  const detailStrings = []
+  collectStringsDeep(detailTree, detailStrings)
+  for (const key of ['fieldName', 'fieldSetting', 'scopeGlobalNote']) {
+    assert.ok(detailStrings.includes(key), `全局详情应含 ${key}`)
+  }
+  assert.ok(!detailStrings.includes('scopeSession'), '无会话 scope 按钮')
+  assert.ok(!detailStrings.includes('scopeGlobal'), '无全局 scope 按钮（已是全局面板）')
+  assert.ok(findNodeDeep(detailTree, (node) => node.type === 'textarea'), '角色设定可编辑')
 })
 
 test('strict 契约：Host descriptor 与 Client contribution 的 method/参数/typeSymbol 完全一致', async () => {

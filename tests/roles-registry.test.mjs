@@ -366,3 +366,31 @@ test('channelId 与 source 被正确保留', () => {
   const b = registry.get('role-b')
   assert.equal(b?.source, 'project')
 })
+
+// ─── B2：角色设定（description+prompt 合并）迁移 ──────────────────────────────
+
+test('B2：description+prompt 迁移为单一 setting（prompt 优先），旧字段不再保留', () => {
+  const legacy = createRegistry({
+    globalRoles: [
+      { roleId: 'role-a', name: 'A', description: '职责说明', prompt: '你是人设。' },
+      { roleId: 'role-b', name: 'B', description: '只有描述' },
+      { roleId: 'role-c', name: 'C', setting: '新设定', description: '旧', prompt: '旧人设' },
+    ],
+  })
+  const byId = Object.fromEntries(legacy.list().map((role) => [role.roleId, role]))
+  assert.equal(byId['role-a'].setting, '你是人设。')
+  assert.equal(byId['role-a'].description, '你是人设。', '兼容镜像 = setting')
+  assert.equal(byId['role-b'].setting, '只有描述')
+  assert.equal(byId['role-b'].prompt, '只有描述', '兼容镜像 = setting')
+  assert.equal(byId['role-c'].setting, '新设定', '新字段优先于旧字段')
+})
+
+test('B2：合并覆盖时 setting/description/prompt 都写进 setting（不再双写）', () => {
+  const registry = createRegistry({
+    globalRoles: [{ roleId: 'role-a', name: 'A', setting: '原设定' }],
+    projectOverrides: { 'role-a': { prompt: '项目人设' } },
+  })
+  const role = registry.get('role-a')
+  assert.equal(role.setting, '项目人设')
+  assert.equal(role.description, '项目人设')
+})

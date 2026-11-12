@@ -112,7 +112,7 @@ test('多类型关键词：以任务中首次出现的位置为准（不是固�
   assert.equal(reviewFirst.taskType, 'review')
 })
 
-test('角色描述很泛时：prompt 里的关键词作为弱信号兜底（如「调研」）', () => {
+test('角色描述很泛时：合并后的角色设定（含原 prompt）里的关键词作为兜底信号', () => {
   const scout = role({
     roleId: 'role-assistant',
     name: '助手',
@@ -123,7 +123,7 @@ test('角色描述很泛时：prompt 里的关键词作为弱信号兜底（如�
   const res = route('调研现有鉴权方案', { roles: [scout] })
   assert.equal(res.ok, true)
   assert.equal(res.roleId, 'role-assistant')
-  assert.match(res.reason, /角色人设含「调研」/)
+  assert.match(res.reason, /角色设定含「调研」/)
 })
 
 test('只从 enabled 且 availability=available 的角色中选；不可用则回退 defaultRoleId', () => {

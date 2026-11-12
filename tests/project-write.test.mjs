@@ -72,7 +72,7 @@ test('applyProjectPatch：只保留白名单，保留未知外层与角色未知
   assert.equal(config.dispatchNotes, '新备注')
   assert.deepEqual(config.limits, { serializeWrites: false })
   assert.deepEqual(config.futureTop, { a: 1 })
-  assert.equal(config.roleOverrides['role-sashi'].description, '新')
+  assert.equal(config.roleOverrides['role-sashi'].setting, '新', 'B2：description 写入迁移为 setting')
   assert.equal(config.roleOverrides['role-sashi'].futureField, 'keep')
   assert.equal(raw.roleOverrides['role-sashi'].description, '旧', '入参不可变')
 })
@@ -103,7 +103,7 @@ test('applyProjectPatch：roles 按 roleId 合并，新增角色要求 name', ()
   })
   assert.equal(result.ok, true)
   const roles = /** @type {any} */ (result).config.roles
-  assert.equal(roles[0].description, '补充')
+  assert.equal(roles[0].setting, '补充', 'B2：description 写入迁移为 setting')
   assert.equal(roles[0].future, 1, '未知字段保留')
   assert.equal(roles[1].name, 'B')
 

@@ -122,16 +122,15 @@ test('三层合并：session > project > global，且字段来源逐项标注', 
   const sashi = effective.roles.find((role) => role.roleId === 'role-sashi')
   assert.equal(sashi.channel.model, 'm-session', 'session 覆盖项目与全局')
   assert.equal(sashi.channel.reasoning, 'high')
-  assert.equal(sashi.description, '项目描述', 'session 没写的字段保留项目值')
+  // B2：description/prompt 合并为单一 setting；session 的 prompt 迁移为 setting 后覆盖项目 description
+  assert.equal(sashi.setting, '会话规则')
   assert.deepEqual(sashi.aliases, ['SSS'], 'aliases 整体替换，不是追加')
-  assert.equal(sashi.prompt, '会话规则')
   assert.equal(sashi.source, 'session')
 
   assert.deepEqual(sources.roles['role-sashi'].fields, {
     name: 'global',
     aliases: 'session',
-    description: 'project',
-    prompt: 'session',
+    setting: 'session',
     enabled: 'default',
     fallbackRoleId: 'default',
     timeoutMs: 'default',
@@ -256,8 +255,7 @@ test('差异写盘：等于继承值的字段不写；改成继承值会删除�
     roleId: 'role-sashi',
     name: '沙僧',
     aliases: ['SS'],
-    description: '骨干',
-    prompt: '规则',
+    setting: '规则',
     channel: { kind: 'acp-cli', model: 'm1' },
     enabled: true,
     fallbackRoleId: null,
@@ -268,13 +266,13 @@ test('差异写盘：等于继承值的字段不写；改成继承值会删除�
   let result = await store.setOverride(ROOT, 'sess-a', {
     roleId: 'role-sashi',
     inherited,
-    patch: { description: '骨干', channel: { model: 'm2' } },
+    patch: { setting: '规则', channel: { model: 'm2' } },
   })
   assert.equal(result.written, true)
-  assert.deepEqual(result.patch, { channel: { model: 'm2' } }, 'description 与继承值相同，不落盘')
+  assert.deepEqual(result.patch, { channel: { model: 'm2' } }, 'setting 与继承值相同，不落盘')
   const text = /** @type {string} */ (fs.files.get(join(ROOT, SESSIONS_RELATIVE_DIR, 'sess-a.json')))
   assert.ok(text.includes('"model": "m2"'))
-  assert.ok(!text.includes('骨干'), '没有把继承值抄进文件')
+  assert.ok(!text.includes('规则'), '没有把继承值抄进文件')
 
   // 改成继承值 = 恢复继承，删除旧覆盖
   result = await store.setOverride(ROOT, 'sess-a', {
@@ -289,9 +287,9 @@ test('差异写盘：等于继承值的字段不写；改成继承值会删除�
   await store.setOverride(ROOT, 'sess-a', {
     roleId: 'role-sashi',
     inherited,
-    patch: { description: '会话描述', channel: { model: 'm3', reasoning: 'high' } },
+    patch: { setting: '会话描述', channel: { model: 'm3', reasoning: 'high' } },
   })
-  result = await store.clearOverride(ROOT, 'sess-a', { roleId: 'role-sashi', field: 'description' })
+  result = await store.clearOverride(ROOT, 'sess-a', { roleId: 'role-sashi', field: 'setting' })
   assert.deepEqual(result.config.roleOverrides['role-sashi'], {
     channel: { model: 'm3', reasoning: 'high' },
   })
@@ -463,14 +461,14 @@ test('deepEqual / diff 辅助函数：数组与嵌套对象按值比较', () => 
 
   const inherited = {
     aliases: ['SS'],
-    description: 'd',
+    setting: 'd',
     channel: { kind: 'acp-cli', model: 'm1' },
   }
   const result = diffRoleOverride(inherited, {
     aliases: ['SS'],
-    description: 'd2',
+    setting: 'd2',
     channel: { model: 'm1' },
   })
-  assert.deepEqual(result.patch, { description: 'd2' })
+  assert.deepEqual(result.patch, { setting: 'd2' })
   assert.deepEqual(result.restored, ['aliases', 'channel.model'])
 })

@@ -594,6 +594,21 @@ export function createRunStore(options) {
       record?.overlapTotal,
     )
     const routing = normalizeRouting(record?.routing)
+    const artifacts = recordStringList(record.artifacts)
+    // C3/C1 §5：落盘策略与违规标记（只读任务出现 artifacts 即违规，但不改任务状态）
+    // 权威来源：记录顶层 > TaskSpec 摘要；旧记录都没有 → null（读取方按 runs 处理）
+    const artifactPolicy =
+      record.artifactPolicy === 'none' || record.artifactPolicy === 'runs'
+        ? record.artifactPolicy
+        : record.taskSpec?.artifactPolicy === 'none' || record.taskSpec?.artifactPolicy === 'runs'
+          ? record.taskSpec.artifactPolicy
+          : null
+    const artifactPolicyViolation = artifactPolicy === 'none' && artifacts.length > 0
+    // 证据字段：耗时只在起止时间都合法时计算（旧记录缺字段 → 不写）
+    const durationMs =
+      Number.isFinite(record.startedAt) && Number.isFinite(record.finishedAt) && record.finishedAt >= record.startedAt
+        ? record.finishedAt - record.startedAt
+        : null
     return {
       schemaVersion: 1,
       childId: String(record.childId),
@@ -633,12 +648,26 @@ export function createRunStore(options) {
         (typeof record.summary === 'string' &&
           Buffer.byteLength(record.summary, 'utf8') > MAX_SUMMARY_BYTES),
       evidence: recordEvidence(record.evidence),
-      artifacts: recordStringList(record.artifacts),
+      artifacts,
       reportedChangedFiles: recordStringList(record.reportedChangedFiles),
       resultTests: recordStringList(record.resultTests),
       openIssues: recordStringList(record.openIssues),
       nextAction: recordText(record.nextAction, 2 * 1024),
       handoff: recordHandoff(record.handoff),
+      // C3：C1 §5/§6 证据字段。旧记录缺这些字段时读取为 null/缺省，不报错、不改写。
+      taskId: typeof record.taskId === 'string' && record.taskId ? record.taskId.trim().slice(0, 200) : null,
+      artifactPolicy,
+      ...(artifactPolicyViolation ? { artifactPolicyViolation: true } : {}),
+      // 子 Agent 回显的落盘策略（审计用；不覆盖上面的权威 artifactPolicy）
+      reportedArtifactPolicy:
+        record.reportedArtifactPolicy === 'none' || record.reportedArtifactPolicy === 'runs'
+          ? record.reportedArtifactPolicy
+          : null,
+      upstreamChildId:
+        typeof record.upstreamChildId === 'string' && record.upstreamChildId
+          ? record.upstreamChildId.trim().slice(0, 200)
+          : null,
+      ...(durationMs === null ? {} : { durationMs }),
       // P0-B：TaskSpec / ContextPack 摘要（已经是截断后的形状，这里再白名单一次）
       taskSpec: summarizeTaskSpec(record.taskSpec),
       contextPack: summarizeContextPack(record.contextPack),
@@ -957,6 +986,13 @@ export function createRunStore(options) {
         ...(parsed.interrupted === true ? { interrupted: true } : {}),
         // P0-B/P0-C：列表里展示任务名与结构化结果摘要（不返回长文）
         title: typeof parsed.title === 'string' && parsed.title ? parsed.title : null,
+        // C3：C1 §5/§6 证据字段（列表同样可见；旧记录缺字段 → null/缺省，不报错）
+        taskId: parsed.taskId ?? null,
+        artifactPolicy: parsed.artifactPolicy ?? null,
+        ...(parsed.artifactPolicyViolation === true ? { artifactPolicyViolation: true } : {}),
+        reportedArtifactPolicy: parsed.reportedArtifactPolicy ?? null,
+        upstreamChildId: parsed.upstreamChildId ?? null,
+        ...(typeof parsed.durationMs === 'number' ? { durationMs: parsed.durationMs } : {}),
         structuredResult: parsed.structuredResult === true,
         resultStatus: typeof parsed.resultStatus === 'string' ? parsed.resultStatus : null,
         summaryPreview: typeof parsed.summary === 'string' ? parsed.summary.slice(0, 200) : '',

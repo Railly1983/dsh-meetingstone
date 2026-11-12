@@ -130,17 +130,17 @@ test('buildSessionChanges：只产生真实差异；等值 → 空；空名称/�
   const same = __test.draftOfRole(ROLE)
   assert.deepEqual(__test.buildSessionChanges(t, ROLE, same, CHANNELS).changes, [], '没有修改就不写')
 
+  // B2：单一角色设定；清空 → 恢复继承（不再有独立 prompt 字段）
   const changed = __test.buildSessionChanges(
     t,
     ROLE,
-    { ...same, name: '沙僧2', model: 'm2', prompt: '' },
+    { ...same, name: '沙僧2', setting: '' },
     CHANNELS,
   )
   assert.equal(changed.error, null)
   assert.deepEqual(changed.changes, [
     { field: 'name', value: '沙僧2' },
-    { field: 'prompt', restore: true },
-    { field: 'channel.model', value: 'm2' },
+    { field: 'setting', restore: true },
   ])
 
   const invalid = __test.buildSessionChanges(t, ROLE, { ...same, name: '   ' }, CHANNELS)
@@ -148,10 +148,11 @@ test('buildSessionChanges：只产生真实差异；等值 → 空；空名称/�
   assert.deepEqual(invalid.changes, [])
 })
 
-test('buildSessionChanges：切换通道实例时对齐 kind/provider/model/reasoning', async () => {
+test('buildSessionChanges：切换 CLI+模型+强度组合时对齐内部 channel 字段', async () => {
   const { __test } = await loadClient()
   const t = (key) => key
-  const draft = { ...__test.draftOfRole(ROLE), channelId: 'ch-codex' }
+  // B2：用户只改 CLI/模型/强度；内部由唯一匹配的已配置组合解析出 channel
+  const draft = { ...__test.draftOfRole(ROLE), cli: 'codex', model: 'sol-1', reasoning: 'high' }
   const built = __test.buildSessionChanges(t, ROLE, draft, CHANNELS)
   assert.equal(built.error, null)
   assert.deepEqual(built.changes, [
@@ -163,22 +164,26 @@ test('buildSessionChanges：切换通道实例时对齐 kind/provider/model/reas
   ])
 })
 
-test('buildGlobalPatch：只写差异；清空 Prompt 在全局层无效（不伪造删除）', async () => {
+test('buildGlobalPatch：只写差异；设定/组合变更写 setting 与内部 channel', async () => {
   const { __test } = await loadClient()
   const t = (key) => key
   const same = __test.draftOfRole(ROLE)
   assert.deepEqual(__test.buildGlobalPatch(t, ROLE, same, CHANNELS).patch, {})
 
-  const changed = __test.buildGlobalPatch(
+  const changed = __test.buildGlobalPatch(t, ROLE, { ...same, setting: '新设定' }, CHANNELS)
+  assert.equal(changed.error, null)
+  assert.deepEqual(changed.patch, { setting: '新设定' })
+
+  const combo = __test.buildGlobalPatch(
     t,
     ROLE,
-    { ...same, description: '新描述', model: 'm2' },
+    { ...same, cli: 'codex', model: 'sol-1', reasoning: 'high' },
     CHANNELS,
   )
-  assert.deepEqual(changed.patch, { description: '新描述', channel: { model: 'm2' } })
-
-  const cleared = __test.buildGlobalPatch(t, ROLE, { ...same, prompt: '' }, CHANNELS)
-  assert.equal(cleared.error, 'detailInvalidPrompt')
+  assert.equal(combo.error, null)
+  assert.deepEqual(combo.patch, {
+    channel: { channelId: 'ch-codex', kind: 'codex', provider: 'codex', model: 'sol-1', reasoning: 'high' },
+  })
 })
 
 test('toggleSessionRole：只写 enabled 会话覆盖；失败不 reload、不做乐观更新', async () => {
@@ -305,7 +310,7 @@ test('normalizeSessionConfigView：三色派生 + 字段来源 + 选项只来自
   assert.deepEqual(view.roles.map((role) => role.state.color), ['green', 'yellow', 'gray'])
   assert.equal(view.roles[0].fieldSources['channel.model'], 'session')
   assert.equal(view.roles[0].fieldSources.name, 'global')
-  assert.equal(view.roles[0].fieldSources.description, 'default')
+  assert.equal(view.roles[0].fieldSources.setting, 'default')
   assert.deepEqual(view.channels.map((channel) => channel.channelId), ['ch-acp', 'ch-codex'])
 })
 
@@ -357,7 +362,7 @@ test('renderRoleDetail：字段来源/恢复继承/真实选项；无选项显�
       roles: {
         'role-sashi': {
           layer: 'session',
-          fields: { name: 'global', aliases: 'global', description: 'project', prompt: 'global', 'channel.model': 'session' },
+          fields: { name: 'global', aliases: 'global', setting: 'project', 'channel.model': 'session' },
         },
       },
     },
@@ -372,11 +377,10 @@ test('renderRoleDetail：字段来源/恢复继承/真实选项；无选项显�
   for (const key of [
     'fieldName',
     'fieldAliases',
-    'fieldDescription',
-    'fieldChannel',
+    'fieldSetting',
+    'fieldCli',
     'fieldModel',
     'fieldReasoning',
-    'fieldPrompt',
     'sourceGlobal',
     'sourceProject',
     'sourceSession',
@@ -385,17 +389,17 @@ test('renderRoleDetail：字段来源/恢复继承/真实选项；无选项显�
     assert.ok(strings.includes(key), `详情应包含 ${key}`)
   }
   const modelSelect = collectNodes(detail, (node) => node.type === 'select')
-  assert.ok(modelSelect.length >= 2, '通道 + 模型都是真实 select')
+  assert.ok(modelSelect.length >= 3, 'CLI/模型/强度都是真实 select')
   const inputs = collectNodes(detail, (node) => node.type === 'input')
-  assert.ok(inputs.length >= 3, '名称/别名/描述可编辑')
-  assert.ok(collectNodes(detail, (node) => node.type === 'textarea').length === 1)
+  assert.ok(inputs.length >= 2, '名称/别名可编辑')
+  assert.ok(collectNodes(detail, (node) => node.type === 'textarea').length === 1, '设定是唯一多行文本')
 
-  // 无可用通道：模型/强度显示「不支持」而不是伪造选项。
+  // 无可用组合：模型/强度显示「不支持」而不是伪造选项。
   const noOptions = __test.renderRoleDetail(
     t,
     viewWith([{ ...normalized.roles[0], channelId: 'ghost', channel: { channelId: 'ghost', kind: '', provider: '' } }]),
     'role-sashi',
-    { scope: 'session', draft: { ...__test.draftOfRole(ROLE), channelId: '', model: '', reasoning: '' } },
+    { scope: 'session', draft: { ...__test.draftOfRole(ROLE), cli: '', model: '', reasoning: '' } },
   )
   const noOptionStrings = collectStrings(noOptions)
   assert.ok(
@@ -413,4 +417,96 @@ test('renderRoleDetail：字段来源/恢复继承/真实选项；无选项显�
   assert.ok(confirmStrings.includes('scopeGlobalNote'))
   assert.ok(confirmStrings.includes('confirmGlobal'))
   assert.ok(confirmStrings.includes('confirm') && confirmStrings.includes('cancel'))
+})
+
+test('saveGlobalPatch：一次 patch 写入 + reload；失败不 reload（B1 设置页全局管理器复用）', async () => {
+  const { __test } = await loadClient()
+  const calls = []
+  let reloads = 0
+  const reload = async () => {
+    reloads += 1
+    return { ok: true, view: viewWith([]) }
+  }
+
+  const ok = await __test.saveGlobalPatch({
+    roleId: 'role-sashi',
+    patch: { description: '新描述' },
+    updateGlobalRole: async (...args) => {
+      calls.push(args)
+      return { ok: true, value: { written: true } }
+    },
+    reload,
+  })
+  assert.equal(ok.ok, true)
+  assert.deepEqual(calls, [['role-sashi', { description: '新描述' }]], '全局保存只调一次 updateGlobalRole')
+  assert.equal(reloads, 1, '成功后 reload 一次')
+
+  const failed = await __test.saveGlobalPatch({
+    roleId: 'role-sashi',
+    patch: { description: 'x' },
+    updateGlobalRole: async () => ({
+      ok: false,
+      error: { code: 'GLOBAL_CONFIG_WRITE_FAILED', message: '写失败' },
+    }),
+    reload,
+  })
+  assert.equal(failed.ok, false)
+  assert.equal(failed.error.code, 'GLOBAL_CONFIG_WRITE_FAILED')
+  assert.equal(reloads, 1, '失败不得 reload（否则会掩盖未写入）')
+})
+
+test('B1：设置页内联全局角色管理渲染（列表 + 全局详情，无 scope 切换）', async () => {
+  const { __test } = await loadClient()
+  const t = (key) => key
+  const snapshot = __test.normalizeSnapshot({
+    roles: [
+      {
+        roleId: 'role-sashi',
+        name: '沙僧',
+        aliases: ['SS'],
+        description: '骨干',
+        prompt: '少说多做',
+        enabled: true,
+        channelId: 'ch-acp',
+        kind: 'acp-cli',
+        provider: 'acp',
+        model: 'm1',
+        reasoning: 'low',
+        sourceLayer: 'global',
+      },
+    ],
+    channels: [{ channelId: 'ch-acp', kind: 'acp-cli' }],
+    lastError: null,
+    global: {
+      channels: [{ channelId: 'ch-acp', kind: 'acp-cli', provider: 'acp', model: 'm1', reasoning: 'low' }],
+    },
+  })
+  // 列表：只显示名称/状态，点击进入全局面板（不跳会话）。
+  const list = __test.renderGlobalRoleManager(t, snapshot, { onSelect: () => {} })
+  const listStrings = collectStrings(list)
+  assert.ok(listStrings.includes('globalRolesTitle'), '标题')
+  assert.ok(listStrings.includes('globalRolesNote'), '全局写入口径')
+  assert.ok(listStrings.includes('沙僧'), '角色名')
+  assert.ok(listStrings.includes('globalRoleBadge'), '全局标识')
+  assert.ok(!listStrings.includes('SS'), '列表不显示别名')
+
+  // 详情：字段可编辑 → 走全局 patch（无会话/全局 scope 按钮）。
+  const detail = __test.renderGlobalRoleManager(t, snapshot, {
+    selectedRoleId: 'role-sashi',
+    draft: __test.draftOfRole(snapshot.roles[0]),
+    onDraft: () => {},
+    onSave: () => {},
+  })
+  const detailStrings = collectStrings(detail)
+  for (const key of ['fieldName', 'fieldSetting', 'scopeGlobalNote']) {
+    assert.ok(detailStrings.includes(key), `全局详情含 ${key}`)
+  }
+  assert.ok(!detailStrings.includes('scopeSession'), '无会话 scope 按钮')
+  assert.ok(!detailStrings.includes('scopeGlobal'), '无全局 scope 按钮')
+  assert.ok(collectNodes(detail, (node) => node.type === 'input').length >= 2, '名称/别名可编辑')
+  assert.ok(collectNodes(detail, (node) => node.type === 'textarea').length === 1, '设定可编辑')
+
+  // 空全局角色：显示空态而不是空白。
+  const empty = __test.renderGlobalRoleManager(t, __test.normalizeSnapshot({ roles: [] }), {})
+  assert.ok(collectStrings(empty).includes('globalRolesEmpty'))
 })

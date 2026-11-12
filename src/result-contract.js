@@ -16,6 +16,13 @@ import { MAX_SUMMARY_BYTES, truncateUtf8 } from './run-store.js'
 /** 子 Agent 允许自报的状态闭集（与记录 status 分开，不覆盖宿主终态）。 */
 export const RESULT_STATUSES = Object.freeze(['completed', 'partial', 'blocked', 'failed'])
 
+/**
+ * 落盘策略闭集（C1 契约 §5 / C3）：
+ * - `none` = 只读/审计派单：不落 full 产物、禁止写工作区，artifacts 必须为空
+ * - `runs` = 允许把完整报告写到 `.meetingstone/runs/`（记录层缺省按此处理）
+ */
+export const ARTIFACT_POLICIES = Object.freeze(['none', 'runs'])
+
 /** summary 落盘上限（UTF-8 字节）。约 2k token，够 300–500 token 的目标。 */
 export const SUMMARY_MAX_BYTES = MAX_SUMMARY_BYTES
 /** 数组字段的条数上限。 */
@@ -213,6 +220,7 @@ export function parseStructuredResult(text) {
     tests: [],
     openIssues: [],
     nextAction: null,
+    artifactPolicy: null,
     sawCandidate: false,
   }
   if (!raw.trim()) return empty
@@ -238,6 +246,10 @@ export function parseStructuredResult(text) {
     tests: readStringList(value.tests),
     openIssues: readStringList(value.openIssues),
     nextAction,
+    // C1 §5：子 Agent 必须回显派单声明的落盘策略；非法值不冒充合法策略。
+    artifactPolicy: ARTIFACT_POLICIES.includes(/** @type {any} */ (value.artifactPolicy))
+      ? /** @type {'none' | 'runs'} */ (value.artifactPolicy)
+      : null,
     sawCandidate: extracted.sawCandidate,
   }
 }
@@ -276,7 +288,8 @@ export function buildHandoff(parsed) {
  *
  * @param {{ structured: boolean, status: string | null, summary: string,
  *   evidence: Array<object>, artifacts: string[], changedFiles: string[],
- *   tests: string[], openIssues: string[], nextAction: string | null }} parsed
+ *   tests: string[], openIssues: string[], nextAction: string | null,
+ *   artifactPolicy?: 'none' | 'runs' | null }} parsed
  * @returns {Record<string, unknown>}
  */
 export function resultRecordFields(parsed) {
@@ -297,16 +310,21 @@ export function resultRecordFields(parsed) {
     ...(parsed.tests.length > 0 ? { resultTests: parsed.tests } : {}),
     ...(parsed.openIssues.length > 0 ? { openIssues: parsed.openIssues } : {}),
     ...(parsed.nextAction ? { nextAction: parsed.nextAction } : {}),
+    // C3：结果回显的落盘策略单独落 `reportedArtifactPolicy`，
+    // 不覆盖记录里由 TaskSpec 决定的权威 `artifactPolicy`。
+    ...(parsed.artifactPolicy ? { reportedArtifactPolicy: parsed.artifactPolicy } : {}),
     ...(handoff ? { handoff } : {}),
   }
 }
 
 /**
  * 渲染给子 Agent 的输出契约（固定文本，不含 AI 调用）。
+ * @param {'none' | 'runs' | null} [artifactPolicy] 派单声明的落盘策略（C1 §5）
  * @returns {string}
  */
-export function renderOutputContract() {
-  return [
+export function renderOutputContract(artifactPolicy = null) {
+  const policy = ARTIFACT_POLICIES.includes(artifactPolicy) ? artifactPolicy : null
+  const lines = [
     '[OUTPUT CONTRACT — 必须遵守]',
     '回复的最后给出一个 JSON 对象（可放在 ```json 代码块里），字段：',
     '- status: completed | partial | blocked | failed',
@@ -317,7 +335,15 @@ export function renderOutputContract() {
     '- tests: 运行过的测试及结果',
     '- openIssues: 未解决问题、风险、后续建议',
     '- nextAction: 需要主控或下一角色执行的动作',
-    '完整内容写入项目产物目录（如 .meetingstone/runs/），回复里只给路径；不要粘贴长文。',
-    '[END OUTPUT CONTRACT]',
-  ].join('\n')
+    '- artifactPolicy: 回显派单声明的落盘策略（none | runs）；未声明时可省略',
+  ]
+  if (policy === 'none') {
+    lines.push(
+      '本任务为只读/审计（artifactPolicy=none）：禁止写工作区（含 .meetingstone/runs/）；artifacts 必须为空数组；完整结论放在 summary/evidence。',
+    )
+  } else {
+    lines.push('完整内容写入项目产物目录（如 .meetingstone/runs/），回复里只给路径；不要粘贴长文。')
+  }
+  lines.push('[END OUTPUT CONTRACT]')
+  return lines.join('\n')
 }

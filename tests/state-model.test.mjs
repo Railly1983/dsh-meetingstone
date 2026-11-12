@@ -318,7 +318,7 @@ test('三级继承：每字段标注 global/project/session/default，恢复继�
   assert.deepEqual(fields, {
     name: 'global',
     aliases: 'default',
-    description: 'project',
+    setting: 'project',
     fallbackRoleId: 'default',
     timeoutMs: 'default',
     enabled: 'session',
@@ -425,4 +425,66 @@ test('旧配置零迁移：不要求新增字段、不写回、不改入参', ()
   assert.equal(view.quota, QUOTA.UNKNOWN)
   assert.equal(view.availability, 'available')
   assert.equal(JSON.stringify(legacy), before, '解析/派生不得修改旧配置')
+})
+
+// ─── B2：CLI → 模型 → 思考强度 能力矩阵与解析（PDF 第 2 条） ──────────────────
+
+import {
+  buildCliCapabilities,
+  effortOptionsFor,
+  modelOptionsFor,
+  resolveRoleChannel,
+  RESOLVE_ERRORS,
+} from '../src/roles/capabilities.js'
+
+const CHANNELS = [
+  { channelId: 'ch-codex', kind: 'codex', provider: 'codex', model: 'sol-1', reasoning: 'high' },
+  { channelId: 'ch-acp', kind: 'acp-cli', provider: 'acp', model: 'flash-1', reasoning: 'low' },
+  { channelId: 'ch-acp-2', kind: 'acp-cli', provider: 'acp', model: 'flash-1', reasoning: 'high' },
+]
+
+test('B2 能力矩阵：模型/强度只来自已配置组合，未声明强度标不支持', () => {
+  const caps = buildCliCapabilities(CHANNELS)
+  const codex = caps.find((row) => row.cli === 'codex')
+  assert.deepEqual(codex.models.map((item) => item.model), ['sol-1'])
+  assert.deepEqual(codex.efforts, ['high'])
+  assert.equal(codex.reasoningSupported, true)
+
+  const acp = caps.find((row) => row.cli === 'acp-cli')
+  assert.deepEqual(modelOptionsFor('acp-cli', CHANNELS), ['flash-1'])
+  assert.deepEqual(effortOptionsFor('acp-cli', 'flash-1', CHANNELS).efforts.sort(), ['high', 'low'])
+  assert.deepEqual(modelOptionsFor('unknown-cli', CHANNELS), [])
+  assert.deepEqual(effortOptionsFor('acp-cli', 'm-missing', CHANNELS), { efforts: [], supported: false })
+
+  const noEffort = buildCliCapabilities([{ channelId: 'ch-x', kind: 'in-process', provider: 'spawn' }])
+  assert.equal(noEffort[0].reasoningSupported, false, '实例没声明强度 → 不支持（不伪造）')
+})
+
+test('B2 解析：CLI+模型+强度 → 唯一执行组合；不支持/歧义都明确报错', () => {
+  const resolved = resolveRoleChannel(
+    { channel: { kind: 'codex', model: 'sol-1', reasoning: 'high' } },
+    CHANNELS,
+  )
+  assert.equal(resolved.error, null)
+  assert.equal(resolved.channel.channelId, 'ch-codex')
+  assert.equal(resolved.channel.provider, 'codex')
+
+  // 只给 CLI：同 CLI 有多个组合但模型/强度不同 → 按声明逐层收窄
+  const onlyCli = resolveRoleChannel({ channel: { kind: 'acp-cli' } }, CHANNELS)
+  assert.equal(onlyCli.error.code, RESOLVE_ERRORS.CHANNEL_AMBIGUOUS)
+
+  const unsupportedEffort = resolveRoleChannel(
+    { channel: { kind: 'acp-cli', model: 'flash-1', reasoning: 'max' } },
+    CHANNELS,
+  )
+  assert.equal(unsupportedEffort.error.code, RESOLVE_ERRORS.REASONING_UNSUPPORTED)
+
+  const unsupportedModel = resolveRoleChannel(
+    { channel: { kind: 'acp-cli', model: 'gpt-x' } },
+    CHANNELS,
+  )
+  assert.equal(unsupportedModel.error.code, RESOLVE_ERRORS.MODEL_UNSUPPORTED)
+
+  const noCli = resolveRoleChannel({ channel: {} }, CHANNELS)
+  assert.equal(noCli.error.code, RESOLVE_ERRORS.CHANNEL_NOT_CONFIGURED)
 })
