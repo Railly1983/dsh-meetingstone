@@ -1361,11 +1361,27 @@ export function registerTools(ctx, deps) {
           }
         }
 
-        // 先停掉当前任务（它可能还在跑）。停不掉就如实报，不硬来。
+        // 先停掉当前任务（它可能还在跑）。停不掉就**不重开** ——
+        // 否则会出现两个任务同时写同一工作区（安全与正确性风险）。
         const cancelOutcome = await dispatcher
           .cancel({ childId })
-          .catch((error) => ({ ok: false, reason: error?.message ?? String(error) }))
-        const stopConfirmed = cancelOutcome?.stopConfirmed ?? cancelOutcome?.ok ?? false
+          .catch((error) => ({ stopConfirmed: false, reason: error?.message ?? String(error) }))
+        const stopConfirmed = cancelOutcome?.stopConfirmed === true
+
+        // 关键门禁（2026-11-12 真机测试发现缺失）：
+        // 原任务没停干净就绝不能启动第二个写入任务。
+        if (!stopConfirmed) {
+          return {
+            error: 'STOP_UNCONFIRMED',
+            message:
+              `原任务 ${childId} 未能确认停止` +
+              (cancelOutcome?.reason ? `（${cancelOutcome.reason}）` : '') +
+              '；为避免两个任务同时写同一工作区，已拒绝重开。',
+            hint: '稍后用 meetingstone_get_task 确认它已终止，再重试 steer；或直接 cancel_task。',
+            previousChildId: childId,
+            stopConfirmed: false,
+          }
+        }
 
         const partial = extractPartialOutput(record)
         const roleId = String(args?.role ?? record.roleId ?? record.role ?? '').trim()
@@ -1374,18 +1390,46 @@ export function registerTools(ctx, deps) {
           : ''
         const nextTask = `${instruction}${replayBlock}`
 
+        // 复现有任务的派单参数（2026-11-12 修复）：
+        // 之前只传 role/task/upstreamChildId，缺 context.agent 与 projectKey ——
+        // 导致 dispatcher 直接返回 PARENT_AGENT_UNAVAILABLE，childId 恒为 null。
+        const parentAgent = exec?.agent ?? null
+        const projectRoot = record.projectRoot ?? null
+        const projectKey =
+          typeof record.projectKey === 'string' && record.projectKey
+            ? record.projectKey
+            : normalizeProjectKey(projectRoot)
         const dispatched = await dispatcher.dispatch({
           role: roleId,
           task: nextTask,
-          ...(record.workspace ? { cwd: record.workspace } : {}),
+          // 必须带 parent agent，否则 startActivation 拿不到 parent
+          ...(parentAgent ? { context: { agent: parentAgent, ...(projectRoot ? { projectRoot } : {}) } } : {}),
+          ...(projectKey ? { projectKey } : {}),
+          ...(projectRoot ? { projectRoot } : {}),
+          ...(typeof record.role === 'string' && record.role ? { taskId: undefined } : {}),
+          // 沿用原任务的隔离方式，避免主工作区/隔离任务混跑
+          ...(record.isolation === 'worktree' || record.isolation === 'none'
+            ? { isolation: record.isolation }
+            : {}),
+          ...(typeof parentAgent?.id === 'string' && parentAgent.id ? { sessionId: parentAgent.id } : {}),
           // 关联原任务，便于追溯（字段已存在于 run 记录契约）
           upstreamChildId: childId,
         })
 
+        if (dispatched?.ok !== true) {
+          return {
+            error: dispatched?.code ?? 'RESTART_FAILED',
+            message: dispatched?.message ?? '重开派单失败，宿主没有给出原因',
+            hint: '原任务已停止；可手动用 meetingstone_dispatch 重新派单并带上先前产出。',
+            previousChildId: childId,
+            stopConfirmed: true,
+          }
+        }
+
         return {
           ok: true,
           mode: 'restart-with-output',
-          childId: dispatched?.childId ?? null,
+          childId: dispatched?.taskRef?.childId ?? null,
           previousChildId: childId,
           stopConfirmed,
           replayedBytes: partial.text ? partial.text.slice(0, 12 * 1024).length : 0,
