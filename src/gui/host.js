@@ -365,9 +365,12 @@ export function createGuiState({
 
   // B2b：CLI 能力目录（4 CLI × 模型 × 强度）——GUI 的唯一能力事实源。
   // 默认探测：codex app-server model/list；DSH host ctx.llm.listModels；不可得则静态/unknown。
+  // `channels` 与派单侧同源：in-process 通道的模型声明在 `llmModel`（不在 provider 行），
+  // 能力目录必须从同一处取，否则「下拉能选的模型」与「派单实际用的模型」会分叉。
   const capabilityCatalog =
     capabilities ??
     createCliCapabilityCatalog({
+      channels: () => (Array.isArray(channels) ? channels : []),
       probes: createDefaultProbes({
         ctx,
         resolveExecutable: async (/** @type {string} */ cli) => {
@@ -615,17 +618,34 @@ export function registerGuiRemote(ctx, deps) {
       }
 
       /**
-       * 重新检测一个外部 CLI（strict：cli/force）。
-       * 只读取证据，不写配置；force=true 绕过 probe 缓存。
-       * B2b：同时刷新该 CLI 的能力缓存（模型/强度），并把能力目录回传（可观测）。
+       * 重新检测一个 CLI（strict：cli/force）。
+       *
+       * 两类 CLI 语义不同（B2b 起 CLI 扩到 4 个，其中 `dsh` 是宿主内置、不是外部 CLI）：
+       * - **外部 CLI**（codex / codebuddy / claude）：先 preflight（只读证据，不写配置），
+       *   再刷新该 CLI 的能力缓存；
+       * - **`dsh`（DeepSeek Harness，in-process）**：没有外部可执行文件，"检测"没有意义，
+       *   因此**跳过 preflight**，只刷新能力目录（模型来自宿主 `ctx.llm.listModels()`）。
+       *   这与设置页「刷新能力」按钮的实际意图一致：它要的是模型/强度，不是安装状态。
+       *
+       * 旧实现对所有 cli 一律走 preflight，导致 `refreshCli('dsh')` 被
+       * `isKnownCli` 判为 `INVALID_CLI` 而必然失败（D1 验收缺陷 1 成因 A）。
        */
       async refreshCli(cli, force) {
         if (!configApi || typeof configApi.preflightCli !== 'function') {
           throw new RemoteError('MEETINGSTONE_GUI_REMOTE_UNAVAILABLE', '配置远程未装配')
         }
+        const capabilityRefresh = await capabilityCatalog.refresh(cli, { force: true })
+        // dsh：宿主内置通道，无外部 CLI 可 preflight；只回能力目录。
+        if (cli === 'dsh') {
+          return {
+            ok: true,
+            cli: null,
+            capabilities: capabilityCatalog.snapshot().capabilities,
+            capabilityRefresh,
+          }
+        }
         const checked = await configApi.preflightCli(cli, { force: force === true })
         if (!checked || checked.ok !== true) return checked
-        const capabilityRefresh = await capabilityCatalog.refresh(cli, { force: true })
         return {
           ok: true,
           cli: cliStateOf(cli, checked.preflight),

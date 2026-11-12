@@ -19,9 +19,11 @@ import {
   CAPABILITY_SOURCES,
   CLI_IDS,
   CLI_LABELS,
+  channelsToCatalog,
   createCliCapabilityCatalog,
   defaultProviderConfigPaths,
   extractHostModels,
+  mergeCatalogs,
   parseCodexModelList,
   parseProviderPatchRows,
   providerForCatalogModel,
@@ -392,3 +394,79 @@ test('B3a 路径：默认候选包含 $DSH_PROFILE_DIR 与 home profiles', () =>
   assert.ok(paths.includes(join('C:/profiles/desktop', 'cordis.patch.yml')))
   assert.ok(paths.includes(join('C:/dsh', 'profiles', 'desktop', 'cordis.patch.yml')))
 })
+
+// ─── D1 验收缺陷 1：dsh 的模型永远为空 + 「刷新能力」必失败 ──────────────────
+// 成因 B：能力目录不认 in-process 通道的 `llmModel`（那不是 provider 行的 model/args），
+// 导致 dsh 条目的 models 恒为空、编辑器下拉常驻置灰「不支持」。
+// 这些断言在修复前必然失败（dsh.models === []）。
+
+const IN_PROCESS_CHANNELS = [
+  {
+    channelId: 'ch-inprocess',
+    kind: 'in-process',
+    provider: 'spawn',
+    llmProvider: 'workbuddy',
+    llmModel: 'deepseek-v4.1-flash',
+    reasoning: 'high',
+  },
+  { channelId: 'ch-acp-flash', kind: 'acp-cli', provider: 'acp', model: 'glm-5.3-flash', reasoning: 'high' },
+]
+
+test('D1-B：in-process 通道的 llmModel 进入 dsh 能力目录（与派单侧同源）', () => {
+  const catalog = channelsToCatalog(IN_PROCESS_CHANNELS)
+  assert.deepEqual(catalog.dsh.models.map((item) => item.id), ['deepseek-v4.1-flash'])
+  assert.equal(catalog.dsh.models[0].provider, 'workbuddy', 'provider 取自 llmProvider')
+  assert.deepEqual(catalog.dsh.strengths, ['high'])
+  assert.deepEqual(catalog.dsh.rows, ['ch-inprocess'])
+})
+
+test('D1-B：目录喂入 channels 后 dsh 有模型（修复前恒为空）', () => {
+  const catalog = createCliCapabilityCatalog({
+    channels: IN_PROCESS_CHANNELS,
+    autoRefresh: false,
+    configReader: null,
+    configReaderSync: null,
+  })
+  const dsh = catalog.snapshot().capabilities.find((entry) => entry.id === 'dsh')
+  assert.deepEqual(dsh.models.map((item) => item.id), ['deepseek-v4.1-flash'], 'dsh 模型必须非空')
+  assert.equal(dsh.sources.models, CAPABILITY_SOURCES.CONFIG)
+  assert.deepEqual(dsh.strengths.map((item) => item.id), ['high'])
+})
+
+test('D1-B：解析器认得 llmModel/llmProvider，但不污染 provider 行的 model 字段', () => {
+  // provider 行（有 specifier）与 in-process 通道是两种不同声明：
+  // 前者模型在 `model`/args，后者在 `llmModel`。解析器两者都认，但字段各归各位。
+  const parsed = parseProviderPatchRows(
+    ['- id: ch-inprocess', '  name: meetingstone', '  llmProvider: workbuddy', '  llmModel: deepseek-v4.1-flash'].join('\n'),
+  )
+  assert.equal(parsed[0].llmModel, 'deepseek-v4.1-flash')
+  assert.equal(parsed[0].llmProvider, 'workbuddy')
+  assert.equal(parsed[0].model, null, 'llmModel 不得污染 model 字段')
+
+  // 无 specifier 映射的行（in-process 通道）不会被 provider 行路径收编，
+  // 保持 cli=null —— 它必须经 channelsToCatalog 进入目录，否则 provider 行
+  // 路径会把它误当成某个外部 CLI 的模型。
+  const mapped = providerRowToCapability(parsed[0])
+  assert.equal(mapped.cli, null)
+  assert.equal(mapped.model, null)
+
+  // 真正的来源是 channels：llmModel 在这里被读成模型。
+  const catalog = channelsToCatalog([
+    { channelId: 'ch-inprocess', kind: 'in-process', llmProvider: 'workbuddy', llmModel: 'deepseek-v4.1-flash', reasoning: 'high' },
+  ])
+  assert.deepEqual(catalog.dsh.models.map((item) => item.id), ['deepseek-v4.1-flash'])
+})
+
+test('D1-B：channels 源优先于 provider 行，且两者合并去重', () => {
+  const merged = mergeCatalogs(
+    channelsToCatalog(IN_PROCESS_CHANNELS),
+    providerRowsToCatalog([
+      { id: 'subagent-acp', specifier: '@deepseek-ai/dsh-subagent-acp', model: null, args: ['--model', 'hy3'], disabled: false },
+    ]),
+  )
+  // dsh 只来自 channels
+  assert.deepEqual(merged.dsh.models.map((item) => item.id), ['deepseek-v4.1-flash'])
+  // codebuddy 两源都有模型
+  assert.deepEqual(merged.codebuddy.models.map((item) => item.id).sort(), ['glm-5.3-flash', 'hy3'])
+})
+

@@ -115,7 +115,7 @@ window.__ModuleLoader__.load({
       strictCodec(SESSION_TYPES.roleId, () => z.string().min(1).max(128))
     const jsonValueCodec = () => strictCodec(SESSION_TYPES.value, () => z.unknown())
     const cliNameCodec = () =>
-      strictCodec(SESSION_TYPES.cliName, () => z.enum(['codex', 'codebuddy', 'claude']))
+      strictCodec(SESSION_TYPES.cliName, () => z.enum(['dsh', 'codex', 'codebuddy', 'claude']))
     const booleanCodec = () => strictCodec(SESSION_TYPES.booleanValue, () => z.boolean())
 
     /**

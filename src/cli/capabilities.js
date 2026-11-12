@@ -176,6 +176,7 @@ export const SPECIFIER_TO_CLI = Object.freeze({
  * @returns {Array<{
  *   id: string, specifier: string | null, providerName: string | null,
  *   model: string | null, effort: string | null, args: string[], disabled: boolean,
+ *   llmProvider: string | null, llmModel: string | null,
  * }>}
  */
 export function parseProviderPatchRows(text) {
@@ -198,6 +199,9 @@ export function parseProviderPatchRows(text) {
         effort: null,
         args: [],
         disabled: false,
+        // in-process 通道用 `llmProvider`/`llmModel` 声明宿主 LLM 路由，不是 args。
+        llmProvider: null,
+        llmModel: null,
       }
       rows.push(current)
       inArgs = false
@@ -218,6 +222,21 @@ export function parseProviderPatchRows(text) {
     const providerMatch = line.match(/^\s*providerName:\s*(.+?)\s*$/)
     if (providerMatch) {
       current.providerName = clean(providerMatch[1])
+      inArgs = false
+      continue
+    }
+    // in-process 通道：宿主 LLM 路由写在 `llmProvider`/`llmModel`，不是 args/`model`。
+    // 这两个 pattern 必须放在 `model:` 之前，否则 `llmModel:` 不会被识别
+    // （`^\s*model:` 锚定行首，本不会误匹配，但保持顺序更明确）。
+    const llmProviderMatch = line.match(/^\s*llmProvider:\s*(.+?)\s*$/)
+    if (llmProviderMatch) {
+      current.llmProvider = clean(llmProviderMatch[1])
+      inArgs = false
+      continue
+    }
+    const llmModelMatch = line.match(/^\s*llmModel:\s*(.+?)\s*$/)
+    if (llmModelMatch) {
+      current.llmModel = clean(llmModelMatch[1])
       inArgs = false
       continue
     }
@@ -270,6 +289,9 @@ export function providerRowToCapability(row) {
   const args = Array.isArray(row.args) ? row.args : []
   let model = typeof row.model === 'string' && row.model ? row.model : null
   let effort = typeof row.effort === 'string' && row.effort ? row.effort : null
+  // 注：in-process 通道的 `llmModel` **不在这里**回退——本函数只服务 provider 行，
+  // 而 provider 行必然有 `specifier`（无映射时上面已提前返回）。in-process 通道不是
+  // provider 行，它由 `channelsToCatalog()` 从 `cfg.channels` 直接读取（与派单侧同源）。
   for (let i = 0; i < args.length; i += 1) {
     const token = String(args[i] ?? '')
     const eq = token.match(/^--(model|effort)=(.*)$/)
@@ -289,6 +311,102 @@ export function providerRowToCapability(row) {
   /** @type {string[]} */
   const strengths = effort ? [effort] : []
   return { cli, model, effort, provider, strengths }
+}
+
+/**
+ * 内部 `channel.kind` → 能力目录 CLI id。
+ * 必须与 `src/client/index.js` 的 `CLI_BY_CHANNEL_KIND` 保持一致。
+ */
+export const CHANNEL_KIND_TO_CLI = Object.freeze({
+  'in-process': 'dsh',
+  'claude-code': 'claude',
+  codex: 'codex',
+  'acp-cli': 'codebuddy',
+})
+
+/**
+ * 插件配置里的通道实例表（`cfg.channels`）→ 能力目录的 config 源。
+ *
+ * 为什么需要这条来源：in-process 通道的模型声明在 `llmModel`（不是 provider 行的
+ * `model`/args），而 `cfg.channels` 正是派单侧 `src/dsh/adapter.js:buildChildAgentOptions`
+ * 读取的**同一份数据**。能力目录从同一处取值，才能保证「下拉框里能选的模型」与
+ * 「派单实际会用的模型」不分叉（D1 验收缺陷 1 成因 B）。
+ *
+ * @param {any[]} channels
+ * @returns {Record<string, { models: Array<{ id: string, label: string, provider: string | null, strengths: string[] }>, strengths: string[], rows: string[] }>}
+ */
+export function channelsToCatalog(channels = []) {
+  /** @type {Record<string, { models: Array<any>, strengths: Set<string>, rows: string[] }>} */
+  const byCli = {}
+  for (const channel of Array.isArray(channels) ? channels : []) {
+    if (!channel || typeof channel !== 'object') continue
+    const cli = /** @type {Record<string, string>} */ (CHANNEL_KIND_TO_CLI)[String(channel.kind ?? '')] ?? null
+    if (!cli) continue
+    // in-process 用 llmModel/llmProvider；外部通道用 model/provider。
+    const model = asString(channel.llmModel) || asString(channel.model)
+    if (!model) continue
+    const provider = asString(channel.llmProvider) || asString(channel.provider) || null
+    const effort = asString(channel.reasoning)
+    const bucket = byCli[cli] ?? { models: [], strengths: new Set(), rows: [] }
+    byCli[cli] = bucket
+    const existing = bucket.models.find((item) => item.id === model)
+    if (existing) {
+      if (!existing.provider && provider) existing.provider = provider
+      if (effort && !existing.strengths.includes(effort)) existing.strengths.push(effort)
+    } else {
+      bucket.models.push({ id: model, label: model, provider, strengths: effort ? [effort] : [] })
+    }
+    if (effort) bucket.strengths.add(effort)
+    if (asString(channel.channelId)) bucket.rows.push(asString(channel.channelId))
+  }
+  /** @type {Record<string, any>} */
+  const out = {}
+  for (const [cli, bucket] of Object.entries(byCli)) {
+    out[cli] = { models: bucket.models, strengths: [...bucket.strengths], rows: bucket.rows }
+  }
+  return out
+}
+
+/**
+ * 合并两个 catalog 源：先出现的优先。channels 源应与 provider 行合并时放在前面，
+ * 因为它是派单侧的同一份事实。
+ * @param {Record<string, any>} base
+ * @param {Record<string, any>} extra
+ */
+export function mergeCatalogs(base = {}, extra = {}) {
+  /** @type {Record<string, any>} */
+  const out = {}
+  for (const source of [base, extra]) {
+    for (const [cli, entry] of Object.entries(source ?? {})) {
+      if (!entry || typeof entry !== 'object') continue
+      const bucket = out[cli] ?? { models: [], strengths: [], rows: [] }
+      out[cli] = bucket
+      for (const model of Array.isArray(entry.models) ? entry.models : []) {
+        if (!model || !model.id) continue
+        const existing = bucket.models.find((/** @type {any} */ item) => item.id === model.id)
+        if (existing) {
+          if (!existing.provider && model.provider) existing.provider = model.provider
+          for (const strength of Array.isArray(model.strengths) ? model.strengths : []) {
+            if (!existing.strengths.includes(strength)) existing.strengths.push(strength)
+          }
+        } else {
+          bucket.models.push({
+            id: model.id,
+            label: model.label || model.id,
+            provider: model.provider ?? null,
+            strengths: Array.isArray(model.strengths) ? [...model.strengths] : [],
+          })
+        }
+      }
+      for (const strength of Array.isArray(entry.strengths) ? entry.strengths : []) {
+        if (!bucket.strengths.includes(strength)) bucket.strengths.push(strength)
+      }
+      for (const row of Array.isArray(entry.rows) ? entry.rows : []) {
+        if (!bucket.rows.includes(row)) bucket.rows.push(row)
+      }
+    }
+  }
+  return out
 }
 
 /**
@@ -730,6 +848,10 @@ export function createCliCapabilityCatalog(options = {}) {
   const probes = options.probes ?? {}
   const resolveExecutable = options.resolveExecutable ?? (async () => null)
   const autoRefresh = options.autoRefresh !== false
+  // channels 源：插件配置里的通道实例表（与派单侧 adapter.js 同源）。
+  // in-process 的 `llmModel` 只存在于这里，provider 行拿不到（D1 缺陷 1 成因 B）。
+  const channelsSource =
+    typeof options.channels === 'function' ? options.channels : () => options.channels ?? []
   // config 源：本机 profile provider 行的真实声明。默认启用（只读解析 profile patch）；
   // 测试可传 null 明确关闭，避免依赖本机 profile。
   const configReaderSync =
@@ -760,15 +882,32 @@ export function createCliCapabilityCatalog(options = {}) {
       }
     }
   }
+  /**
+   * channels 源与 profile provider 行合并。channels 优先——它与派单侧同源，
+   * 而 provider 行只覆盖外部 CLI。每次取用都重算，`channels` 以函数形式传入时
+   * 能反映运行期配置变化。
+   */
+  function effectiveCatalog() {
+    let channels = []
+    try {
+      channels = Array.isArray(channelsSource()) ? channelsSource() : []
+    } catch {
+      channels = []
+    }
+    return mergeCatalogs(channelsToCatalog(channels), configData.catalog ?? {})
+  }
   /** @type {Map<string, { discovered: any[] | null, config: any, errors: string[], refreshedAt: number | null }>} */
   const state = new Map()
-  for (const cli of CLI_IDS) {
-    state.set(cli, {
-      discovered: null,
-      config: configData.catalog?.[cli] ?? null,
-      errors: [],
-      refreshedAt: null,
-    })
+  {
+    const catalog = effectiveCatalog()
+    for (const cli of CLI_IDS) {
+      state.set(cli, {
+        discovered: null,
+        config: catalog[cli] ?? null,
+        errors: [],
+        refreshedAt: null,
+      })
+    }
   }
   let lastRefreshAt = null
   /** @type {Promise<any> | null} */
@@ -813,7 +952,8 @@ export function createCliCapabilityCatalog(options = {}) {
       const refreshed = []
       /** @type {string[]} */
       const errors = []
-      // 0) 重新读取 profile provider 行（只读；失败保留上一次成功结果）
+      // 0) 重新读取 profile provider 行（只读；失败保留上一次成功结果），
+      //    再与 channels 源合并后回写到每个 CLI 的 config。
       if (configReader) {
         try {
           const next = await configReader()
@@ -822,9 +962,10 @@ export function createCliCapabilityCatalog(options = {}) {
               ...next,
               rowCount: Array.isArray(next.rows) ? next.rows.length : 0,
             }
+            const nextCatalog = effectiveCatalog()
             for (const id of CLI_IDS) {
               const current = state.get(id)
-              if (current) current.config = configData.catalog?.[id] ?? null
+              if (current) current.config = nextCatalog[id] ?? null
             }
           }
         } catch (err) {
@@ -835,6 +976,8 @@ export function createCliCapabilityCatalog(options = {}) {
           errors.push(...configData.errors)
         }
       }
+      // channels 源可能运行期变化（配置热更新）；即便 provider 读取失败也重算一次。
+      const catalog = effectiveCatalog()
       for (const target of targets) {
         const current = state.get(target)
         if (!current) continue
@@ -856,7 +999,7 @@ export function createCliCapabilityCatalog(options = {}) {
           if (discovered !== null) {
             state.set(target, {
               discovered,
-              config: configData.catalog?.[target] ?? null,
+              config: catalog[target] ?? null,
               errors: [],
               refreshedAt: now(),
             })
@@ -865,7 +1008,7 @@ export function createCliCapabilityCatalog(options = {}) {
             // 无可动态来源（claude/codebuddy）：保留 config/静态表，仅记录刷新时间
             state.set(target, {
               discovered: null,
-              config: configData.catalog?.[target] ?? null,
+              config: catalog[target] ?? null,
               errors: current.errors,
               refreshedAt: now(),
             })
@@ -877,7 +1020,7 @@ export function createCliCapabilityCatalog(options = {}) {
           // 动态失败 → 保留 config/静态表（不伪造 discovered），错误可观测
           state.set(target, {
             discovered: null,
-            config: configData.catalog?.[target] ?? null,
+            config: catalog[target] ?? null,
             errors: [message],
             refreshedAt: now(),
           })

@@ -103,7 +103,7 @@ export function createSessionRemoteSpec(zod) {
   /** value：任意 JSON；Gateway 在 parse 后还会做 `assertJsonValue`。 */
   const value = () => z.unknown()
   /** cli：只允许已支持的外部 CLI 名（业务层还会再校验一次）。 */
-  const cliName = () => z.enum(['codex', 'codebuddy', 'claude'])
+  const cliName = () => z.enum(['dsh', 'codex', 'codebuddy', 'claude'])
   /** force：重新检测是否绕过 probe 缓存。 */
   const booleanValue = () => z.boolean()
   /** 配置写结果：形状由业务层决定，这里只要求是可 JSON 化的任意值。 */

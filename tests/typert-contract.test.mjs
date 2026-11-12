@@ -76,6 +76,28 @@ test('参数校验：zod 在边界拒绝空串/错误类型，接受合法值', 
   })
 })
 
+// ─── D1 验收缺陷 1 成因 A：枚举漏了 dsh（4 个 CLI，枚举只有 3 个值）──────────
+// 修复前：refreshCli('dsh') 直接被 zod 拒绝（Invalid option），设置页
+// 「刷新能力」对 DeepSeek Harness 必然失败。以下断言在修复前全部失败。
+test('D1-A：cli 枚举覆盖全部 4 个 CLI（含 dsh），且拒绝未知值', () => {
+  const byMethod = Object.fromEntries(buildDescriptors().map((d) => [d.method, d]))
+  for (const method of ['setCliEnabled', 'refreshCli']) {
+    const codec = byMethod[method].parameters[0].codec.create()
+    for (const cli of ['dsh', 'claude', 'codex', 'codebuddy']) {
+      assert.equal(codec.parse(cli), cli, `${method} 必须接受 ${cli}`)
+    }
+    assert.throws(() => codec.parse('nope'), `${method} 必须拒绝未知 CLI`)
+  }
+})
+
+test('D1-A：refreshCli 的 dsh 参数过 Host strict 校验（修复前必失败）', () => {
+  const byMethod = Object.fromEntries(buildDescriptors().map((d) => [d.method, d]))
+  const codec = byMethod.refreshCli.parameters[0].codec.create()
+  // 修复前这里会抛：Invalid option: expected one of "codex"|"codebuddy"|"claude"
+  assert.doesNotThrow(() => codec.parse('dsh'))
+  assert.equal(codec.parse('dsh'), 'dsh')
+})
+
 test('非 strict / 空壳 create 被拒绝（不允许退回 src-json 绕过）', () => {
   assert.throws(
     () =>

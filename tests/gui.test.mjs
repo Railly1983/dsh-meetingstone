@@ -1349,6 +1349,28 @@ test('strict 契约：Host descriptor 与 Client contribution 的 method/参数/
   }
 })
 
+// D1 缺陷 1 成因 A 的护栏：上面只比 typeSymbol，两侧**枚举取值**漂移测不出来。
+// 这条把「同样的值能被接受」变成硬断言——只改一侧就会红。
+test('strict 契约：cli 枚举取值两侧一致（只改一侧必挂）', async () => {
+  const { createTypertRemoteInfo } = await import('@deepseek-ai/dsh-typert-protocol/remote-info')
+  const { createSessionRemoteSpec } = await import('../src/gui/typert-spec.js')
+  const host = createTypertRemoteInfo(createSessionRemoteSpec(z), z).descriptors
+  const { mounted } = await loadClientHarness()
+  const client = mounted[0].descriptors.filter((d) => d.method !== 'list')
+
+  const allClis = ['dsh', 'codex', 'codebuddy', 'claude']
+  for (const method of ['setCliEnabled', 'refreshCli']) {
+    const hostDesc = host.find((d) => d.method === method)
+    const clientDesc = client.find((d) => d.method === method)
+    const hostCodec = hostDesc.parameters[0].codec.create()
+    const clientCodec = clientDesc.parameters[0].codec.create()
+    for (const cli of allClis) {
+      assert.equal(hostCodec.parse(cli), cli, `Host ${method} 必须接受 ${cli}`)
+      assert.equal(clientCodec.parse(cli), cli, `Client ${method} 必须接受 ${cli}`)
+    }
+  }
+})
+
 test('Browser half：zod 不可用时只挂无参 list（不伪造 strict）', async () => {
   const { mounted, logs } = await loadClientHarness({ omitZod: true })
   assert.equal(mounted.length, 1)
