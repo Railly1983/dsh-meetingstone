@@ -385,6 +385,11 @@ window.__ModuleLoader__.load({
           label: asString(model.label) || asString(model.id),
           provider: asString(model.provider),
           source: asString(model.source) || 'unknown',
+          // 上下文窗口（最大输入 token 数）。
+          // 2026-11-13：只有 probe 能给出可信值时才有这个字段；
+          // 拿不到就是 null，UI 显示「未知」。**不猜**。
+          contextWindow: Number.isFinite(model.contextWindow) ? Number(model.contextWindow) : null,
+          contextWindowSource: asString(model.contextWindowSource) || '',
         }))
         .filter((model) => model.id)
       const strengths = asArray(source.strengths)
@@ -643,6 +648,30 @@ window.__ModuleLoader__.load({
           }
         }
       }
+    }
+
+    /**
+     * 把上下文窗口数字格式化成紧凑形式。
+     *
+     * 2026-11-13：模型下拉要显示「这个模型能吃多少上下文」。
+     * 1,000,000 → `1M`；192,000 → `192K`；300,000 → `300K`。
+     * 非数字/非正数 → 空串（调用方据此不显示，绝不编造）。
+     *
+     * @param {any} value
+     * @returns {string}
+     */
+    function formatContextWindow(value) {
+      const n = Number(value)
+      if (!Number.isFinite(n) || n <= 0) return ''
+      if (n >= 1_000_000) {
+        const m = n / 1_000_000
+        return `${Number.isInteger(m) ? m : m.toFixed(1)}M`
+      }
+      if (n >= 1000) {
+        const k = n / 1000
+        return `${Number.isInteger(k) ? k : k.toFixed(1)}K`
+      }
+      return String(n)
     }
 
     /**
@@ -2762,16 +2791,21 @@ window.__ModuleLoader__.load({
               },
               children: [
                 jsx('option', { value: '', children: t('fieldUnset') }, 'model-unset'),
-                ...options.models.map((item) =>
-                  jsx(
+                ...options.models.map((item) => {
+                  // 上下文窗口（2026-11-13）：有可信值才显示，拿不到就只显示来源。
+                  // 用 K 为单位省宽度（1,000,000 → 1M，192,000 → 192K）。
+                  const ctx = Number.isFinite(item.contextWindow)
+                    ? ` · ${formatContextWindow(item.contextWindow)}`
+                    : ''
+                  return jsx(
                     'option',
                     {
                       value: item.id,
-                      children: `${item.label || item.id} · ${sourceText(item.source)}`,
+                      children: `${item.label || item.id} · ${sourceText(item.source)}${ctx}`,
                     },
                     `model-${item.id}`,
-                  ),
-                ),
+                  )
+                }),
               ],
             })
       // 思考强度：来自能力目录；空/未知 → 置灰并标「不支持」（不伪造）。

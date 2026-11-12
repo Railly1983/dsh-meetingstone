@@ -20,7 +20,7 @@ import { spawn as nodeSpawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 /** 固定 4 个 CLI（顺序稳定，GUI 按此渲染）。 */
 export const CLI_IDS = Object.freeze(['dsh', 'claude', 'codex', 'codebuddy'])
@@ -796,7 +796,7 @@ export function buildCatalogEntry(cli, state = {}) {
   const configModels = Array.isArray(config?.models) ? config.models : []
   const errors = Array.isArray(state.errors) ? [...state.errors] : []
 
-  /** @type {Array<{ id: string, label: string, provider: string | null, source: string }>} */
+  /** @type {Array<{ id: string, label: string, provider: string | null, source: string, contextWindow?: number | null, contextWindowSource?: string }>} */
   const models = []
   /** @type {Set<string>} */
   const modelIds = new Set()
@@ -808,6 +808,16 @@ export function buildCatalogEntry(cli, state = {}) {
       label: item.label || item.id,
       provider: providerForModel(cli, item.id),
       source: CAPABILITY_SOURCES.DISCOVERED,
+      // 上下文窗口（最大输入 token 数）。
+      // 来源优先级：probe 实测 > 本地官方元数据（product.json）> null（未知）。
+      // **不猜**：拿不到就是 null，UI 显示「未知」。猜错的后果是按 1M 规划、
+      // 实际只有 200K 时在 20% 处被静默截断，比「未知」危险得多。
+      ...(Number.isFinite(item.contextWindow)
+        ? {
+            contextWindow: Number(item.contextWindow),
+            contextWindowSource: item.contextWindowSource || 'probe',
+          }
+        : {}),
     })
   }
   for (const item of configModels) {
@@ -903,8 +913,12 @@ export function buildCatalogEntry(cli, state = {}) {
  *
  * - `probes.codex({ resolveExecutable, spawnImpl, timeoutMs })`：动态发现 codex 模型
  * - `probes.dsh({ listHostModels })`：动态发现 DSH host 模型
+ * - `probes.codebuddy({ executable })`：走 ACP session/new 拿账号可用模型
  * - `resolveExecutable(cli)`：把 CLI 解析成可执行文件路径（host 用已有 probe）
- * - `ttlMs`：snapshot 发现过期时后台刷新（不阻塞 list）
+ * - `ttlMs`：**已不再用于自动刷新**（2026-11-13 改为「首次 + 手动」）。
+ *   保留这个参数是为了兼容既有调用方；它的值只影响 `refreshedAt` 的可观测语义。
+ * - `autoRefresh`：默认 true。为 true 时**只在本进程首次读快照**时后台刷一次；
+ *   之后必须显式 `refresh()`（即用户点「刷新能力」）才会更新。
  *
  * @param {{
  *   probes?: { codex?: Function, dsh?: Function },
@@ -1009,7 +1023,16 @@ export function createCliCapabilityCatalog(options = {}) {
   }
 
   function snapshot() {
-    if (autoRefresh && (lastRefreshAt === null || now() - lastRefreshAt >= ttlMs) && !inFlight) {
+    // 「首次 + 手动」策略（2026-11-13 用户决定）。
+    //
+    // 之前：`autoRefresh` 默认 true + 5 分钟 TTL —— 每次打开设置页且距上次
+    // 超过 5 分钟，就会在后台静默刷新。对 CodeBuddy 这种要起子进程、
+    // 耗时约 5 秒的探测，这个成本没有意义（用户原话：「频繁获取也没有意义」）。
+    //
+    // 现在：只在**本进程首次**读快照时自动刷一次（用户不用等首屏），
+    // 之后一律只在用户点「刷新能力」时刷新。
+    const isFirstRead = lastRefreshAt === null
+    if (autoRefresh && isFirstRead && !inFlight) {
       // 后台刷新：list 只读、不阻塞；刷新完成后下次 list 可见（可观测 refreshedAt）
       void refresh(undefined, { force: false }).catch(() => {})
     }
@@ -1083,6 +1106,14 @@ export function createCliCapabilityCatalog(options = {}) {
             else if (found && Array.isArray(found.models)) discovered = found.models
           } else if (target === 'dsh' && typeof probes.dsh === 'function') {
             const found = await probes.dsh({})
+            if (Array.isArray(found)) discovered = found
+            else if (found && Array.isArray(found.models)) discovered = found.models
+          } else if (target === 'codebuddy' && typeof probes.codebuddy === 'function') {
+            // 2026-11-13：CodeBuddy 走 ACP session/new 拿账号实际可用的模型。
+            // 之前这里没有分支，所以 codebuddy 永远只显示配置里的 4 个模型
+            //（用户反馈「只有我之前使用的选项」的成因之一）。
+            const executable = await resolveExecutable('codebuddy')
+            const found = await probes.codebuddy({ executable })
             if (Array.isArray(found)) discovered = found
             else if (found && Array.isArray(found.models)) discovered = found.models
           }
@@ -1363,6 +1394,65 @@ export async function probeCodebuddyModels({
 }
 
 /**
+ * 从 CodeBuddy 安装包的 `product.json` 读取模型的上下文窗口。
+ *
+ * ## 为什么用这个文件
+ *
+ * 2026-11-13 实测：ACP 的 `configOptions` **不再包含** `context_window`
+ * （20 个模型逐个 set 都没有）。但安装包里的 `product.json`（351 KB）
+ * 有完整的模型元数据：
+ *
+ * ```json
+ * { "id": "hy4-preview", "maxInputTokens": 1000000,
+ *   "contextWindow": { "supportedLengths": [200000, 1000000], "defaultLength": 200000 } }
+ * ```
+ *
+ * **这是安装包自带的官方数据**，比网上搜资料准确。
+ *
+ * ## 重要限制：只覆盖一部分模型
+ *
+ * `product.json` 是**产品级目录**（所有可能的模型），ACP 返回的是
+ * **账号级可用列表**。实测两份清单只有 6/20 交集：
+ * `hy3`、`deepseek-v4.1-flash`、`glm-5.3`、`glm-5.3-flash`、`glm-5.2`、`kimi-k2.8-preview`。
+ *
+ * 对不命中的模型**返回 null**（UI 显示「未知」），绝不猜。
+ *
+ * @param {string} codebuddyEntry 形如 `<pkg>/bin/codebuddy` 的入口路径
+ * @returns {Map<string, { maxInputTokens: number, maxOutputTokens: number | null, supportedLengths: number[] | null, defaultLength: number | null }>}
+ */
+function readCodebuddyProductModels(codebuddyEntry) {
+  /** @type {Map<string, any>} */
+  const out = new Map()
+  try {
+    // 入口在 <pkg>/bin/codebuddy，product.json 在 <pkg>/product.json
+    const pkgDir = dirname(dirname(codebuddyEntry))
+    const productPath = join(pkgDir, 'product.json')
+    const raw = readFileSync(productPath, 'utf8')
+    const parsed = JSON.parse(raw)
+    const list = Array.isArray(parsed?.models) ? parsed.models : []
+    for (const m of list) {
+      const id = typeof m?.id === 'string' ? m.id : ''
+      if (!id) continue
+      const maxInput = Number(m?.maxInputTokens)
+      if (!Number.isFinite(maxInput) || maxInput <= 0) continue
+      const supported = Array.isArray(m?.contextWindow?.supportedLengths)
+        ? m.contextWindow.supportedLengths.map(Number).filter((n) => Number.isFinite(n) && n > 0)
+        : null
+      const defaultLength = Number(m?.contextWindow?.defaultLength)
+      out.set(id, {
+        maxInputTokens: maxInput,
+        maxOutputTokens: Number.isFinite(Number(m?.maxOutputTokens)) ? Number(m.maxOutputTokens) : null,
+        supportedLengths: supported && supported.length > 0 ? supported : null,
+        defaultLength: Number.isFinite(defaultLength) && defaultLength > 0 ? defaultLength : null,
+      })
+    }
+  } catch {
+    // 文件不存在/格式变化 → 返回空表（调用方会显示「未知」）
+  }
+  return out
+}
+
+/**
  * 默认探测（host 侧可直接使用）：
  * - codex：`resolveExecutable('codex')` + app-server model/list
  * - dsh：宿主 `ctx.llm.listModels()`（拿不到 → 抛错，保留 unknown/静态）
@@ -1382,7 +1472,17 @@ export function createDefaultProbes(deps = {}) {
     codebuddy: async ({ executable }) => {
       const exe = executable || (await resolveExecutable('codebuddy'))
       if (!exe) throw new Error('codebuddy 入口脚本不可用')
-      return probeCodebuddyModels({ executable: exe, spawnImpl: deps.spawnImpl })
+      const models = await probeCodebuddyModels({ executable: exe, spawnImpl: deps.spawnImpl })
+      // 补上下文窗口（2026-11-13）。
+      // ACP 的 configOptions 已不再包含 context_window（实测 20 个模型都没有），
+      // 改从安装包自带的 product.json 取 maxInputTokens。
+      // **只对命中的模型补**；不命中的保持 undefined，UI 显示「未知」。
+      const productModels = readCodebuddyProductModels(exe)
+      return models.map((m) => {
+        const meta = productModels.get(m.id)
+        if (!meta) return m
+        return { ...m, contextWindow: meta.maxInputTokens, contextWindowSource: 'product.json' }
+      })
     },
     dsh: async () => {
       const ctx = deps.ctx
