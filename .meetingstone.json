@@ -11,10 +11,11 @@
       "description": "团队领导：架构、战略、关键决策、最终质量把关",
       "prompt": "你是团队领导，负责架构、战略、关键决策和最终质量把关。你的能力最强、额度有限，只在最重要的事上出场：给出方向与取舍、评审关键方案、对最终交付负责。不要亲自做一线实现，不要重复别人的工作。",
       "channel": {
-        "kind": "codex",
-        "channelId": "ch-codex-astra",
-        "provider": "codex",
-        "model": "gpt-6-astra"
+        "kind": "acp-cli",
+        "channelId": "ch-acp-kimi",
+        "provider": "acp-kimi",
+        "model": "kimi-k3.1-pro",
+        "reasoning": "high"
       },
       "enabled": true,
       "timeoutMs": 3600000
@@ -29,10 +30,11 @@
       "description": "核心资深专家：疑难问题、审核验收、长时间 Agent 任务",
       "prompt": "你是核心资深专家，负责解决各种疑难问题、审核验收和长时间 Agent 任务。额度有限，高难任务优先给你。结论必须有证据，不做表面修改；复核他人结论时必须自己动手验证，不得照抄。",
       "channel": {
-        "kind": "codex",
-        "channelId": "ch-codex-sol",
-        "provider": "codex-sol",
-        "model": "gpt-6.1-sol"
+        "kind": "acp-cli",
+        "channelId": "ch-acp-hy4free",
+        "provider": "acp-hy4free",
+        "model": "hy4free",
+        "reasoning": "high"
       },
       "enabled": true,
       "timeoutMs": 3600000
@@ -66,7 +68,9 @@
       "channel": {
         "kind": "acp-cli",
         "channelId": "ch-acp-flash",
-        "provider": "acp"
+        "provider": "acp",
+        "model": "glm-5.3-flash",
+        "reasoning": "high"
       },
       "enabled": true,
       "timeoutMs": 3600000
@@ -83,7 +87,9 @@
       "channel": {
         "kind": "acp-cli",
         "channelId": "ch-acp-hy4",
-        "provider": "acp-hy4"
+        "provider": "acp-hy4",
+        "model": "hy3",
+        "reasoning": "high"
       },
       "enabled": true,
       "timeoutMs": 3600000
@@ -120,5 +126,59 @@
       "timeoutMs": 7200000
     }
   ],
-  "dispatchNotes": "分工原则：唐僧能力最强、额度有限，只有最重要的事（架构/战略/关键决策/最终把关）才找他；悟空处理高难任务与审核验收；沙僧与小白是干活主力，常规任务优先给他们；八戒负责调度、监工、整合，一般不亲自干活。"
+  "dispatchNotes": "分工原则：唐僧能力最强、额度有限，只有最重要的事（架构/战略/关键决策/最终把关）才找他；悟空处理高难任务与审核验收；沙僧与小白是干活主力，常规任务优先给他们；八戒负责调度、监工、整合，一般不亲自干活。",
+  "channels": [
+    {
+      "channelId": "ch-acp-kimi",
+      "description": "CodeBuddy · Kimi-K3.1-Pro（唐僧）",
+      "kind": "acp-cli",
+      "provider": "acp-kimi",
+      "model": "kimi-k3.1-pro",
+      "reasoning": "high"
+    },
+    {
+      "channelId": "ch-acp-hy4free",
+      "description": "CodeBuddy · Hy4 Free（悟空）",
+      "kind": "acp-cli",
+      "provider": "acp-hy4free",
+      "model": "hy4free",
+      "reasoning": "high"
+    },
+    {
+      "channelId": "ch-acp-flash",
+      "description": "CodeBuddy · GLM-5.3-Flash（沙僧）",
+      "kind": "acp-cli",
+      "provider": "acp",
+      "model": "glm-5.3-flash",
+      "reasoning": "high"
+    },
+    {
+      "channelId": "ch-acp-hy4",
+      "description": "CodeBuddy · Hy3（小白）",
+      "kind": "acp-cli",
+      "provider": "acp-hy4",
+      "model": "hy3",
+      "reasoning": "high"
+    },
+    {
+      "channelId": "ch-inprocess",
+      "description": "DSH 原生子 Agent（八戒/调度）",
+      "kind": "in-process",
+      "provider": "spawn"
+    },
+    {
+      "channelId": "ch-codex-astra",
+      "description": "Codex · gpt-6-astra（备用）",
+      "kind": "codex",
+      "provider": "codex",
+      "model": "gpt-6-astra"
+    },
+    {
+      "channelId": "ch-codex-sol",
+      "description": "Codex · gpt-6.1-sol（备用）",
+      "kind": "codex",
+      "provider": "codex-sol",
+      "model": "gpt-6.1-sol"
+    }
+  ]
 }
