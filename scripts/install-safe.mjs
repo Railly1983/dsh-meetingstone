@@ -17,7 +17,7 @@
 import { spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 
 const args = process.argv.slice(2)
 const opt = (name, fallback = undefined) => {
@@ -106,12 +106,13 @@ if (skipRestart) {
 }
 
 // 3) Detached watcher restart + crash check + rollback
-const fallback =
+const fallbackRaw =
   previous ??
   readdirSync(PACKAGES)
     .filter((name) => name.endsWith('.tgz') && join(PACKAGES, name) !== tgz)
     .sort()
     .pop()
+const fallback = fallbackRaw && isAbsolute(fallbackRaw) ? fallbackRaw : fallbackRaw ? join(PACKAGES, fallbackRaw) : undefined
 if (!fallback) {
   console.error('install-safe: no previous tgz for rollback; refusing auto-restart.')
   process.exit(3)
@@ -129,7 +130,7 @@ const watcherArgs = [
   '-NewTgz',
   `"${tgz}"`,
   '-PrevTgz',
-  `"${join(PACKAGES, fallback)}"`,
+  `"${fallback}"`,
   '-StartMs',
   String(startedAt),
   '-ResultFile',

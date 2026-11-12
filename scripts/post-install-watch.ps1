@@ -10,12 +10,23 @@ param(
 $logDir = Join-Path $env:APPDATA "@deepseek-ai\dsh-desktop\logs"
 $targetDir = Join-Path $env:USERPROFILE ".dsh\profiles\desktop\node_modules\dsh-meetingstone"
 
-function Get-LatestCrashMs {
+function Get-CrashesSince([long]$sinceMs) {
   try {
-    $files = Get-ChildItem $logDir -File -Filter "crash-*" -ErrorAction Stop
-    if (-not $files) { return 0 }
-    return ($files | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum.Ticks / 10000
-  } catch { return 0 }
+    return Get-ChildItem $logDir -File -Filter "crash-*" -ErrorAction Stop |
+      Where-Object { ([DateTimeOffset]$_.LastWriteTimeUtc).ToUnixTimeMilliseconds() -gt $sinceMs }
+  } catch { return @() }
+}
+
+# Only plugin/boot failures count. Killing DSH to restart produces
+# "dsh desktop host exited with 4294967295" and must NOT trigger rollback.
+function Test-BootFailure($files) {
+  foreach ($file in $files) {
+    $text = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+    if ($text -match "web boot:|entry did not activate|dsh-meetingstone:\s*failed|plugin .* failed to activate") {
+      return $true
+    }
+  }
+  return $false
 }
 
 function Overlay-Tgz([string]$tgz) {
@@ -37,8 +48,8 @@ function Restart-Dsh {
 Restart-Dsh
 Start-Sleep -Seconds 35
 
-$crashed = (Get-LatestCrashMs) -gt $StartMs
-if (-not $crashed) {
+$crashes = Get-CrashesSince $StartMs
+if (-not (Test-BootFailure $crashes)) {
   Set-Content -Path $ResultFile -Value "PASS" -Encoding utf8
   exit 0
 }
