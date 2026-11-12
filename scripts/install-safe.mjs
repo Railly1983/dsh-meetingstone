@@ -69,10 +69,29 @@ function install(target) {
   if (!existsSync(source)) {
     return { status: 1, stdout: '', stderr: 'tgz has no package/ root' }
   }
-  mkdirSync(targetDir, { recursive: true })
-  cpSync(source, targetDir, { recursive: true, force: true })
+  // 先把旧目录完整备份到 stage，便于任何一步失败时原样还原。
+  const backup = join(stage, 'previous-install')
+  if (existsSync(targetDir)) {
+    mkdirSync(backup, { recursive: true })
+    cpSync(targetDir, backup, { recursive: true, force: true })
+  }
+  // 关键：整目录替换，而不是叠加。
+  // cpSync({force:true}) 只覆盖同名文件，**不会删除新包里已不存在的文件**，
+  // 于是插件删掉的模块会残留在磁盘上，下次排查时误以为删除没生效
+  // （2026-11-12 实测：B3 删除的 5 个文件仍留在已安装目录）。
+  try {
+    rmSync(targetDir, { recursive: true, force: true })
+    mkdirSync(targetDir, { recursive: true })
+    cpSync(source, targetDir, { recursive: true, force: true })
+  } catch (error) {
+    // 替换失败：还原备份，避免留下半个插件目录。
+    rmSync(targetDir, { recursive: true, force: true })
+    if (existsSync(backup)) cpSync(backup, targetDir, { recursive: true, force: true })
+    rmSync(stage, { recursive: true, force: true })
+    return { status: 1, stdout: '', stderr: `overlay failed and rolled back: ${error?.message ?? error}` }
+  }
   rmSync(stage, { recursive: true, force: true })
-  return { status: 0, stdout: 'overlaid', stderr: '' }
+  return { status: 0, stdout: 'replaced (deleted files removed)', stderr: '' }
 }
 
 // 1) Canary
