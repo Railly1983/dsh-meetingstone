@@ -505,10 +505,26 @@ function diffFieldPaths(before, after) {
 }
 
 /**
- * 解析三层配置，返回生效角色表与每个字段的来源。
+ * 解析配置，返回生效角色表与每个字段的来源。
  *
- * `effective.roles` 可直接交给 `createRegistry({ globalRoles })` 使用：
- * 角色已完成合并与默认值填充，注册表只负责解析与别名冲突判定。
+ * ── B3 之后：角色配置只有**全局一层** ──────────────────────────────────
+ * 用户 2026-11-12 决定：本插件只有全局角色设定，没有项目级/会话级角色覆盖。
+ *
+ * 但本函数**历史上**支持过三层合并（global + project + session），那套代码还在，
+ * 且实测仍然有效（传 `project: { roleOverrides: { 'role-a': { name: 'X' } } }`
+ * 会把角色改名）。当前之所以「不生效」，**仅仅因为 src/index.js 的两个调用点
+ * 都不传 `project`** —— 这是靠调用方纪律，不是代码保证。
+ *
+ * 这种「死代码但活的」状态是隐患（产品体验复核 2026-11-12 抓到）：
+ * 任何人给调用点加上一个 `project:` 参数，项目覆盖就会**悄悄生效**，
+ * 与用户的决定矛盾，且不会有任何报错。
+ *
+ * 因此这里加一道显式闸：传了 `project` 且其中含角色相关内容时，**记录一条
+ * 明确的错误**（`PROJECT_ROLES_NOT_SUPPORTED`），而不是静默应用。
+ * 调用方可以据此立刻发现「有人在用已下线的能力」。
+ *
+ * `project` 里的**非角色**字段（projectRules / dispatchNotes）仍然允许读 ——
+ * 项目文件继续承载这些。
  *
  * @param {object} [input]
  * @param {object} [input.global] 全局插件配置（roles/channels/defaultRoleId/dispatchNotes）
@@ -516,19 +532,61 @@ function diffFieldPaths(before, after) {
  *   `enabled` 等字段是「用户显式写的」还是「schema 默认值填的」。省略时退回 `global`。
  *   生产入口（src/index.js）必须在 `Config()` 之前保留原始配置并传入，否则默认值会被
  *   误标成 `global`，`userPreference` 就无法区分 unset 与 enabled。
- * @param {object} [input.project] 项目配置（roles/roleOverrides/defaultRoleId/dispatchNotes/projectRules）
- * @param {object} [input.session] 会话配置（本模块的 SessionConfig 形状）
+ * @param {object} [input.project] 项目配置。**角色相关字段（roles/roleOverrides）
+ *   自 B3 起不再支持**，传入会被忽略并记录 `PROJECT_ROLES_NOT_SUPPORTED` 错误。
+ * @param {object} [input.session] 会话配置。**自 B3 起不再支持**，传入会被忽略并
+ *   记录 `SESSION_ROLES_NOT_SUPPORTED` 错误。
  * @returns {{ effective: object, sources: object, errors: any[] }}
  */
 export function resolveEffectiveConfig({ global, project, session, globalRaw } = {}) {
   /** @type {any[]} */
   const errors = []
   const globalConfig = isPlainObject(global) ? /** @type {any} */ (global) : {}
-  const projectConfig = isPlainObject(project) ? /** @type {any} */ (project) : {}
-  const { config: sessionConfig, errors: sessionErrors } = normalizeSessionConfig(session)
-  errors.push(...sessionErrors)
 
-  // 1) 全局 + 项目：复用注册表现有的合并语义（同 roleId = 字段级覆盖）。
+  // B3（2026-11-12 用户决定）：角色配置只有全局一层。
+  //
+  // 这里**主动剥掉**项目/会话配置里的角色相关字段，而不是依赖「调用方别传」。
+  // 原因：历史实现支持三层合并且仍然有效，靠纪律不传是脆弱的 ——
+  // 任何人加一个 `project:` 参数就会悄悄让项目覆盖生效（产品体验复核抓到）。
+  // 现在改为：剥掉 + 记录错误，让「有人在用已下线能力」立刻可见。
+  const rawProject = isPlainObject(project) ? /** @type {any} */ (project) : {}
+  const projectHasRoles =
+    (Array.isArray(rawProject.roles) && rawProject.roles.length > 0) ||
+    (isPlainObject(rawProject.roleOverrides) && Object.keys(rawProject.roleOverrides).length > 0)
+  if (projectHasRoles) {
+    errors.push({
+      code: 'PROJECT_ROLES_NOT_SUPPORTED',
+      message:
+        'B3 之后本插件只有全局角色设定，项目级 roles/roleOverrides 已被忽略；请改到全局配置。',
+    })
+  }
+  // 只保留非角色字段（projectRules / dispatchNotes 等仍由项目文件承载）。
+  const projectConfig = isPlainObject(project)
+    ? (() => {
+        const { roles: _r, roleOverrides: _o, ...rest } = /** @type {any} */ (project)
+        return rest
+      })()
+    : {}
+
+  // B3：不再支持会话级角色覆盖。**连内容一起清空**，只记错误 ——
+  // 早先只报错不清空，导致会话覆盖依然生效（被 B3 测试抓到）。
+  const normalizedSession = normalizeSessionConfig(session)
+  const rawSessionConfig = normalizedSession.config
+  if (session !== undefined && session !== null) {
+    errors.push({
+      code: 'SESSION_ROLES_NOT_SUPPORTED',
+      message: 'B3 之后不再支持会话级角色覆盖；传入的 session 配置已被忽略。',
+    })
+  }
+  errors.push(...normalizedSession.errors)
+  // 清空角色相关字段，但保留结构形状（下游会读 sessionConfig.roles 等）。
+  const sessionConfig = {
+    ...rawSessionConfig,
+    roles: [],
+    roleOverrides: {},
+  }
+
+  // 1) 只剩全局：项目角色字段已在上面剥掉。
   const inherited = createRegistry(toRegistryInput(globalConfig, projectConfig))
   for (const error of inherited.errors) {
     // 别名冲突在最终生效角色表上统一判定（会话可能改名/改别名）。
