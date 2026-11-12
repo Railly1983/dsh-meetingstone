@@ -4,8 +4,14 @@
 
 DeepSeek Harness 的多 CLI 智能体角色管理与派单插件。
 
-> **状态（2026-11-10）**：阶段 1（骨架）与阶段 2（角色映射 + 派单核心）已完成，插件已在本机 `desktop` profile 加载。
-> 外部 CLI 派单需额外安装官方 provider bundle；第一版**无 UI**，配置写在 profile 的 `cordis.patch.yml`，重启生效。
+> **状态（2026-11-12）**：`0.1.0-alpha.20`。核心派单、角色配置、跨 CLI 路由、worktree 隔离、
+> 执行记录均已实现并在真机验证；**十个工具**可用。
+> 外部 CLI 派单需额外安装官方 provider bundle；配置写在 profile 的 `cordis.patch.yml`。
+>
+> **V1 UI（已实现）**：设置页 → 集合石。两个区：外部 CLI 连接 + 全局角色库。
+> 「管理角色」页内联展开，支持增改删、每行启用开关、CLI→模型→思考强度联动、能力刷新。
+> **没有**右侧栏「本对话角色」面板，**没有**对话页头角色入口 —— 这两个已在 B3 移除。
+> 角色配置也只有全局一层（项目级/会话级覆盖已下线）。
 
 > **Token 口径**：Subagents 面板的 `tok` 是四桶（uncachedInput+output+cacheRead+cacheWrite）累计、按整条持久日志计算；fork 会话含父历史（`154M / 4 秒` 即此，耗时只算子会话自身）。**不可用于成本/额度/子 Agent 归属**；替代口径见 [Token 统计口径核查](docs/audit/token-stats.md)。
 
