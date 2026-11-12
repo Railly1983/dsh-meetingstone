@@ -73,14 +73,14 @@ import { resolveRoleChannel } from '../roles/capabilities.js'
  *   `permissionMode`（codex/claude-code）与 `permission`（acp）是**挂载时的行配置**
  *   （10-provider-install.md §8.1），不是每次 start 的参数。既然做不到绝对只读，
  *   就整个不提供——不要再实现 `readOnly` 参数或 `readOnlyEnforced` 标记。
- * TODO(P2-parent): `startActivation` 的 `parent: Agent` 是**必填**，但 dispatcher 的
- *   `start({ role, task, cwd, timeoutMs })` 接口没有 Agent。本版通过
+ * 已解决(P2-parent): `startActivation` 的 `parent: Agent` 是必填，但 dispatcher 的
+ *   `start({ role, task, cwd, timeoutMs })` 接口没有 Agent。现通过
  *   `createDshAdapter(ctx, { getParent })` 注入；未注入时抛错失败关闭，不编造 Agent。
- *   `docs/cookbook/adding-a-tool.md` 提到 `exec.agent`，但「它能直接当 `parent`」**未验证**，
- *   需由工具调用方（src/index.js，并行工作面）在真实会话里确认后注入。
- * TODO(P2-runtime): `getProvider` / `startActivation` 的签名来自官方文档，但本项目
- *   `docs/audit/10-provider-install.md` §7.3 / §12 明确「真实启动后返回非空」**未验证**
- *   （阶段 0 只做了安装与 --dump-config）。需在阶段 2 的真机联调里补一次运行实测。
+ *   **已真机验证**：`exec.agent` 可直接作为 `parent`（2026-11-12 多次真实派单成功，
+ *   `src/dsh/register.js` 的 dispatch 工具把 `exec.agent` 放进 `context.agent`）。
+ * 已解决(P2-runtime): `getProvider` / `startActivation` 的签名**已真机验证** ——
+ *   2026-11-12 累计数十次真实派单（spawn / acp / codex 通道），
+ *   `startActivation` 返回非空 `activation.childId`，provider 查询正常。
  */
 
 /**

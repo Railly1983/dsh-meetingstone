@@ -50,9 +50,8 @@
  *   **之前**：`const outcome = await ctx.approval.request({ agent, toolName:
  *   'meetingstone_dispatch', callId, reason, signal })`；只有 `outcome === 'allowed-once'`
  *   才继续，其余（含 'unavailable'）一律返回失败。第一版按要求不调用、也不假装已授权。
- * TODO(P2-inject): `export const inject = ['tools']` 是**插件模块级**导出；本文件不是
- *   bundle 入口（入口是 src/index.js），需由入口 re-export 或在 apply 里等待 tools 服务，
- *   Loader 才会据此排序。该接线属并行工作面，此处只导出常量供其使用。
+ * 已解决(P2-inject): 入口 `src/index.js:69` 已 `export const inject = [...toolsInject, 'subagents']`，
+ *   Loader 会据此排序。本文件只导出常量 `toolsInject` 供入口复用。
  * TODO(P2-roles-source): `registry.list()`（src/roles/registry.js）不携带角色来源，
  *   故 list_roles 的 `source` 标 'unknown'；若 registry 日后补来源标注再透传，不编造。
  */
@@ -382,7 +381,8 @@ function taskResultView(record, full) {
  * @param {string} [deps.defaultRoleId] 全局默认角色（项目/会话配置未覆盖时用于自动路由兜底）
  * @param {object[]} [deps.routingRules] 全局自动路由规则表（空 = 用 `src/dispatch/routing.js` 内置表）
  * @param {(spec: object) => object} [deps.defineTool]
- *   可选；生产应注入 `@deepseek-ai/dsh-tools` 的真实 defineTool（TODO(P2-defineTool)）。
+ *   可选；生产已由 `src/index.js:49` 注入 `@deepseek-ai/dsh-tools` 的真实 defineTool。
+ *   不注入时回落到本文件的 `compileToolSpec`（等价编译，但不含运行时 args 校验）。
  * @returns {Array<{ name: string }>} 已注册的工具定义（便于调用方/测试核对）
  */
 export function registerTools(ctx, deps) {
