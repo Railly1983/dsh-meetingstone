@@ -146,3 +146,51 @@ test('超时后 cancel 仍然幂等（不抛）', async () => {
     await adapter.cancel({ childId: 'child-1' })
   })
 })
+
+// ── interrupted 投影（2026-11-12 补，属于「取消/进程清理」的配套证据）──
+// 设计：run 记录带 runtimeId。读取时若记录属于**别的** runtimeId，
+// status=running 会被投影为 interrupted —— 否则重启后永远显示「还在跑」。
+// 这是避免「僵尸任务占位误判」的关键机制。
+
+test('interrupted 投影：不同 runtimeId 的 running 记录读出来是 interrupted', async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { createRunStore } = await import('../src/run-store.js')
+
+  const root = await mkdtemp(join(tmpdir(), 'ms-proj-'))
+  try {
+    // 手工造一条属于旧 runtimeId 的 running 记录
+    const runsDir = join(root, '.meetingstone', 'runs')
+    await mkdir(runsDir, { recursive: true })
+    const childId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    await writeFile(
+      join(runsDir, childId + '.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        childId,
+        runtimeId: 'old-runtime',
+        role: 'role-a',
+        provider: 'spawn',
+        model: null,
+        status: 'running',
+        createdAt: 1,
+      }),
+      'utf8',
+    )
+
+    // 用新 runtimeId 读 → 应投影为 interrupted
+    const fresh = createRunStore({ root, runtimeId: 'new-runtime' })
+    const asFresh = await fresh.loadRun(childId)
+    assert.equal(asFresh.status, 'interrupted', '旧进程的 running 必须投影为 interrupted')
+    assert.equal(asFresh.interrupted, true)
+
+    // 用同一个 runtimeId 读 → 保持 running
+    const same = createRunStore({ root, runtimeId: 'old-runtime' })
+    const asSame = await same.loadRun(childId)
+    assert.equal(asSame.status, 'running', '同进程读自己的 running 不该被改')
+    assert.equal(asSame.interrupted, undefined)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
