@@ -2,6 +2,32 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.24] - 2026-11-12
+
+### Added
+
+- **`scripts/verify-d1-interaction.mjs`：D1 交互层动态验证（20 项）**。
+  与静态核对不同，它真的执行 client 模块、真的调渲染函数，
+  检查节点树里按钮绑的回调。已纳入门禁（9 → **10 PASS**）。
+
+  覆盖三个渲染函数都不抛错、两区标题、「管理角色」按钮有 onClick、
+  管理器有返回/新增入口、详情有保存/返回/刷新、无「本对话角色」「右侧栏」、
+  无「通道」、开关颜色只有绿/灰。
+
+### 踩到的三个 stub 坑（已在脚本注释里详细记录）
+
+1. `jsxs(type, { children: [...] })` 的 children 在 **props 里**，不在第三个参数。
+   stub 无条件覆盖 `props.children` 会让渲染树永远为空 —— 最隐蔽的一个。
+2. `react/jsx-runtime` 也要 stub（jsx/jsxs/Fragment）。
+3. 必须先 `normalizeSnapshot` + `normalizeGlobal`（生产链路就是这样），
+   否则角色名会渲染成 roleId。
+
+### 诚实标注
+
+5 项（角色名显示、行内 Switch、CLI 下拉、删除入口、颜色说明）因 stub 无法
+完整复现 host 投影而**没有假装通过**，标成 `[需人眼]` 并写明原因。
+静态脚本已从字典层验证这些元素存在，只需目视确认位置。
+
 ## [0.1.0-alpha.23] - 2026-11-12
 
 ### Changed
