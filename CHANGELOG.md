@@ -2,6 +2,27 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.16] - 2026-11-12
+
+### Fixed
+
+- **`steer` 对「已停但内存句柄未清理」的误判**（alpha.15 第三次真机测试暴露）。
+  真机：cancel 之后记录变成 `status=cancelled, stopConfirmed=true`，但适配器内存里
+  的句柄还没 dispose 完，`getTask` 仍返回 `running` → 回查被拦住 → `STOP_UNCONFIRMED`。
+
+  根因：`dispose` 是**异步**的，cancel 返回后内存会有短暂窗口仍显示 running。
+  之前的回查逻辑「两者矛盾时以内存为准」在这个窗口期是错的。
+
+  修正后的证据优先级：
+  1. 派单前记录已终态 → 认定已停（不必 cancel）
+  2. cancel 返回值说停成功 → 认定已停（适配器权威回答）
+  3. cancel 说「没有句柄」→ 回查**磁盘**记录，终态即认定已停
+     （不再看内存 liveStatus，因为它会被异步 dispose 的窗口期污染）
+
+### 测试
+
+- 628 → 629 tests，新增两条明确区分「派单前」与「cancel 后」两个时机的用例
+
 ## [0.1.0-alpha.15] - 2026-11-12
 
 ### Fixed

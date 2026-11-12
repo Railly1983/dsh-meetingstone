@@ -1361,52 +1361,48 @@ export function registerTools(ctx, deps) {
           }
         }
 
-        // 先停掉当前任务（它可能还在跑）。
+        // ── 判定「原任务是否已停」的三层证据（2026-11-12 三轮真机测试的结论）──
         //
-        // 关键坑（2026-11-12 真机测试）：adapter.cancelActivation 在**没有存活句柄**时
-        // 返回 `{ stopConfirmed: false, reason: '没有该任务的存活句柄' }` —— 这是正确的
-        // 谨慎行为（不猜），但对 steer 场景是误判：
-        // 任务可能**已经自己结束了**，此时「没有句柄」恰恰说明它停了。
+        // 背景：外部 CLI（ACP）的 `cancelActivation` 在**没有存活句柄**时返回
+        // `stopConfirmed: false`（谨慎行为，不猜），但这对 steer 是误判 ——
+        // 任务可能已经自己结束了，或者 cancel 刚刚把它结束掉。
         //
-        // 所以分两步：
-        // 1. 先看记录是否已终态（completed/failed/cancelled）→ 直接认定已停，不必 cancel
-        // 2. 只有还在 running 才真去 cancel
+        // 真机实测（childId 0b14ca77）：cancel 之后记录变成
+        // `status=cancelled, stopConfirmed=true`，但适配器的内存 `handles`
+        // 里还留着一个 `running` 的句柄（dispose 是异步的），
+        // 于是回查 `getTask` 仍返回 `running` → 被门禁拦住。
+        //
+        // 结论：**不能只靠单一来源**。按下面的顺序取证据：
+        //   1. 派单前的记录已经终态 → 直接认定已停（不必 cancel）
+        //   2. cancel 的返回值说停成功 → 认定已停（这是适配器的权威回答）
+        //   3. cancel 说「没有句柄」→ 回查磁盘记录，终态即认定已停
+        //      （**不再看内存 liveStatus**，因为 dispose 是异步的，
+        //       内存会在 cancel 后短暂地仍显示 running）
         const terminal = ['completed', 'failed', 'cancelled', 'interrupted']
-        const alreadyTerminal =
-          terminal.includes(String(record.liveStatus ?? record.status ?? '')) ||
-          record.stopConfirmed === true
+        const statusNow = String(record.liveStatus ?? record.status ?? '')
+        const alreadyTerminal = terminal.includes(statusNow) || record.stopConfirmed === true
 
         let stopConfirmed = false
         let stopReason = ''
         if (alreadyTerminal) {
           stopConfirmed = true
-          stopReason = `记录已是终态（${record.liveStatus ?? record.status}）`
+          stopReason = `派单前记录已是终态（${statusNow}）`
         } else {
           const cancelOutcome = await dispatcher
             .cancel({ childId })
             .catch((error) => ({ stopConfirmed: false, reason: error?.message ?? String(error) }))
+          // 2. 适配器明确说停成功 → 最高优先级证据
           stopConfirmed = cancelOutcome?.stopConfirmed === true
           stopReason = typeof cancelOutcome?.reason === 'string' ? cancelOutcome.reason : ''
-          // cancel 报「没有存活句柄」时，回查记录状态再判一次 ——
-          // 它可能在我们查完记录之后自己结束了。
-          //
-          // **关键：回查必须同时看磁盘记录与内存视图**（2026-11-12 真机测试暴露）。
-          // 只读磁盘会把「内存说还在跑、磁盘是旧快照」的情况误判成已结束。
-          // 两者矛盾时以**内存**为准（它反映当前进程的真实状态）。
+          // 3. 适配器说「没有句柄」→ 回查磁盘（不依赖内存，见上方说明）
           if (!stopConfirmed && /没有该任务的存活句柄|存活句柄/.test(stopReason)) {
             const afterDisk = loadPersistedRun
               ? await loadPersistedRun(exec, childId).catch(() => null)
               : null
-            const afterLive = await resolveRun(exec, childId).catch(() => null)
-            const liveStatus = String(afterLive?.status ?? '')
             const diskStatus = String(afterDisk?.status ?? '')
-            // 内存明确说还在跑 → 不能重开（磁盘的终态是过时快照）
-            const liveStillRunning = liveStatus === 'running'
-            const diskTerminal =
-              terminal.includes(diskStatus) || afterDisk?.stopConfirmed === true
-            if (!liveStillRunning && diskTerminal) {
+            if (terminal.includes(diskStatus) || afterDisk?.stopConfirmed === true) {
               stopConfirmed = true
-              stopReason = `任务已自行结束（${diskStatus}）`
+              stopReason = `cancel 后记录已终态（${diskStatus}）`
             }
           }
         }
