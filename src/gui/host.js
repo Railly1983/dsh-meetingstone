@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * GUI 数据提供者（Host half）：无参只读快照 + 三个 strict 会话方法。
+ * GUI 数据提供者（Host half）：无参只读快照 + 五个 strict 配置方法。
  *
  * 数据链路（证据见 docs/gui-0.2.0.md §1/§8）：
  *   browser `ctx.remote.meetingstone.list()`
@@ -8,10 +8,10 @@
  *     → 本文件创建的 `TypertRemoteService`（namespace `meetingstone`, method `list`）
  *     → `createGuiState().fullSnapshot()`（同步快照 + 全局配置 + CLI 探测）
  *
- *   browser `ctx.remote.meetingstone.list()` 等（B3：会话级 remote 已下线）
- *     → Typert Gateway `/api`（优先 Host strict 定义）
- *     → 同一 service 的会话方法
- *     → `src/gui/session.js`（已随 B3 删除）
+ *   五个 strict 配置方法（`setCliEnabled` / `refreshCli` / `updateGlobalRole` /
+ *   `createGlobalRole` / `deleteGlobalRole`）由 `src/gui/typert-spec.js` 构造 spec，
+ *   经 `src/gui/typert.js` 用宿主的 `createTypertRemoteInfo` 变成 descriptor 后注册；
+ *   设置页写操作走这条链路，不再是会话级覆盖。
  *
  * 数据**不另建源**：
  *   - 角色：`registry.list()`（与 `meetingstone_list_roles` 同一份注册表）
@@ -63,7 +63,7 @@ const ROLE_SOURCE_FIELDS = Object.freeze([
 
 /**
  * 本插件暴露的全部 Remote 方法（SRC marker 与 strict 定义共用）。
- * 顺序固定：list → 会话三方法 → 配置三方法（测试断言顺序）。
+ * 顺序固定：list → 五个配置方法（测试断言顺序）；B3 起无会话方法。
  */
 export const GUI_REMOTE_METHODS = Object.freeze([
   'list',
@@ -75,10 +75,10 @@ export const GUI_REMOTE_METHODS = Object.freeze([
 ])
 
 /**
- * 暴露无参 `list` + 三个带参会话方法 + 三个配置方法。
+ * 暴露无参 `list` + 五个带参配置方法。
  *
  * 0.2.0 曾因手写带参 descriptor 被 Gateway 拒绝（`has no strict codec`）而移除
- * 三个会话方法；本版按官方生成物的写法恢复（会话 3 + 配置 3）：
+ * 带参方法；本版按官方生成物的写法恢复（配置 5）：
  *  - Host：真实 zod schema 构造 `{mode:"strict", typeSymbol, create}`，
  *    经 `createTypertRemoteInfo` 生成 descriptor，再由 `ctx.typert.register()`
  *    写入 Host 定义（`src/gui/typert.js`）；

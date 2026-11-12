@@ -2,10 +2,11 @@
 /**
  * 配置写 API 的 Host 侧业务层（P0-S2，**后端，不含 UI**）。
  *
- * 三类写入：
- * - 会话：`src/gui/session.js`（已有，P0-S0）
+ * 三类写入（B3 后只剩后两类）：
  * - 全局：`src/config/global-writer.js`（profile patch，经官方 `configEditor.edit`）
  * - 项目：`src/project/write.js`（`.meetingstone.json`，白名单 + 保留未知字段）
+ *
+ * 会话级写入（旧 `src/gui/session.js`）已随 B3 删除；本模块不再产生会话覆盖。
  *
  * 本模块把「CLI 显式偏好」与 preflight 串成一条强制门禁：
  * - 开启（false → true）必须先 preflight；`ready !== 'ready'` 时**不写任何配置**

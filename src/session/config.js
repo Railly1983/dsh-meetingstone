@@ -11,9 +11,10 @@
  * B3 已下线会话级文件存储与 GUI 读写路径；本模块只保留纯合并能力（无生产调用方传入 session）。
  *
  * 边界（勿破坏）：
- * - 纯函数：不读文件、不碰宿主 API；IO 全部在 store.js
+ * - 纯函数：不读文件、不碰宿主 API；本文件**不含任何 IO**（B3 已删除 `store.js`，
+ *   会话覆盖的持久化路径不存在了）
  * - 只接受白名单字段；未知字段**拒绝并报错**，不静默生效
- * - 会话层只保存差异：值等于继承值时不写入；清空字段用 clearOverride
+ * - 会话层只保存差异：值等于继承值时不写入
  * - 不做别名冲突判定：生效角色表交给 `createRegistry()`，冲突在那里统一报告
  *
  * 为什么不用宿主的 session 级存储（2026-11-11 查阅宿主 0.2.2-rc.1 的实际 API）：
@@ -23,7 +24,8 @@
  * - `@deepseek-ai/dsh-storage-domain` 是宿主侧 KV，但需要 `defineDomain` + zod
  *   schema，本插件是**零依赖**的（见 src/schema.js 的设计说明），且该服务不是
  *   所有 composition 都挂载。
- * 因此退化为项目内 `.meetingstone/sessions/<sessionId>.json`，局限见 docs/configuration.md。
+ * 因此曾退化为项目内 `.meetingstone/sessions/<sessionId>.json`（历史说明：该路径的
+ * 读写代码已随 B3 整体下线，`src/` 下无任何代码再读它；局限见 docs/configuration.md）。
  */
 import { isValidRoleId } from '../roles/ids.js'
 import { CHANNEL_KINDS, createRegistry } from '../roles/registry.js'
@@ -447,131 +449,6 @@ export function normalizeSessionConfig(raw) {
   }
 
   return { config, errors }
-}
-
-/**
- * 计算"只保存差异"的补丁，并列出"已经等于继承值、应从现有覆盖里删除"的字段。
- *
- * 语义：设置一个字段时，若新值等于继承值，等于恢复继承——必须把旧覆盖删掉，
- * 而不是保留上一次写入的差异。
- *
- * `patch` 必须已经过 `sanitizeRolePatch`。
- *
- * @param {object | null | undefined} inherited 继承层的角色（全局+项目），没有则传 null
- * @param {Record<string, any>} patch
- * @returns {{ patch: Record<string, any>, restored: string[] }}
- */
-export function diffRoleOverride(inherited, patch) {
-  if (!inherited) {
-    return {
-      patch: { ...patch, ...(patch.channel ? { channel: { ...patch.channel } } : {}) },
-      restored: [],
-    }
-  }
-
-  /** @type {Record<string, any>} */
-  const out = {}
-  /** @type {string[]} */
-  const restored = []
-  for (const field of ROLE_SOURCE_FIELDS) {
-    if (!Object.hasOwn(patch, field)) continue
-    // B2：setting 的继承值可能是旧字段（prompt/description），按同一合并语义比较
-    const inheritedValue =
-      field === 'setting'
-        ? typeof inherited.setting === 'string'
-          ? inherited.setting
-          : typeof inherited.prompt === 'string' && inherited.prompt
-            ? inherited.prompt
-            : typeof inherited.description === 'string'
-              ? inherited.description
-              : undefined
-        : /** @type {any} */ (inherited)[field]
-    if (deepEqual(patch[field], inheritedValue)) restored.push(field)
-    else out[field] = patch[field]
-  }
-  if (patch.channel) {
-    /** @type {Record<string, any>} */
-    const channel = {}
-    for (const key of CHANNEL_SOURCE_FIELDS) {
-      if (!Object.hasOwn(patch.channel, key)) continue
-      if (deepEqual(patch.channel[key], /** @type {any} */ (inherited).channel?.[key])) {
-        restored.push(`channel.${key}`)
-      } else {
-        channel[key] = patch.channel[key]
-      }
-    }
-    if (Object.keys(channel).length > 0) out.channel = channel
-  }
-  return { patch: out, restored }
-}
-
-/**
- * 合并两个补丁（后者覆盖前者）；channel 按字段合并。
- * @param {Record<string, any>} base
- * @param {Record<string, any>} patch
- * @returns {Record<string, any>}
- */
-export function mergeRolePatch(base, patch) {
-  /** @type {Record<string, any>} */
-  const next = { ...base }
-  for (const [key, value] of Object.entries(patch)) {
-    if (key === 'channel') {
-      next.channel = { ...(base.channel ?? {}), .../** @type {any} */ (value) }
-      continue
-    }
-    next[key] = value
-  }
-  if (next.channel && Object.keys(next.channel).length === 0) delete next.channel
-  return next
-}
-
-/** 补丁是否为空（没有可写的差异）。 */
-export function isEmptyPatch(patch) {
-  return !patch || Object.keys(patch).length === 0
-}
-
-/**
- * 把 `clearOverride(roleId, field)` 的字段写法归一化。
- * 支持 `description` / `model`（通道简写）/ `channel.model`。
- * @param {unknown} field
- * @returns {string | null}
- */
-export function normalizeFieldPath(field) {
-  if (typeof field !== 'string') return null
-  const value = field.trim()
-  if (!value) return null
-  if (value === 'alias') return 'aliases'
-  // B2：旧字段迁移入口 —— description/prompt 都指向合并后的 setting
-  if (value === 'description' || value === 'prompt') return 'setting'
-  if (ROLE_SOURCE_FIELDS.includes(value)) return value
-  if (value.startsWith('channel.')) {
-    const key = value.slice('channel.'.length)
-    return CHANNEL_SOURCE_FIELDS.includes(key) ? `channel.${key}` : null
-  }
-  if (CHANNEL_SOURCE_FIELDS.includes(value)) return `channel.${value}`
-  return null
-}
-
-/**
- * 从补丁里删除一个字段（不修改入参）。
- * @param {Record<string, any>} patch
- * @param {string} field normalizeFieldPath 的返回值
- * @returns {Record<string, any>}
- */
-export function removePatchField(patch, field) {
-  /** @type {Record<string, any>} */
-  const next = { ...patch }
-  if (field.startsWith('channel.')) {
-    const key = field.slice('channel.'.length)
-    if (next.channel) {
-      next.channel = { ...next.channel }
-      delete next.channel[key]
-      if (Object.keys(next.channel).length === 0) delete next.channel
-    }
-    return next
-  }
-  delete next[field]
-  return next
 }
 
 /**

@@ -1,6 +1,7 @@
 // @ts-check
 /**
- * 会话级 Remote 的 strict 契约（Host/Client 共用语义，纯函数，无宿主 import）。
+ * 配置 Remote 的 strict 契约（Host/Client 共用语义，纯函数，无宿主 import）。
+ * B3 起只剩五个配置方法；会话级方法与其 typeSymbol 已整体下线。
  *
  * 事实依据（app.asar，DSH 0.2.2-rc.1）：
  *  - 宿主允许手写 wire schema 经 `ctx.typert.register()` 注册：
@@ -27,12 +28,8 @@ export const TYPERT_FACE = 'host'
  * 与 `tests/gui.test.mjs` 会做双向断言，防止两侧漂移。
  */
 export const SESSION_REMOTE_TYPES = Object.freeze({
-  sessionId: 'dsh-meetingstone/types#SessionId',
   roleId: 'dsh-meetingstone/types#RoleId',
-  field: 'dsh-meetingstone/types#OverrideField',
   value: 'dsh-meetingstone/types#JsonValue',
-  sessionConfigView: 'dsh-meetingstone/types#SessionConfigView',
-  overrideResult: 'dsh-meetingstone/types#SessionOverrideResult',
   // U2：外部 CLI 开关 / 重新检测 / 全局角色写入。
   cliName: 'dsh-meetingstone/types#CliName',
   booleanValue: 'dsh-meetingstone/types#BooleanValue',
@@ -101,12 +98,8 @@ export function createSessionRemoteSpec(zod) {
   }
   const z = zod
 
-  /** sessionId：传输边界只校验非空字符串与长度；路径安全仍由业务层白名单负责。 */
-  const sessionId = () => z.string().min(1).max(128)
-  /** roleId：同上。 */
+  /** roleId：传输边界只校验非空字符串与长度；路径安全仍由业务层白名单负责。 */
   const roleId = () => z.string().min(1).max(128)
-  /** field：`model` / `channel.model` 等字符串，业务层有字段白名单。 */
-  const field = () => z.string().min(1).max(128)
   /** value：任意 JSON；Gateway 在 parse 后还会做 `assertJsonValue`。 */
   const value = () => z.unknown()
   /** cli：只允许已支持的外部 CLI 名（业务层还会再校验一次）。 */
@@ -115,34 +108,6 @@ export function createSessionRemoteSpec(zod) {
   const booleanValue = () => z.boolean()
   /** 配置写结果：形状由业务层决定，这里只要求是可 JSON 化的任意值。 */
   const jsonResult = () => z.unknown()
-
-  const sessionConfigView = () =>
-    z.object({
-      effective: z.unknown(),
-      overrides: z.record(z.string(), z.unknown()),
-      sources: z.unknown(),
-      // P0-S2：读取层非致命告警（未知字段/坏字段）。可选，旧 Host 不返回也兼容。
-      warnings: z.array(z.unknown()).optional(),
-      // U2：详情页选项与角色三色状态；缺省为空（不伪造）。
-      channels: z.array(z.unknown()).optional(),
-      roleStates: z.array(z.unknown()).optional(),
-    })
-
-  const overrideResult = () =>
-    z.object({
-      ok: z.boolean(),
-      written: z.boolean().optional(),
-      removed: z.boolean().optional(),
-      errors: z.array(z.unknown()).optional(),
-      warnings: z.array(z.unknown()).optional(),
-      patch: z.unknown().optional(),
-      path: z.string().optional(),
-      config: z.unknown().optional(),
-      // P0-S2：写结果元数据（字段级/整角色、是否幂等、首个错误码）。
-      scope: z.enum(['field', 'role']).optional(),
-      idempotent: z.boolean().optional(),
-      code: z.string().nullable().optional(),
-    })
 
   return {
     package: TYPERT_PACKAGE,

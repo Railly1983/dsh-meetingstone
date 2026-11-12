@@ -100,12 +100,8 @@ window.__ModuleLoader__.load({
      * `SESSION_REMOTE_TYPES` 逐字一致（tests/gui.test.mjs 做双向断言）。
      */
     const SESSION_TYPES = {
-      sessionId: 'dsh-meetingstone/types#SessionId',
       roleId: 'dsh-meetingstone/types#RoleId',
-      field: 'dsh-meetingstone/types#OverrideField',
       value: 'dsh-meetingstone/types#JsonValue',
-      sessionConfigView: 'dsh-meetingstone/types#SessionConfigView',
-      overrideResult: 'dsh-meetingstone/types#SessionOverrideResult',
       cliName: 'dsh-meetingstone/types#CliName',
       booleanValue: 'dsh-meetingstone/types#BooleanValue',
       jsonResult: 'dsh-meetingstone/types#JsonResult',
@@ -115,12 +111,8 @@ window.__ModuleLoader__.load({
     const strictCodec = (typeSymbol, build) =>
       z ? { mode: 'strict', typeSymbol, create: build } : null
 
-    const sessionIdCodec = () =>
-      strictCodec(SESSION_TYPES.sessionId, () => z.string().min(1).max(128))
     const roleIdCodec = () =>
       strictCodec(SESSION_TYPES.roleId, () => z.string().min(1).max(128))
-    const fieldCodec = () =>
-      strictCodec(SESSION_TYPES.field, () => z.string().min(1).max(128))
     const jsonValueCodec = () => strictCodec(SESSION_TYPES.value, () => z.unknown())
     const cliNameCodec = () =>
       strictCodec(SESSION_TYPES.cliName, () => z.enum(['codex', 'codebuddy', 'claude']))
