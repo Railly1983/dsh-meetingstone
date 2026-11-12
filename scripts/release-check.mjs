@@ -190,6 +190,7 @@ function main() {
     { name: '门禁 · 测试', script: 'scripts/run-tests.mjs' },
     { name: '门禁 · 客户端注入冒烟', script: 'scripts/smoke-client-inject.mjs' },
     { name: '门禁 · D1 渲染核对', script: 'scripts/verify-d1-render.mjs' },
+    { name: '门禁 · D1 交互核对', script: 'scripts/verify-d1-interaction.mjs' },
     { name: '门禁 · 工具 schema', script: 'scripts/verify-host-schema.mjs' },
     { name: '门禁 · manifest', script: 'scripts/verify-manifest.mjs' },
     { name: '门禁 · 发布包', script: 'scripts/verify-package.mjs' },
