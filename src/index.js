@@ -425,6 +425,8 @@ export function apply(ctx, config = {}) {
       loadPersistedRun,
       listPersistedRuns,
       recordPathFor,
+      // 供 meetingstone_stats 回报上限（诊断槽位泄漏时要看到真实上限）
+      limits: cfg.limits,
       ...(typeof hostDefineTool === 'function' ? { defineTool: hostDefineTool } : {}),
     })
     registered = true

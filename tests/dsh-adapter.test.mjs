@@ -365,13 +365,13 @@ function makeDeps(over = {}) {
   return { deps, dispatchCalls }
 }
 
-test('registerTools：恰好注册九个工具，名字正确、描述非空', () => {
+test('registerTools：恰好注册十个工具，名字正确、描述非空', () => {
   const { ctx, registered } = fakeCtx()
   const { deps } = makeDeps()
   const tools = registerTools(ctx, deps)
 
-  assert.equal(registered.length, 9, '当前注册九个工具')
-  assert.equal(tools.length, 9)
+  assert.equal(registered.length, 10, '当前注册十个工具')
+  assert.equal(tools.length, 10)
   assert.deepEqual(
     registered.map((t) => t.name),
     [
@@ -384,6 +384,7 @@ test('registerTools：恰好注册九个工具，名字正确、描述非空', (
       TOOL_NAMES.CANCEL_TASK,
       TOOL_NAMES.CLI_STATUS,
       TOOL_NAMES.STEER_TASK,
+      TOOL_NAMES.STATS,
     ],
   )
   for (const tool of registered) {
@@ -421,6 +422,7 @@ test('registerTools：defineTool 可注入（生产注入真实实现，测试�
     TOOL_NAMES.CANCEL_TASK,
     TOOL_NAMES.CLI_STATUS,
     TOOL_NAMES.STEER_TASK,
+    TOOL_NAMES.STATS,
   ])
   assert.ok(registered.every((t) => t.wrapped === true))
 })
@@ -896,4 +898,61 @@ test('P0 计费事故回归：startActivation 的 request 必须带显式模型�
     { provider: 'workbuddy', model: 'deepseek-v4.1-flash' },
     '子会话模型必须显式传给宿主，不能依赖父会话继承',
   )
+})
+
+test('meetingstone_stats：回报真实槽位占用与上限（诊断泄漏用）', async () => {
+  const { ctx, registered } = fakeCtx()
+  const { deps } = makeDeps()
+  registerTools(ctx, {
+    ...deps,
+    limits: { maxParallelWritesTotal: 8, maxParallelWritesPerSession: 4 },
+    dispatcher: {
+      ...deps.dispatcher,
+      stats: () => ({ active: 0, writes: 0, serializeWrites: true }),
+    },
+  })
+  const stats = registered.find((t) => t.name === TOOL_NAMES.STATS)
+  assert.ok(stats, '必须注册 meetingstone_stats')
+  const out = await stats.execute({}, {})
+  assert.equal(typeof out.active, 'number', '要报出真实占用数')
+  assert.equal(out.limits.maxParallelWritesTotal, 8)
+  assert.equal(out.limits.maxParallelWritesPerSession, 4)
+  assert.equal(typeof out.hint, 'string')
+  assert.ok(out.hint.length > 0, '要给可读提示')
+})
+
+test('meetingstone_stats：派单器没有 stats 时如实报错，不编造', async () => {
+  const { ctx, registered } = fakeCtx()
+  const { deps } = makeDeps()
+  // 把 dispatcher 换成一个没有 stats 的假对象
+  registerTools(ctx, {
+    ...deps,
+    registry: deps.registry,
+    dispatcher: { dispatch: async () => ({ ok: true }), cancel: async () => ({}) },
+  })
+  const stats = registered.find((t) => t.name === TOOL_NAMES.STATS)
+  const out = await stats.execute({}, {})
+  assert.equal(out.error, 'STATS_UNAVAILABLE')
+})
+
+test('meetingstone_stats：有占用时提示可能是泄漏', async () => {
+  const { ctx, registered } = fakeCtx()
+  const { deps } = makeDeps()
+  let occupancy = 2
+  registerTools(ctx, {
+    ...deps,
+    dispatcher: {
+      dispatch: async () => ({ ok: true }),
+      cancel: async () => ({}),
+      stats: () => ({ active: occupancy, writes: occupancy, serializeWrites: true }),
+    },
+  })
+  const stats = registered.find((t) => t.name === TOOL_NAMES.STATS)
+  const busy = await stats.execute({}, {})
+  assert.equal(busy.active, 2)
+  assert.match(busy.hint, /泄漏|占用/)
+  occupancy = 0
+  const idle = await stats.execute({}, {})
+  assert.equal(idle.active, 0)
+  assert.match(idle.hint, /可以派单/)
 })

@@ -96,6 +96,7 @@ export const TOOL_NAMES = Object.freeze({
   GET_RUN_ARTIFACT: 'meetingstone_get_run_artifact',
   CLI_STATUS: 'meetingstone_cli_status',
   STEER_TASK: 'meetingstone_steer_task',
+  STATS: 'meetingstone_stats',
 })
 
 /** meetingstone_cli_status 接受的 CLI 白名单（与 src/cli/probe.js 的 CLI_SPECS 对齐）。 */
@@ -1307,6 +1308,43 @@ export function registerTools(ctx, deps) {
           note:
             `该通道（${record.provider ?? '未知'}）不支持续接会话，已改为「停掉原任务 + 带上已有产出重开」。` +
             '这不是真插话：新任务会重新读一遍上下文，模型没有原任务的内部状态。',
+        }
+      },
+    },
+    {
+      name: TOOL_NAMES.STATS,
+      description:
+        '查看本插件的并发槽位占用情况（诊断用）。' +
+        '返回全局已占用槽位数、上限、以及当前项目内的占用数。' +
+        '派单报 WRITE_LIMIT_TOTAL / WRITE_LIMIT_SESSION 时用它确认真实占用 —— ' +
+        '如果占用数与实际在跑的任务数不符，说明有槽位泄漏（多见于 DSH 重启后）。',
+      parameters: {
+        projectKey: {
+          type: 'string',
+          description: '项目根路径（可选）。给了就只报该项目内的占用，不给报全局。',
+        },
+      },
+      output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
+      async execute(args) {
+        if (typeof dispatcher?.stats !== 'function') {
+          return { error: 'STATS_UNAVAILABLE', message: '派单器没有提供 stats，无法诊断槽位' }
+        }
+        const stats = dispatcher.stats(args?.projectKey)
+        const configLimits = {
+          maxParallelWritesTotal: Math.max(1, Number(deps?.limits?.maxParallelWritesTotal) || 8),
+          maxParallelWritesPerSession: Math.max(
+            1,
+            Number(deps?.limits?.maxParallelWritesPerSession) || 4,
+          ),
+          serializeWrites: stats.serializeWrites,
+        }
+        return {
+          ...stats,
+          limits: configLimits,
+          hint:
+            stats.active > 0
+              ? '有槽位被占用。若实际没有任务在跑，可能是 DSH 重启导致的泄漏 —— 重启本插件或等宿主清理。'
+              : '当前没有占用，可以派单。',
         }
       },
     },

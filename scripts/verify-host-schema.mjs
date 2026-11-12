@@ -127,7 +127,7 @@ const ctx = {
 }
 apply(ctx, {})
 
-assert.equal(tools.length, 9, '工具数量变了，门禁需要同步复核（当前应为 9）')
+assert.equal(tools.length, 10, '工具数量变了，门禁需要同步复核（当前应为 10）')
 for (const tool of tools) {
   checkParameters(tool.name, tool.parameters)
   checkOutputSchema(tool.name, tool.output?.schema)
