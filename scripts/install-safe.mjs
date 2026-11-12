@@ -15,7 +15,7 @@
  *             3 install/watcher failed.
  */
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 
@@ -97,6 +97,16 @@ if (result.status !== 0) {
   console.error('install-safe: install failed')
   console.error((result.stderr || result.stdout).split('\n').slice(-8).join('\n'))
   process.exit(3)
+}
+// 同步 profile 依赖串，避免 pnpm 把旧 tgz 装回
+try {
+  const profilePkgPath = join(HOME, 'profiles', 'desktop', 'package.json')
+  const profilePkg = JSON.parse(fs.readFileSync(profilePkgPath, 'utf8'))
+  profilePkg.dependencies = profilePkg.dependencies || {}
+  profilePkg.dependencies['dsh-meetingstone'] = 'file:' + tgz.replace(/\\/g, '/')
+  fs.writeFileSync(profilePkgPath, JSON.stringify(profilePkg, null, 2) + '\n', 'utf8')
+} catch (error) {
+  console.warn('install-safe: profile dependency sync warning:', error.message)
 }
 console.log('installed.')
 
