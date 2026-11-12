@@ -366,10 +366,21 @@ export function buildRunBase({ input, role, provider, childId, startedAt, agentO
       input?.taskSpec?.artifactPolicy === 'none' || input?.taskSpec?.artifactPolicy === 'runs'
         ? input.taskSpec.artifactPolicy
         : 'runs',
-    // C3/D5：上游 childId（仅当带 continuation 且可解析时写）
-    ...(input?.continuation && typeof input.continuation.upstreamChildId === 'string' && input.continuation.upstreamChildId
-      ? { upstreamChildId: input.continuation.upstreamChildId }
-      : {}),
+    // C3/D5：上游 childId。
+    // 两个来源（2026-11-12 第六轮真机测试暴露第二个）：
+    // 1. `input.continuation.upstreamChildId` —— 上下文重放路径（历史）
+    // 2. `input.upstreamChildId` —— steer 重开路径（工具层直接传顶层）
+    // 之前只认 1，导致 steer 建出来的新任务 `upstreamChildId` 恒为 null，
+    // 无法追溯「这次重开是接哪个原任务」。
+    ...(() => {
+      const fromContinuation =
+        input?.continuation && typeof input.continuation.upstreamChildId === 'string'
+          ? input.continuation.upstreamChildId
+          : ''
+      const fromInput = typeof input?.upstreamChildId === 'string' ? input.upstreamChildId : ''
+      const upstream = (fromContinuation || fromInput).trim()
+      return upstream ? { upstreamChildId: upstream.slice(0, 200) } : {}
+    })(),
     worktree:
       input?.worktree && typeof input.worktree === 'object' ? input.worktree : null,
     isolation: input?.isolation === 'none' || input?.isolation === 'worktree' ? input.isolation : null,

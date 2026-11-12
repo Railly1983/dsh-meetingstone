@@ -190,3 +190,45 @@ test('没有 projectRoot 时两个字段都是 null（不编造）', () => {
   assert.equal(r.projectRoot, null)
   assert.equal(r.projectKey, null)
 })
+
+// ── upstreamChildId（2026-11-12 第六轮真机测试暴露）─────────────────
+// 之前只从 continuation.upstreamChildId 取，不认 input 顶层的。
+// steer 重开走的是顶层，于是新任务的 upstreamChildId 恒为 null，无法追溯。
+
+test('upstreamChildId：从 input 顶层取（steer 重开路径）', () => {
+  const r = buildRunBase({
+    input: { upstreamChildId: 'prev-child' },
+    role: null,
+    provider: 'acp',
+    childId: 'new-child',
+    startedAt: START,
+  })
+  assert.equal(r.upstreamChildId, 'prev-child')
+})
+
+test('upstreamChildId：continuation 路径仍兼容（历史行为不变）', () => {
+  const r = buildRunBase({
+    input: { continuation: { upstreamChildId: 'cont-child' } },
+    role: null,
+    provider: 'acp',
+    childId: 'new-child',
+    startedAt: START,
+  })
+  assert.equal(r.upstreamChildId, 'cont-child')
+})
+
+test('upstreamChildId：两者都有时 continuation 优先（历史语义）', () => {
+  const r = buildRunBase({
+    input: { continuation: { upstreamChildId: 'cont' }, upstreamChildId: 'top' },
+    role: null,
+    provider: 'acp',
+    childId: 'c',
+    startedAt: START,
+  })
+  assert.equal(r.upstreamChildId, 'cont')
+})
+
+test('upstreamChildId：都没有时不写这个键（不塞 null）', () => {
+  const r = buildRunBase({ input: {}, role: null, provider: 'acp', childId: 'c', startedAt: START })
+  assert.equal('upstreamChildId' in r, false)
+})

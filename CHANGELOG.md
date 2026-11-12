@@ -2,6 +2,38 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.19] - 2026-11-12
+
+### Fixed
+
+- **`upstreamChildId` 在 steer 重开路径上丢失**（alpha.18 第六轮真机测试暴露）。
+  `buildRunBase` 只从 `input.continuation.upstreamChildId` 取，不认 `input.upstreamChildId`。
+  而 steer 重开走的是顶层 → 新任务的 `upstreamChildId` 恒为 null，
+  无法追溯「这次重开接的是哪个原任务」。现在两个来源都认，continuation 优先（历史语义）。
+
+### steer 外部 CLI 路径：六轮真机测试后完全打通
+
+第六轮实测结果（childId 8528259f → 8121f3d2）：
+```json
+{ "ok": true, "mode": "restart-with-output",
+  "childId": "8121f3d2-...", "previousChildId": "8528259f-...",
+  "stopConfirmed": true }
+```
+新任务真的收到并采纳了插话指示（它回复「已收到中途插话指示并立即停止」）。
+
+累计修掉 7 个缺陷，全部由真机测试暴露（单元测试全绿时它们都存在）：
+1. 记录字段读不全（内存视图 vs 磁盘）
+2. 重开缺 context.agent / projectKey / sessionId / isolation
+3. stopConfirmed 取值用错键（`.ok` vs `stopConfirmed`）
+4. 原任务没停也照样重开（已加门禁，避免双写同一工作区）
+5. 停止判定证据顺序（内存同步写 vs 磁盘异步写）
+6. run 记录缺 projectRoot / projectKey（白名单没收 + 取值路径错）
+7. upstreamChildId 在重开路径上丢失
+
+### 测试
+
+- 633 → 637 tests
+
 ## [0.1.0-alpha.18] - 2026-11-12
 
 ### Fixed
