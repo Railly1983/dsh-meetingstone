@@ -2,6 +2,35 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.22] - 2026-11-12
+
+### Added
+
+- **`scripts/verify-d1-render.mjs`：D1 验收自动化**。
+  把 46 步里能程序判定的部分抽出来（15 项），从**真实 profile** 解析
+  channels/roles 推导能力目录，再对 client 源码做结构性核对。
+  **15 PASS / 0 FAIL**，已纳入发布门禁（门禁数 8 → 9）。
+
+  覆盖：设置页两区、区标题、用户可见文案（无右侧栏/本对话角色/额度耗尽）、
+  两色语义、能力目录 4 CLI、模型与思考强度有值、角色颜色只有绿/灰。
+
+  关键设计：**只查字典值不查注释** —— 第一版误把注释里的「右侧栏」也算进去
+  （9 处），但那些是历史说明或「已下线」的警告，应该保留。
+
+- 补 `interrupted` 投影测试：重启后旧进程的 running 记录必须投影为 interrupted，
+  否则僵尸任务永远显示「还在跑」。
+
+### Fixed
+
+- `client/index.js:1395` 注释仍说「会话覆盖在右侧栏调整」，但那个面板 B3 已删。
+- 4 个已解决的 TODO 改为「已解决」并附证据（P2-inject / P2-defineTool /
+  P2-parent / P2-runtime）。
+
+### Docs
+
+- D1 用户清单更新到 alpha.21 口径：U8 三色→两色、顶部列出已自动验证的 15 项、
+  版本号与 GUI 地址更新
+
 ## [0.1.0-alpha.21] - 2026-11-12
 
 质量收敛收尾版。汇总 Codex 交叉评审整改的全部成果。
