@@ -87,7 +87,7 @@ window.__ModuleLoader__.load({
      * 与 package.json / src/index.js 的 PLUGIN_VERSION 保持一致，供统一注册日志
      * 使用。升级版本时三处同步。
      */
-    const PLUGIN_VERSION = '0.1.0-alpha.22'
+    const PLUGIN_VERSION = '0.1.0-alpha.23'
 
     // Remote namespace / method 必须与 Host src/gui/host.js 的 GUI_REMOTE_SERVICE 对齐。
     const REMOTE_PACKAGE = 'dsh-meetingstone'

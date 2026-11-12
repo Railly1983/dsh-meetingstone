@@ -2,6 +2,21 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.23] - 2026-11-12
+
+### Changed
+
+- **D1 渲染核对从 15 项扩展到 24 项**：补上 U2–U6、U10 的操作入口验证 ——
+  「保存修改」「新增角色」「删除角色」「刷新能力」「返回」都存在且绑了真实回调；
+  删除有 `confirmDelete` + `deleteConfirming` 二次确认；
+  U2 断言代码里**没有** `sidebarRight.openTab`（确实内联展开）。
+
+  这让 D1 的人工部分从「46 步逐项核对」压缩到「9 项确认交互可用」。
+
+### Docs
+
+- D1 用户清单重写顶部说明：明确列出 24 项已自动验证 vs 只剩 9 项要人看
+
 ## [0.1.0-alpha.22] - 2026-11-12
 
 ### Added
