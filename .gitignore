@@ -39,3 +39,6 @@ coverage/
 
 # D1 verification temp artifacts (2026-11-12, not tracked)
 .d1-verify*
+
+# worktree/overlap acceptance test artifacts (never commit)
+docs/plan/wt-*.txt
