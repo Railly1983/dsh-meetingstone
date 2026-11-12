@@ -656,3 +656,60 @@ test('B3：设置页角色区有「返回」按钮（回到集合石主区，不
   back[0].props.onClick()
   assert.equal(closed, 1, '点击返回调用 onBackToSettings')
 })
+
+// ─── D1 验收缺陷 2：文案还在教用户去已删的右侧栏 ──────────────────────────────
+// B3 删了右侧栏「本对话角色」面板，但文案没清：用户在列表/编辑/新建三态都会看到
+// 「请在右侧栏『本对话角色』调整」，照做找不到东西。
+// 修复前 `globalRolesNote` 含该指引，以下断言必然失败。
+
+test('D1-2：全局角色管理文案不得再指向已删除的右侧栏/本对话角色', async () => {
+  const { __test } = await loadClient()
+  const zh = __test.MESSAGES?.zh
+  assert.ok(zh, '导出 zh 字典')
+  const forbidden = ['右侧栏', '本对话角色']
+  for (const [key, value] of Object.entries(zh)) {
+    const text = String(value)
+    for (const word of forbidden) {
+      assert.ok(
+        !text.includes(word),
+        `文案 ${key} 仍含「${word}」：${text}`,
+      )
+    }
+  }
+})
+
+test('D1-2：英文文案同样不得指向 sidebar / session roles', async () => {
+  const { __test } = await loadClient()
+  const en = __test.MESSAGES?.en
+  assert.ok(en, '导出 en 字典')
+  const forbidden = ['right-sidebar', 'right sidebar', 'conversation roles']
+  for (const [key, value] of Object.entries(en)) {
+    const text = String(value).toLowerCase()
+    for (const word of forbidden) {
+      assert.ok(!text.includes(word), `文案 ${key} 仍含「${word}」：${text}`)
+    }
+  }
+})
+
+test('D1-2：设置页内联管理器不渲染「全局层不支持恢复继承」提示（服从 showScope）', async () => {
+  const { __test } = await loadClient()
+  const t = (key) => key
+  const snapshot = __test.normalizeSnapshot({
+    roles: [{ roleId: 'role-sashi', name: '沙僧', aliases: ['SS'], enabled: true, channelId: 'ch-acp', kind: 'acp-cli', provider: 'acp', model: 'm1', reasoning: 'low', sourceLayer: 'global' }],
+    channels: [{ channelId: 'ch-acp', kind: 'acp-cli' }],
+    lastError: null,
+    global: { channels: [{ channelId: 'ch-acp', kind: 'acp-cli', provider: 'acp', model: 'm1', reasoning: 'low' }] },
+  })
+  const detail = __test.renderGlobalRoleManager(t, snapshot, {
+    selectedRoleId: 'role-sashi',
+    draft: __test.draftOfRole(snapshot.roles[0]),
+    onDraft: () => {},
+    onSave: () => {},
+  })
+  const strings = collectStrings(detail)
+  // 准确的二次确认提示保留（既有契约）
+  assert.ok(strings.includes('scopeGlobalNote'), '全局二次确认提示保留')
+  // 过时的「不支持恢复继承」在有 showScope:false 的内联管理器里必须消失
+  assert.ok(!strings.includes('scopeGlobalBlocked'), '无 scope 切换时不得出现恢复继承提示')
+})
+

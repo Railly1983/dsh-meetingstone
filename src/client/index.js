@@ -947,7 +947,7 @@ window.__ModuleLoader__.load({
       manageRoles: '管理角色',
       globalRolesTitle: '全局角色管理',
       globalRolesNote:
-        '此面板直接编辑**全局**角色（写入 profile），保存后对所有会话生效；本会话的临时覆盖请在右侧栏「本对话角色」调整。',
+        '此面板直接编辑**全局**角色（写入 profile），保存后对所有会话生效；B3 起不再有会话级临时覆盖。',
       globalRolesEmpty: '全局配置里还没有角色',
       globalRoleBadge: '全局',
       managerClose: '收起',
@@ -991,26 +991,14 @@ window.__ModuleLoader__.load({
       hostName: 'DeepSeek Harness',
       hostRunning: '运行中',
       // 顶部集合石入口 + 右侧栏只读角色面板
-      headerTitle: '角色',
-      headerDesc: '查看当前会话角色（只读）',
-      tabTitle: '集合石角色',
-      paneTitle: '当前会话角色',
-      paneReadonlyNote:
-        '开关只写当前会话；灰=关闭或依赖阻断，黄=额度耗尽，绿=正常/未知。',
-      openPanel: '打开集合石角色面板',
-      noRoles: '当前没有可用角色',
       aliasLabel: '别名',
       channelLabel: 'CLI',
       roleIdLabel: '角色 ID',
       sourceLabel: '来源',
       sourceGlobal: '全局',
       sourceProject: '项目',
-      sourceSession: '会话',
       sourceDefault: '默认',
       sourceUnknown: '未知',
-      overrideYes: '有覆盖',
-      overrideNo: '无覆盖',
-      overrideFieldsLabel: '覆盖字段',
       renderFailed: '面板渲染失败，详情见宿主日志',
       remoteUnavailableHint: '远程不可用',
       // U2：设置页两区 + 角色三色二态 + 二级详情
@@ -1028,8 +1016,6 @@ window.__ModuleLoader__.load({
       manualSteps: '人工步骤',
       noCliStates: '未获取到 CLI 状态（不影响角色配置）',
       // 角色列表
-      roleListTitle: '本对话角色',
-      roleListNote: '开关只写当前会话；灰=关闭或依赖阻断，黄=额度耗尽，绿=正常/未知。',
       roleOpenDetail: '查看角色详情',
       roleEnabled: '已启用',
       roleDisabled: '已关闭',
@@ -1045,16 +1031,13 @@ window.__ModuleLoader__.load({
       scopeSession: '本会话',
       scopeGlobal: '全局',
       scopeGlobalNote: '全局修改会写入 profile，影响所有会话；保存前需二次确认。',
-      scopeGlobalBlocked: '全局层不支持恢复继承（会被项目/会话覆盖）',
+      scopeGlobalBlocked: '全局层不支持恢复继承（全局层没有可回退的上层）',
       fieldName: '名称',
       fieldAliases: '简称',
-      fieldDescription: '描述',
       fieldSetting: '角色设定',
       fieldCli: 'CLI',
-      fieldChannel: 'CLI',
       fieldModel: '模型',
       fieldReasoning: '思考强度',
-      fieldPrompt: '角色 Prompt',
       fieldUnset: '未设置',
       channelUnset: '未指定组合（继承）',
       unsupported: '不支持',
@@ -1123,7 +1106,7 @@ window.__ModuleLoader__.load({
       manageRoles: 'Manage roles',
       globalRolesTitle: 'Global roles',
       globalRolesNote:
-        'This panel edits **global** roles (written to the profile) and affects every session; use the right-sidebar conversation roles for per-session overrides.',
+        'This panel edits **global** roles (written to the profile) and affects every session; per-session overrides were removed in B3.',
       globalRolesEmpty: 'No roles in the global configuration yet',
       globalRoleBadge: 'Global',
       managerClose: 'Collapse',
@@ -1168,26 +1151,14 @@ window.__ModuleLoader__.load({
       hostName: 'DeepSeek Harness',
       hostRunning: 'Running',
       // 顶部集合石入口 + 右侧栏只读角色面板
-      headerTitle: 'Roles',
-      headerDesc: 'View session roles (read-only)',
-      tabTitle: 'MeetingStone Roles',
-      paneTitle: 'Session roles',
-      paneReadonlyNote:
-        'The switch only writes the current session; gray=off or blocked, yellow=quota exhausted, green=ready/unknown.',
-      openPanel: 'Open MeetingStone role panel',
-      noRoles: 'No roles available',
       aliasLabel: 'Aliases',
       channelLabel: 'CLI',
       roleIdLabel: 'Role ID',
       sourceLabel: 'Source',
       sourceGlobal: 'Global',
       sourceProject: 'Project',
-      sourceSession: 'Session',
       sourceDefault: 'Default',
       sourceUnknown: 'Unknown',
-      overrideYes: 'Overridden',
-      overrideNo: 'No override',
-      overrideFieldsLabel: 'Override fields',
       renderFailed: 'Failed to render this panel; see host logs',
       remoteUnavailableHint: 'Remote unavailable',
       // U2: settings sections + tri-color role switches + detail view
@@ -1204,8 +1175,6 @@ window.__ModuleLoader__.load({
       cliDetecting: 'Checking…',
       manualSteps: 'Manual steps',
       noCliStates: 'CLI states unavailable (role configuration is unaffected)',
-      roleListTitle: 'Session roles',
-      roleListNote: 'The switch only writes the current session; gray=off or blocked, yellow=quota exhausted, green=ready/unknown.',
       roleOpenDetail: 'Open role detail',
       roleEnabled: 'Enabled',
       roleDisabled: 'Off',
@@ -1220,16 +1189,13 @@ window.__ModuleLoader__.load({
       scopeSession: 'This session',
       scopeGlobal: 'Global',
       scopeGlobalNote: 'Global changes are written to the profile and affect every session; a second confirmation is required.',
-      scopeGlobalBlocked: 'Restore inheritance is not available at the global layer',
+      scopeGlobalBlocked: 'Restore inheritance is not available at the global layer (it has no parent layer)',
       fieldName: 'Name',
       fieldAliases: 'Aliases',
-      fieldDescription: 'Description',
       fieldSetting: 'Role setting',
       fieldCli: 'CLI',
-      fieldChannel: 'CLI',
       fieldModel: 'Model',
       fieldReasoning: 'Reasoning',
-      fieldPrompt: 'Role prompt',
       fieldUnset: 'Not set',
       channelUnset: 'No combo (inherit)',
       unsupported: 'Unsupported',
@@ -3010,6 +2976,13 @@ window.__ModuleLoader__.load({
                 ],
               })
             : null,
+          // B3/D1 缺陷 2：这两条提示语义不同，不能一起处理。
+          // - `scopeGlobalNote`（全局改动需二次确认）与 scope 是否存在无关，始终准确，
+          //   保留原有渲染条件（既有测试契约也依赖它）。
+          // - `scopeGlobalBlocked`（不能恢复继承）只在**有 scope 切换**时才成立：
+          //   设置页内联管理器固定 scope='global' 且 showScope:false，那里既没有
+          //   会话层也没有「恢复继承」入口，旧条件只判 scope==='global' 会让它常驻，
+          //   是 B3 没清干净的过时提示。
           scope === 'global'
             ? jsxs('div', {
                 style: { display: 'flex', flexDirection: 'column', gap: 2 },
@@ -3018,7 +2991,7 @@ window.__ModuleLoader__.load({
                     style: { ...noteStyle, color: 'var(--dsw-alias-state-warn-primary)' },
                     children: t('scopeGlobalNote'),
                   }),
-                  jsx('p', { style: meta, children: t('scopeGlobalBlocked') }),
+                  showScope ? jsx('p', { style: meta, children: t('scopeGlobalBlocked') }) : null,
                 ],
               })
             : null,
@@ -3236,6 +3209,8 @@ window.__ModuleLoader__.load({
       makeConfigActions,
       REMOTE_CONTRIBUTION,
       SESSION_TYPES,
+      // D1 缺陷 2 护栏：文案断言需要真实字典（而非 t(key) 恒等替身）。
+      MESSAGES: { zh, en },
       REMOTE_INJECT,
       PLUGIN_VERSION,
       makeLoader,
