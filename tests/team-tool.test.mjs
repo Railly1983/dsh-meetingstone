@@ -13,20 +13,22 @@ import assert from 'node:assert/strict'
 
 import { registerTeamRoleTool } from '../src/dsh/team-tool.js'
 
-/** 造一个可观测的假 ctx。 */
+/** 造一个可观测的假 ctx + deps。 */
 function makeCtx({ withTeams = true, agentFor = () => undefined } = {}) {
   /** @type {any[]} */
   const registered = []
   const ctx = {
     tools: { register: (def) => registered.push(def) },
-    agents: { get: (id) => agentFor(id) },
   }
+  const agents = { get: (id) => agentFor(id) }
+  /** @type {any} */
+  const deps = { agents }
   if (withTeams) {
-    ctx.agentTeams = {
+    deps.agentTeams = {
       spawnTeammate: async (_parent, req) => ({ member: { id: `child-${req.name}`, name: req.name } }),
     }
   }
-  return { ctx, registered }
+  return { ctx, deps, registered }
 }
 
 const IN_PROCESS_ROLE = {
@@ -51,8 +53,8 @@ function toolOf(registered) {
 }
 
 test('宿主没有 Agent Teams 时静默跳过（返回 null，不抛错）', () => {
-  const { ctx, registered } = makeCtx({ withTeams: false })
-  const result = registerTeamRoleTool(ctx, { registry: registry([]) })
+  const { ctx, deps, registered } = makeCtx({ withTeams: false })
+  const result = registerTeamRoleTool(ctx, { ...deps, registry: registry([]) })
   assert.equal(result, null)
   assert.equal(registered.length, 0, '不应注册任何工具')
 })
@@ -72,8 +74,8 @@ test('正常路径：建成员并把路由切到角色的 llmProvider/llmModel',
   /** @type {any[]} */
   const selections = []
   const agent = { model: { select: (s) => selections.push(s) } }
-  const { ctx, registered } = makeCtx({ agentFor: () => agent })
-  registerTeamRoleTool(ctx, { registry: registry([IN_PROCESS_ROLE]) })
+  const { ctx, deps, registered } = makeCtx({ agentFor: () => agent })
+  registerTeamRoleTool(ctx, { ...deps, registry: registry([IN_PROCESS_ROLE]) })
   const tool = toolOf(registered)
 
   const out = await tool.execute(
@@ -97,8 +99,8 @@ test('正常路径：建成员并把路由切到角色的 llmProvider/llmModel',
 test('role 可用拼音 / 别名 / roleId 命中', async () => {
   for (const input of ['shaseng', 'sha', 'role-shaseng', '沙僧']) {
     const agent = { model: { select: () => {} } }
-    const { ctx, registered } = makeCtx({ agentFor: () => agent })
-    registerTeamRoleTool(ctx, { registry: registry([IN_PROCESS_ROLE]) })
+    const { ctx, deps, registered } = makeCtx({ agentFor: () => agent })
+    registerTeamRoleTool(ctx, { ...deps, registry: registry([IN_PROCESS_ROLE]) })
     const out = await toolOf(registered).execute(
       { role: input, description: 'd', prompt: 'p' },
       { agent: { id: 'lead' } },
@@ -111,12 +113,12 @@ test('role 可用拼音 / 别名 / roleId 命中', async () => {
 test('找不到角色时不建成员', async () => {
   /** @type {any[]} */
   const spawns = []
-  const { ctx, registered } = makeCtx()
-  ctx.agentTeams.spawnTeammate = async (_p, req) => {
+  const { ctx, deps, registered } = makeCtx()
+  deps.agentTeams.spawnTeammate = async (_p, req) => {
     spawns.push(req)
     return { member: { id: 'x', name: req.name } }
   }
-  registerTeamRoleTool(ctx, { registry: registry([IN_PROCESS_ROLE]) })
+  registerTeamRoleTool(ctx, { ...deps, registry: registry([IN_PROCESS_ROLE]) })
   const out = await toolOf(registered).execute(
     { role: '牛魔王', description: 'd', prompt: 'p' },
     { agent: { id: 'lead' } },
@@ -135,12 +137,12 @@ test('角色绑定外部 CLI 通道时拒绝且不建成员', async () => {
   }
   /** @type {any[]} */
   const spawns = []
-  const { ctx, registered } = makeCtx()
-  ctx.agentTeams.spawnTeammate = async (_p, req) => {
+  const { ctx, deps, registered } = makeCtx()
+  deps.agentTeams.spawnTeammate = async (_p, req) => {
     spawns.push(req)
     return { member: { id: 'x', name: req.name } }
   }
-  registerTeamRoleTool(ctx, { registry: registry([acpRole]) })
+  registerTeamRoleTool(ctx, { ...deps, registry: registry([acpRole]) })
   const out = await toolOf(registered).execute(
     { role: '唐僧', description: 'd', prompt: 'p' },
     { agent: { id: 'lead' } },
@@ -152,8 +154,8 @@ test('角色绑定外部 CLI 通道时拒绝且不建成员', async () => {
 })
 
 test('缺少 role 参数时拒绝', async () => {
-  const { ctx, registered } = makeCtx()
-  registerTeamRoleTool(ctx, { registry: registry([IN_PROCESS_ROLE]) })
+  const { ctx, deps, registered } = makeCtx()
+  registerTeamRoleTool(ctx, { ...deps, registry: registry([IN_PROCESS_ROLE]) })
   const tool = toolOf(registered)
   for (const args of [{}, { role: '' }, { role: '   ' }, undefined]) {
     const out = await tool.execute(args, { agent: { id: 'lead' } })
@@ -163,8 +165,8 @@ test('缺少 role 参数时拒绝', async () => {
 })
 
 test('成员建成但拿不到 Agent 时，保留成员并如实报告未切换', async () => {
-  const { ctx, registered } = makeCtx({ agentFor: () => undefined })
-  registerTeamRoleTool(ctx, { registry: registry([IN_PROCESS_ROLE]) })
+  const { ctx, deps, registered } = makeCtx({ agentFor: () => undefined })
+  registerTeamRoleTool(ctx, { ...deps, registry: registry([IN_PROCESS_ROLE]) })
   const out = await toolOf(registered).execute(
     { role: '沙僧', description: 'd', prompt: 'p' },
     { agent: { id: 'lead' } },
@@ -183,8 +185,8 @@ test('成员建成但路由写入失败时，保留成员并给出原因', async
       },
     },
   }
-  const { ctx, registered } = makeCtx({ agentFor: () => agent })
-  registerTeamRoleTool(ctx, { registry: registry([IN_PROCESS_ROLE]) })
+  const { ctx, deps, registered } = makeCtx({ agentFor: () => agent })
+  registerTeamRoleTool(ctx, { ...deps, registry: registry([IN_PROCESS_ROLE]) })
   const out = await toolOf(registered).execute(
     { role: '沙僧', description: 'd', prompt: 'p' },
     { agent: { id: 'lead' } },
@@ -195,11 +197,11 @@ test('成员建成但路由写入失败时，保留成员并给出原因', async
 })
 
 test('spawnTeammate 抛错时转成失败结果，不往外抛', async () => {
-  const { ctx, registered } = makeCtx()
-  ctx.agentTeams.spawnTeammate = async () => {
+  const { ctx, deps, registered } = makeCtx()
+  deps.agentTeams.spawnTeammate = async () => {
     throw new Error('quota exceeded')
   }
-  registerTeamRoleTool(ctx, { registry: registry([IN_PROCESS_ROLE]) })
+  registerTeamRoleTool(ctx, { ...deps, registry: registry([IN_PROCESS_ROLE]) })
   const out = await toolOf(registered).execute(
     { role: '沙僧', description: 'd', prompt: 'p' },
     { agent: { id: 'lead' } },
@@ -212,12 +214,12 @@ test('spawnTeammate 抛错时转成失败结果，不往外抛', async () => {
 test('拿不到调用方 Agent 时拒绝，不建成员', async () => {
   /** @type {any[]} */
   const spawns = []
-  const { ctx, registered } = makeCtx()
-  ctx.agentTeams.spawnTeammate = async (_p, req) => {
+  const { ctx, deps, registered } = makeCtx()
+  deps.agentTeams.spawnTeammate = async (_p, req) => {
     spawns.push(req)
     return { member: { id: 'x', name: req.name } }
   }
-  registerTeamRoleTool(ctx, { registry: registry([IN_PROCESS_ROLE]) })
+  registerTeamRoleTool(ctx, { ...deps, registry: registry([IN_PROCESS_ROLE]) })
   const out = await toolOf(registered).execute({ role: '沙僧', description: 'd', prompt: 'p' }, {})
   assert.equal(out.ok, false)
   assert.match(out.error, /NO_AGENT/)
@@ -226,8 +228,8 @@ test('拿不到调用方 Agent 时拒绝，不建成员', async () => {
 
 test('显式 name 优先于角色推导', async () => {
   const agent = { model: { select: () => {} } }
-  const { ctx, registered } = makeCtx({ agentFor: () => agent })
-  registerTeamRoleTool(ctx, { registry: registry([IN_PROCESS_ROLE]) })
+  const { ctx, deps, registered } = makeCtx({ agentFor: () => agent })
+  registerTeamRoleTool(ctx, { ...deps, registry: registry([IN_PROCESS_ROLE]) })
   const out = await toolOf(registered).execute(
     { role: '沙僧', name: 'cleanup-bot', description: 'd', prompt: 'p' },
     { agent: { id: 'lead' } },
@@ -240,12 +242,12 @@ test('显式 name 优先于角色推导', async () => {
 test('非法 name（含 lead / 大写）被拒绝且不建成员', async () => {
   /** @type {any[]} */
   const spawns = []
-  const { ctx, registered } = makeCtx()
-  ctx.agentTeams.spawnTeammate = async (_p, req) => {
+  const { ctx, deps, registered } = makeCtx()
+  deps.agentTeams.spawnTeammate = async (_p, req) => {
     spawns.push(req)
     return { member: { id: 'x', name: req.name } }
   }
-  registerTeamRoleTool(ctx, { registry: registry([IN_PROCESS_ROLE]) })
+  registerTeamRoleTool(ctx, { ...deps, registry: registry([IN_PROCESS_ROLE]) })
   const tool = toolOf(registered)
   for (const bad of ['lead', 'Shaseng', 'sha_seng', '-bad']) {
     const out = await tool.execute({ role: '沙僧', name: bad, description: 'd', prompt: 'p' }, { agent: { id: 'lead' } })
@@ -259,12 +261,12 @@ test('provider 固定传 spawn（teammate 必须跑进程内）', async () => {
   /** @type {any[]} */
   const spawns = []
   const agent = { model: { select: () => {} } }
-  const { ctx, registered } = makeCtx({ agentFor: () => agent })
-  ctx.agentTeams.spawnTeammate = async (_p, req) => {
+  const { ctx, deps, registered } = makeCtx({ agentFor: () => agent })
+  deps.agentTeams.spawnTeammate = async (_p, req) => {
     spawns.push(req)
     return { member: { id: `child-${req.name}`, name: req.name } }
   }
-  registerTeamRoleTool(ctx, { registry: registry([IN_PROCESS_ROLE]) })
+  registerTeamRoleTool(ctx, { ...deps, registry: registry([IN_PROCESS_ROLE]) })
   await toolOf(registered).execute({ role: '沙僧', description: 'd', prompt: 'p' }, { agent: { id: 'lead' } })
   assert.equal(spawns.length, 1)
   assert.equal(spawns[0].provider, 'spawn')
@@ -276,12 +278,12 @@ test('显式 context=fork 透传', async () => {
   /** @type {any[]} */
   const spawns = []
   const agent = { model: { select: () => {} } }
-  const { ctx, registered } = makeCtx({ agentFor: () => agent })
-  ctx.agentTeams.spawnTeammate = async (_p, req) => {
+  const { ctx, deps, registered } = makeCtx({ agentFor: () => agent })
+  deps.agentTeams.spawnTeammate = async (_p, req) => {
     spawns.push(req)
     return { member: { id: `child-${req.name}`, name: req.name } }
   }
-  registerTeamRoleTool(ctx, { registry: registry([IN_PROCESS_ROLE]) })
+  registerTeamRoleTool(ctx, { ...deps, registry: registry([IN_PROCESS_ROLE]) })
   await toolOf(registered).execute(
     { role: '沙僧', context: 'fork', description: 'd', prompt: 'p' },
     { agent: { id: 'lead' } },
@@ -290,8 +292,8 @@ test('显式 context=fork 透传', async () => {
 })
 
 test('注册的工具描述与参数形状可被模型理解', () => {
-  const { ctx, registered } = makeCtx()
-  registerTeamRoleTool(ctx, { registry: registry([IN_PROCESS_ROLE]) })
+  const { ctx, deps, registered } = makeCtx()
+  registerTeamRoleTool(ctx, { ...deps, registry: registry([IN_PROCESS_ROLE]) })
   const tool = toolOf(registered)
   assert.equal(tool.name, 'spawn_teammate_as')
   assert.ok(tool.description.length > 50, '描述要有实质内容')
@@ -308,14 +310,39 @@ test('注册的工具描述与参数形状可被模型理解', () => {
 })
 
 test('注入 defineTool 时用它包装（走宿主 args 校验）', () => {
-  const { ctx, registered } = makeCtx()
+  const { ctx, deps, registered } = makeCtx()
   let wrapped = null
   const defineTool = (spec) => {
     wrapped = spec
     return { ...spec, __wrapped: true }
   }
-  registerTeamRoleTool(ctx, { registry: registry([IN_PROCESS_ROLE]), defineTool })
+  registerTeamRoleTool(ctx, { ...deps, registry: registry([IN_PROCESS_ROLE]), defineTool })
   assert.ok(wrapped, 'defineTool 应被调用')
   assert.equal(wrapped.name, 'spawn_teammate_as')
   assert.equal(registered[0].__wrapped, true, '注册的应是 defineTool 的返回值')
+})
+
+test('反证：必须用注入的 agentTeams，不得把 ctx.agentTeams 当主路径', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const { dirname, join } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const here = dirname(fileURLToPath(import.meta.url))
+  const source = await readFile(join(here, '..', 'src', 'dsh', 'team-tool.js'), 'utf8')
+  const code = source.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/(^|[^:])\/\/.*$/gmu, '$1')
+  // 只在 deps 缺失时允许一次兜底，不允许把它当主路径。
+  const hits = code.match(/ctx\.agentTeams/g) ?? []
+  assert.ok(hits.length <= 1, 'ctx.agentTeams 只允许作为一次兜底，实际出现 ' + hits.length + ' 次')
+  assert.match(code, /const teams = agentTeams/, '应以注入的 agentTeams 为主')
+})
+
+test('反证：注册目标必须是 agent.ctx，且只给 Lead 装', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const { dirname, join } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const here = dirname(fileURLToPath(import.meta.url))
+  const source = await readFile(join(here, '..', 'src', 'index.js'), 'utf8')
+  // 宿主 install() 用的是 agent.ctx；接线处也必须传 agent.ctx，否则模型看不到工具。
+  assert.match(source, /registerTeamRoleTool\(\s*agent\.ctx/, '必须把 agent.ctx 传给 registerTeamRoleTool')
+  assert.match(source, /tryMembership\(agent\)/, '必须用 tryMembership 判断 Lead')
+  assert.match(source, /role !== 'lead'/, '必须显式过滤非 Lead')
 })

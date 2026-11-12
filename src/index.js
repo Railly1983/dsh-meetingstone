@@ -75,7 +75,7 @@ export const name = 'meetingstone'
 /** 包名，与 package.json 的 name 一致（补丁按包名解析入口）。 */
 export const PACKAGE_NAME = 'dsh-meetingstone'
 
-export const PLUGIN_VERSION = '0.1.0-alpha.8'
+export const PLUGIN_VERSION = '0.1.0-alpha.9'
 
 /**
  * 插件入口。
@@ -84,6 +84,35 @@ export const PLUGIN_VERSION = '0.1.0-alpha.8'
  * @param {object} [config] 原始配置（宿主不再按导出的 schema 校验，见上方说明）
  */
 export function apply(ctx, config = {}) {
+  /**
+   * 惰性读取一个宿主服务，**不因注入守卫而抛异常**。
+   *
+   * 为什么需要它：本插件没有把 `agentTeams` / `agents` 写进 `inject`（那会让未启用
+   * Agent Teams 的 profile 启动失败），于是在 Cordis 的注入守卫下直接访问
+   * `ctx.agentTeams` 会抛 `cannot get property "agentTeams" without inject`。
+   * `ctx.get(name)` 是框架提供的「绕过注入守卫按名取服务」的公开入口，
+   * 但它在拿不到时同样会抛，所以这里统一 try/catch 成 `undefined`。
+   *
+   * 语义：拿不到 = 宿主没提供这个可选服务，调用方应静默降级，不是错误。
+   * @param {any} context cordis context
+   * @param {string} serviceName 服务名
+   * @returns {any} 服务实例或 undefined
+   */
+  function readService(context, serviceName) {
+    try {
+      const direct = context?.[serviceName]
+      if (direct && typeof direct === 'object') return direct
+    } catch {
+      // 注入守卫拒绝 → 走 ctx.get
+    }
+    try {
+      if (typeof context?.get === 'function') return context.get(serviceName) ?? undefined
+    } catch {
+      // 服务确实不存在
+    }
+    return undefined
+  }
+
   // 配置校验在这里做。**坏配置不能拖垮整个插件**：记一条告警、回落到默认值，
   // 让工具仍然可用（角色表为空时 list_roles 会如实返回空，而不是插件消失）。
   let cfg
@@ -431,44 +460,79 @@ export function apply(ctx, config = {}) {
     registered = true
 
     // Agent Teams 角色化（可选能力）：注册 `spawn_teammate_as`。
-    // 宿主没装 Agent Teams 时 registerTeamRoleTool 返回 null，静默跳过 ——
-    // 所以这里**不把 agentTeams 加进 inject**，否则未启用 Team 的 profile 会启动失败。
-    // 代价：ctx.get()/ctx.agentTeams 在未声明 inject 时会被 Cordis 的注入守卫拒绝
-    // （`cannot get property "get" without inject`），因此必须 try/catch 兜住，
-    // 拿不到就等于「宿主没启用 Team」，跳过即可，不能让它拖垮整个插件。
+    //
+    // **关键：必须注册在 `agent.ctx` 上，不是插件的 ctx 上。**
+    // 宿主 `@deepseek-ai/dsh-experimental-tool-agent-team` 的做法是：
+    //   const maybeInstall = (agent) => { ... install(agent, ctx, resolved) }
+    //   for (const agent of ctx.agents.list()) maybeInstall(agent)
+    //   ctx.on('agent/created', ({ agent }) => maybeInstall(agent))
+    // 而 install() 里 `const scoped = agent.ctx; scoped.tools.register(...)`。
+    // 注册到插件 ctx 上的工具只在「插件作用域」可见，模型看不到；
+    // 必须挂到具体 Agent 的 scope，且只挂给 **Lead**（`tryMembership(...).role === 'lead'`）。
+    //
+    // 也不把 agentTeams/agents 加进 inject：未启用 Team 的 profile 会启动失败。
+    // 拿不到服务时静默跳过（那是可选能力），但要记录真实原因，不静默吞掉。
     let teamRegistered = null
+    /** 诊断：把每一步拿不到东西的真实原因记下来。 */
+    const teamDiag = []
     try {
-      const teamAgents =
-        typeof ctx.agentTeams === 'object' && ctx.agentTeams
-          ? ctx.agentTeams
-          : typeof ctx.get === 'function'
-            ? ctx.get('agentTeams')
-            : undefined
-      if (teamAgents) {
-        teamRegistered = registerTeamRoleTool(
-          Object.assign(Object.create(ctx), { agentTeams: teamAgents }),
-          {
+      const teams = readService(ctx, 'agentTeams')
+      const agents = readService(ctx, 'agents')
+      if (!teams) teamDiag.push('拿不到 agentTeams 服务')
+      else if (!agents) teamDiag.push('拿不到 agents 服务')
+      if (teams && agents) {
+        /** 给一个 Lead agent 装工具。 */
+        const maybeInstall = (agent) => {
+          if (!agent || !agent.ctx) return
+          // 只给 Lead 装：teammate 自己是成员而非 Lead，装给别人没意义还可能重复。
+          let role
+          try {
+            role = teams.tryMembership(agent)?.role
+          } catch (error) {
+            teamDiag.push(`tryMembership 失败: ${error?.message ?? error}`)
+            return
+          }
+          if (role !== 'lead') return
+          const result = registerTeamRoleTool(agent.ctx, {
+            agentTeams: teams,
+            agents,
             registry: globalRegistry,
             // 通道实例查找：与派单路径同源（profile 里的 channels 行）
-            findChannel: (role) => {
-              const channelId = role?.channel?.channelId
+            findChannel: (roleItem) => {
+              const channelId = roleItem?.channel?.channelId
               if (!channelId) return undefined
               const list = Array.isArray(cfg?.channels) ? cfg.channels : []
               return list.find((item) => item && item.channelId === channelId)
             },
             ...(typeof hostDefineTool === 'function' ? { defineTool: hostDefineTool } : {}),
-          },
-        )
+          })
+          if (result) teamRegistered = result
+        }
+        // 已有的 agent（本插件加载时 Lead 可能已存在）
+        try {
+          for (const agent of agents.list()) maybeInstall(agent)
+        } catch (error) {
+          teamDiag.push(`agents.list 失败: ${error?.message ?? error}`)
+        }
+        // 之后新建的 agent：每次 agent/created 都尝试，内部按 role 过滤。
+        ctx.on('agent/created', ({ agent }) => {
+          try {
+            maybeInstall(agent)
+          } catch {
+            // 单个 agent 装不上不影响其它 agent。
+          }
+        })
+        teamDiag.push(teamRegistered ? 'registered' : '没有可安装的 Lead agent')
       }
-    } catch {
-      // 宿主未启用 Agent Teams（或注入守卫拒绝）→ 没有这个可选能力，不是错误。
+    } catch (error) {
       teamRegistered = null
+      teamDiag.push(`外层异常: ${error?.message ?? error}`)
     }
-    if (teamRegistered) {
-      const teamLine = `[${name}] team tool=spawn_teammate_as phase=register version=${PLUGIN_VERSION} status=ok`
-      if (typeof ctx.logger?.info === 'function') ctx.logger.info(teamLine)
-      else console.log(teamLine)
-    }
+    const teamLine = `[${name}] team tool=spawn_teammate_as phase=register version=${PLUGIN_VERSION} ${
+      teamRegistered ? 'status=ok' : 'status=skipped'
+    } ${teamDiag.join('; ')}`
+    if (typeof ctx.logger?.info === 'function') ctx.logger.info(teamLine)
+    else console.log(teamLine)
 
     // GUI Remote：宿主注册 `meetingstone/list`（SRC marker）与三个会话方法的
     // strict 定义（真实 zod + ctx.typert.register）。宿主缺少 Typert/zod 时静默

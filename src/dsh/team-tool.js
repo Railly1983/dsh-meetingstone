@@ -66,18 +66,25 @@ function renderTeammateOutput(_args, value) {
 /**
  * 注册 `spawn_teammate_as`。
  *
- * @param {object} ctx 宿主 Context（需 `ctx.tools.register`）
+ * **必须传 `agent.ctx` 作为 ctx**，不是插件的 ctx。
+ * 宿主 `@deepseek-ai/dsh-experimental-tool-agent-team` 的 `install()` 里就是
+ * `const scoped = agent.ctx; scoped.tools.register(...)` —— 工具只有挂到具体
+ * Agent 的 scope 才对模型可见；挂到插件 ctx 上模型看不到。
+ *
+ * @param {object} ctx 目标 Agent 的 scope context（需 `ctx.tools.register`）
  * @param {object} deps
+ * @param {any} deps.agentTeams 宿主 Agent Teams 服务（需 `spawnTeammate`）
  * @param {object} deps.registry 角色注册表 `list(): Role[]`
  * @param {(spec: object) => object} [deps.defineTool] 宿主真实 defineTool（不注入则降级）
- * @param {(name: string) => any} [deps.findChannel] 通道实例查找（可选）
+ * @param {(role: any) => any} [deps.findChannel] 通道实例查找（可选）
  * @returns {{ name: string } | null} 注册成功返回工具名；宿主无 Team 能力时返回 null（不报错）
  */
 export function registerTeamRoleTool(ctx, deps) {
-  const { registry, defineTool, findChannel } = deps ?? {}
+  const { agentTeams, registry, defineTool, findChannel, agents } = deps ?? {}
   if (!ctx || !ctx.tools || typeof ctx.tools.register !== 'function') return null
-  // 只有宿主装了 Agent Teams 才有 agentTeams 服务；没有就静默跳过（不是错误）。
-  if (!ctx.agentTeams || typeof ctx.agentTeams.spawnTeammate !== 'function') return null
+  // 只有宿主装了 Agent Teams 才有这个服务；没有就静默跳过（不是错误）。
+  const teams = agentTeams ?? ctx.agentTeams
+  if (!teams || typeof teams.spawnTeammate !== 'function') return null
   if (!registry || typeof registry.list !== 'function') return null
 
   const spec = {
@@ -169,7 +176,7 @@ export function registerTeamRoleTool(ctx, deps) {
       if (!parent) return { ok: false, error: 'NO_AGENT: 拿不到调用方 Agent' }
       let member
       try {
-        const spawned = await ctx.agentTeams.spawnTeammate(parent, {
+        const spawned = await teams.spawnTeammate(parent, {
           name,
           description: args.description,
           prompt: [{ type: 'text', text: args.prompt }],
@@ -190,7 +197,15 @@ export function registerTeamRoleTool(ctx, deps) {
       //    spawnTeammate 内部会 checkpointInitialPrompt，teammate 可能已经开始跑；
       //    因此这里尽快取 agent 并 select。拿不到 agent 就如实报告降级。
       const base = { ok: true, name: member?.name ?? name, role: role.name, childId }
-      const agent = typeof ctx.agents?.get === 'function' ? ctx.agents.get(childId) : undefined
+      // 取子 agent：优先注入的 agents 服务，其次 teams 服务上的反查，最后 ctx.get。
+      let agent
+      try {
+        if (typeof agents?.get === 'function') agent = agents.get(childId)
+        else if (typeof teams.agentOf === 'function') agent = teams.agentOf(childId)
+        else if (typeof ctx.get === 'function') agent = ctx.get('agents')?.get?.(childId)
+      } catch {
+        agent = undefined
+      }
       if (!agent) {
         return {
           ...base,

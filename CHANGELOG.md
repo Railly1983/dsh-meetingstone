@@ -2,6 +2,29 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.9] - 2026-11-12
+
+### Fixed
+
+- **`spawn_teammate_as` 在 alpha.8 里实际没注册上**（工具列表里查无此名）。根因：
+  工具的注册 scope 用错了 —— 挂到了插件的 ctx 上。
+  宿主 `@deepseek-ai/dsh-experimental-tool-agent-team` 的 `install()` 实现是
+  `const scoped = agent.ctx; scoped.tools.register(...)`，也就是**必须挂到具体 Agent
+  的 scope**，挂插件 ctx 只有插件自己可见、模型看不到。
+  alpha.9 改为跟随宿主同样的模式：
+  - `ctx.on('agent/created')` + `ctx.agents.list()`，对每个 agent 判断 `tryMembership(agent).role`，
+    只给 **Lead** 装（teammate 自己不是 Lead，装了没意义还可能重复）
+  - `registerTeamRoleTool(agent.ctx, ...)`
+- 拿服务改为 `readService(ctx, name)`：先试 `ctx[name]`、再试 `ctx.get(name)`，
+  两者都被注入守卫拒绝时返回 undefined 并**静默降级**（未启用 Agent Teams 的 profile
+  不该因此启动失败），但注册结果与失败原因**写进日志**，不再静默吞掉。
+
+### 测试
+
+- 589 → 590 tests（+1），并补两条反证测试：
+  - 不得把 `ctx.agentTeams` 当主路径（只能作为一次兜底）
+  - 注册目标必须是 `agent.ctx`，且必须用 `tryMembership` 过滤 Lead
+
 ## [0.1.0-alpha.8] - 2026-11-12
 
 ### Added
