@@ -2,6 +2,42 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.10] - 2026-11-12
+
+### Added
+
+- **`meetingstone_steer_task`：中途插话 / 续聊**。给还在跑的任务追加一条指示，
+  或给已结束的任务续聊。
+  - **进程内（DSH 原生子 Agent）**：真插话、真续聊。走宿主
+    `subagents.sendMessage(..., { delivery: "steer" })`，消息投进子 agent 的收件箱，
+    它在下一个 step 边界处理，**完整上下文保留**；子 agent 已休眠时宿主会
+    `coldResume` 从持久化会话恢复。
+  - **外部 CLI（CodeBuddy / Codex / Claude）**：这三个 provider 都**没有实现
+    `prepareContinuable`**（实测：`capabilities` 里没有该能力，`sessionId` 也没被引用），
+    宿主无法续接会话。因此退化为「停掉原任务 + 带上已有产出重开」，
+    回执里 `mode` 明确标为 `restart-with-output`，**不伪装成真插话**。
+  - 只能给自己派出的任务插话（宿主 `authorizeLineage` 校验）。
+
+### Fixed
+
+- 失败边界全部如实透传，不静默降级：
+  - 任务已终态 → 明确告知「无法插话，可续聊或重新派单」
+  - 子 agent 已提交结构化结果 → 宿主 `INPUT_CLOSED` 转成「已提交结果，不再接受输入」
+  - 外部 CLI 离线 → `NOT_RESUMABLE` 转成「该通道不支持续聊」并给替代方案
+  - 宿主没有 `sendMessage` → `STEER_UNAVAILABLE`，不假装成功
+
+### 已清理
+
+- 移除 `spawn_teammate_as`（alpha.8/9 引入的 Agent Teams 角色化改造）。
+  用户评估后决定不采用：Agent Teams 唯一的独有能力是「队员可续聊/可中途叫醒」，
+  但代价是模型、persona、外部 CLI 全部失控。方向改为把这两个能力**直接做进
+  本插件自己的派单路径**。删除 `src/dsh/team-roles.js`、`src/dsh/team-tool.js`
+  与其测试（-1160 行）。
+
+### 测试
+
+- 551 → 570 tests（+19，本功能的单元测试；另有工具数从 8→9 的契约同步）
+
 ## [0.1.0-alpha.9] - 2026-11-12
 
 ### Fixed

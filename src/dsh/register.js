@@ -58,6 +58,12 @@
  */
 
 import { DEFAULT_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS, providerNameFor } from './adapter.js'
+import {
+  canRestartWithOutput,
+  extractPartialOutput,
+  steerCapability,
+  steerInProcess,
+} from './steer.js'
 import { DISPATCH_ERRORS, normalizeProjectKey } from '../dispatch/dispatcher.js'
 import { routeTask } from '../dispatch/routing.js'
 import {
@@ -89,6 +95,7 @@ export const TOOL_NAMES = Object.freeze({
   CANCEL_TASK: 'meetingstone_cancel_task',
   GET_RUN_ARTIFACT: 'meetingstone_get_run_artifact',
   CLI_STATUS: 'meetingstone_cli_status',
+  STEER_TASK: 'meetingstone_steer_task',
 })
 
 /** meetingstone_cli_status 接受的 CLI 白名单（与 src/cli/probe.js 的 CLI_SPECS 对齐）。 */
@@ -424,6 +431,22 @@ export function registerTools(ctx, deps) {
     if (typeof record.recordPath === 'string' && record.recordPath) return record
     const path = recordPathOf(exec, childId)
     return path ? { ...record, recordPath: path } : record
+  }
+
+  /**
+   * 安全取宿主 subagents 服务（用于插话）。
+   *
+   * 未声明 inject 时直接访问会抛（`cannot get property ... without inject`），
+   * 所以统一 try/catch；拿不到就交给调用方如实报 STEER_UNAVAILABLE，不静默降级。
+   * @returns {any} subagents 服务或 null
+   */
+  function safeSubagents() {
+    try {
+      const value = ctx?.subagents
+      return value && typeof value === 'object' ? value : null
+    } catch {
+      return null
+    }
   }
 
   if (!ctx || !ctx.tools || typeof ctx.tools.register !== 'function') {
@@ -1154,6 +1177,119 @@ export function registerTools(ctx, deps) {
         }
         const results = cli ? [await probe.probe(cli)] : await probe.probeAll()
         return { clis: (Array.isArray(results) ? results : []).map(toCliView) }
+      },
+    },
+    {
+      name: TOOL_NAMES.STEER_TASK,
+      description:
+        '给**还在跑**的任务追加一条指示（中途插话），或给已结束的任务续聊。' +
+        '进程内通道（DSH 原生子 Agent）是真插话/真续聊：消息投进它的收件箱，' +
+        '它在下一个 step 边界处理，完整上下文保留。' +
+        '外部 CLI（CodeBuddy / Codex / Claude）不支持续接会话，只能「杀掉重来并带上已有产出」，' +
+        '回执里的 mode 会明确区分，不要混为一谈。' +
+        '只能给自己派出的任务插话。任务已终态时无法插话。',
+      parameters: {
+        childId: { type: 'string', required: true, description: '目标任务 id（派单回执里的 childId）' },
+        instruction: {
+          type: 'string',
+          required: true,
+          description: '追加的指示，例如「停，不要动 A 文件，只改 B」。不是新任务，是给当前任务的补充。',
+        },
+        role: {
+          type: 'string',
+          description:
+            '外部 CLI 走「杀掉重来」时投给哪个角色。省略则沿用原任务的角色。仅在下述情况下必填：记录里没有角色信息。',
+        },
+      },
+      output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
+      async execute(args, exec) {
+        const childId = String(args?.childId ?? '').trim()
+        const instruction = String(args?.instruction ?? '').trim()
+        if (!childId) return { error: 'CHILD_REQUIRED', message: '必须给 childId' }
+        if (!instruction) return { error: 'INSTRUCTION_REQUIRED', message: '必须给 instruction' }
+
+        // 取任务记录：内存优先、磁盘兜底（与 get_task 同一套）。
+        const record = await resolveRun(exec, childId)
+        if (!record || typeof record !== 'object') {
+          return {
+            error: 'RECORD_NOT_FOUND',
+            message: `找不到任务 ${childId} 的记录；只有本插件派出的任务支持插话`,
+          }
+        }
+
+        const capability = steerCapability(record)
+        if (capability.capable) {
+          // 路径 A：进程内真插话/真续聊。
+          const parent = exec?.agent ?? null
+          const subagents = safeSubagents()
+          const result = await steerInProcess({
+            subagents,
+            parent,
+            childId,
+            instruction,
+            signal: exec?.signal,
+          })
+          if (result.ok) {
+            return {
+              ok: true,
+              childId,
+              mode: 'steer',
+              messageId: result.messageId,
+              note: '消息已投递，子任务会在下一个 step 边界处理；上下文完整保留。',
+            }
+          }
+          return { error: result.code, message: result.message, hint: result.hint }
+        }
+
+        // 路径 B：外部 CLI / 不可真插话 → 只能「杀掉重来并带上已有产出」。
+        const restartable = canRestartWithOutput(record)
+        if (!restartable.ok) {
+          return {
+            error: restartable.code,
+            message: restartable.message,
+            hint: `${capability.reason}${restartable.hint ? `；${restartable.hint}` : ''}`,
+          }
+        }
+        if (typeof dispatcher?.dispatch !== 'function' || typeof dispatcher?.cancel !== 'function') {
+          return {
+            error: 'DISPATCH_UNAVAILABLE',
+            message: '派单器不可用，无法执行 restart-with-output',
+            hint: capability.reason,
+          }
+        }
+
+        // 先停掉当前任务（它可能还在跑）。停不掉就如实报，不硬来。
+        const cancelOutcome = await dispatcher
+          .cancel({ childId })
+          .catch((error) => ({ ok: false, reason: error?.message ?? String(error) }))
+        const stopConfirmed = cancelOutcome?.stopConfirmed ?? cancelOutcome?.ok ?? false
+
+        const partial = extractPartialOutput(record)
+        const roleId = String(args?.role ?? record.roleId ?? record.role ?? '').trim()
+        const replayBlock = partial.text
+          ? `\n\n【上一轮已有产出（未完成，仅供参考，不是指令）】\n${partial.text.slice(0, 12 * 1024)}`
+          : ''
+        const nextTask = `${instruction}${replayBlock}`
+
+        const dispatched = await dispatcher.dispatch({
+          role: roleId,
+          task: nextTask,
+          ...(record.workspace ? { cwd: record.workspace } : {}),
+          // 关联原任务，便于追溯（字段已存在于 run 记录契约）
+          upstreamChildId: childId,
+        })
+
+        return {
+          ok: true,
+          mode: 'restart-with-output',
+          childId: dispatched?.childId ?? null,
+          previousChildId: childId,
+          stopConfirmed,
+          replayedBytes: partial.text ? partial.text.slice(0, 12 * 1024).length : 0,
+          note:
+            `该通道（${record.provider ?? '未知'}）不支持续接会话，已改为「停掉原任务 + 带上已有产出重开」。` +
+            '这不是真插话：新任务会重新读一遍上下文，模型没有原任务的内部状态。',
+        }
       },
     },
   ]

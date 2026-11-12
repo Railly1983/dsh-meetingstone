@@ -365,13 +365,13 @@ function makeDeps(over = {}) {
   return { deps, dispatchCalls }
 }
 
-test('registerTools：恰好注册八个工具，名字正确、描述非空', () => {
+test('registerTools：恰好注册九个工具，名字正确、描述非空', () => {
   const { ctx, registered } = fakeCtx()
   const { deps } = makeDeps()
   const tools = registerTools(ctx, deps)
 
-  assert.equal(registered.length, 8, '当前注册八个工具')
-  assert.equal(tools.length, 8)
+  assert.equal(registered.length, 9, '当前注册九个工具')
+  assert.equal(tools.length, 9)
   assert.deepEqual(
     registered.map((t) => t.name),
     [
@@ -383,6 +383,7 @@ test('registerTools：恰好注册八个工具，名字正确、描述非空', (
       TOOL_NAMES.GET_RUN_ARTIFACT,
       TOOL_NAMES.CANCEL_TASK,
       TOOL_NAMES.CLI_STATUS,
+      TOOL_NAMES.STEER_TASK,
     ],
   )
   for (const tool of registered) {
@@ -419,6 +420,7 @@ test('registerTools：defineTool 可注入（生产注入真实实现，测试�
     TOOL_NAMES.GET_RUN_ARTIFACT,
     TOOL_NAMES.CANCEL_TASK,
     TOOL_NAMES.CLI_STATUS,
+    TOOL_NAMES.STEER_TASK,
   ])
   assert.ok(registered.every((t) => t.wrapped === true))
 })

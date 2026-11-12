@@ -61,10 +61,10 @@ test('inject 声明了 tools 依赖', () => {
   assert.deepEqual(inject, ['tools', 'subagents'], 'tools 用于注册，subagents 用于派单与可用性')
 })
 
-test('apply 注册八个工具且不抛错（即便宿主没有 subagents）', () => {
+test('apply 注册九个工具且不抛错（即便宿主没有 subagents）', () => {
   const { ctx, tools } = makeCtx()
   apply(ctx, config)
-  assert.equal(tools.length, 8)
+  assert.equal(tools.length, 9)
   const names = tools.map((t) => t.name).sort()
   assert.deepEqual(names, [
     'meetingstone_cancel_task',
@@ -74,6 +74,7 @@ test('apply 注册八个工具且不抛错（即便宿主没有 subagents）', (
     'meetingstone_get_task',
     'meetingstone_list_roles',
     'meetingstone_list_runs',
+    'meetingstone_steer_task',
     'meetingstone_wait',
   ])
   for (const t of tools) {
@@ -128,7 +129,7 @@ test('注入宿主 defineTool 时传的是作者 spec 字典（不双重编译�
     probe: { probe: async () => ({}), probeAll: async () => [] },
     defineTool: fakeDefineTool,
   })
-  assert.equal(seen.length, 8)
+  assert.equal(seen.length, 9)
   assert.equal(Object.hasOwn(seen[1].parameters, 'role'), true, '应把作者 DSL 交给 defineTool')
   assert.equal(seen[1].parameters.role.type, 'string')
   assert.equal(Object.hasOwn(seen[1].parameters, 'readOnly'), false, '只读通道已移除，参数里不得再出现')
@@ -179,7 +180,7 @@ test('dispose 幂等，且在 dispose 后再次 dispose 不报错', () => {
 test('空配置也能加载（roles=0）', () => {
   const { ctx, tools, logs } = makeCtx()
   assert.doesNotThrow(() => apply(ctx, {}))
-  assert.equal(tools.length, 8)
+  assert.equal(tools.length, 9)
   assert.ok(logs.some((l) => l.includes('roles=0')))
 })
 
