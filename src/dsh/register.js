@@ -1208,8 +1208,23 @@ export function registerTools(ctx, deps) {
         if (!childId) return { error: 'CHILD_REQUIRED', message: '必须给 childId' }
         if (!instruction) return { error: 'INSTRUCTION_REQUIRED', message: '必须给 instruction' }
 
-        // 取任务记录：内存优先、磁盘兜底（与 get_task 同一套）。
-        const record = await resolveRun(exec, childId)
+        // 取任务记录。
+        //
+        // **必须优先读磁盘的完整 run 记录，不能只用 resolveRun 的内存视图。**
+        // 原因（2026-11-12 实测踩到）：`dispatcher.getTask()` 返回的是适配器的
+        // live 视图（status / reason 等少数字段），**不含 provider / role / channel**
+        // 这些判断「能否插话」必需的字段；而 run-store 落盘的记录里是全的
+        // （provider='spawn', role='role-bajie', ...）。
+        // 只用内存视图会导致明明是 spawn 进程内任务，却被判成「无法确认是否支持插话」。
+        const liveRecord = await resolveRun(exec, childId).catch(() => null)
+        const persistedRecord = loadPersistedRun
+          ? await loadPersistedRun(exec, childId).catch(() => null)
+          : null
+        // 磁盘记录更全，以它为准；内存记录只用来补齐它没有的实时状态。
+        const record =
+          persistedRecord && typeof persistedRecord === 'object'
+            ? { ...persistedRecord, ...(liveRecord && typeof liveRecord === 'object' ? { liveStatus: liveRecord.status } : {}) }
+            : liveRecord
         if (!record || typeof record !== 'object') {
           return {
             error: 'RECORD_NOT_FOUND',

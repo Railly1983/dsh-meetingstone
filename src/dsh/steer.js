@@ -43,6 +43,31 @@
 const STEER_CAPABLE_PROVIDER = 'spawn'
 
 /**
+ * 从 run 记录里解析出 provider（通道类型）。
+ *
+ * 为什么需要多源回退：run 记录有 `provider` 顶层字段，但历史上不同版本
+ * 还可能写在 `channel.kind`、`channel.provider`、`kind` 里；而适配器内存视图
+ * 可能一个都没有。**宁可从更多地方找，也不要因为一个字段缺失就判定「不支持」**
+ * （2026-11-12 实测踩到：spawn 任务被判成无法确认）。
+ *
+ * @param {any} record run 记录
+ * @returns {string} provider 名，找不到时为空串
+ */
+export function resolveRecordProvider(record) {
+  if (!record || typeof record !== 'object') return ''
+  for (const value of [
+    record.provider,
+    record.channel?.kind,
+    record.channel?.provider,
+    record.kind,
+    record.providerName,
+  ]) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return ''
+}
+
+/**
  * 判断一条 run 记录能不能真插话。
  *
  * @param {any} record run 记录（来自 dispatcher.getTask / run-store）
@@ -52,21 +77,24 @@ export function steerCapability(record) {
   if (!record || typeof record !== 'object') {
     return { capable: false, reason: '没有找到该任务的记录，无法判断能否插话' }
   }
-  const status = typeof record.status === 'string' ? record.status : ''
+  // 状态优先看实时状态（内存视图更准），再退回落盘状态。
+  const status =
+    (typeof record.liveStatus === 'string' && record.liveStatus) ||
+    (typeof record.status === 'string' ? record.status : '')
   if (status === 'completed' || status === 'failed' || status === 'cancelled') {
     return { capable: false, reason: `任务已是终态（${status}），无法插话；可改用续聊或重新派单` }
   }
-  const provider = typeof record.provider === 'string' ? record.provider : ''
-  if (provider && provider !== STEER_CAPABLE_PROVIDER) {
-    return {
-      capable: false,
-      reason: `该任务走的是 ${provider} 通道，宿主没有为它实现 prepareContinuable，无法真插话；可用 restart-with-output 重开`,
-    }
-  }
+  const provider = resolveRecordProvider(record)
   if (!provider) {
     return {
       capable: false,
-      reason: '该记录没有标注 provider，无法确认是否支持插话；为安全起见按不支持处理',
+      reason: '该记录没有标注通道类型，无法确认是否支持插话；为安全起见按不支持处理',
+    }
+  }
+  if (provider !== STEER_CAPABLE_PROVIDER) {
+    return {
+      capable: false,
+      reason: `该任务走的是 ${provider} 通道，宿主没有为它实现 prepareContinuable，无法真插话；可用 restart-with-output 重开`,
     }
   }
   return { capable: true, reason: '' }
@@ -202,7 +230,8 @@ export function canRestartWithOutput(record) {
       hint: '只有本插件派出的任务支持带产出重开',
     }
   }
-  const roleId = (record.roleId ?? record.role) && String(record.roleId ?? record.role)
+  // run 记录的顶层字段是 `role`（值为 roleId）；也兼容 roleId / routing.roleId。
+  const roleId = resolveRecordRoleId(record)
   if (!roleId) {
     return {
       ok: false,
@@ -212,6 +241,23 @@ export function canRestartWithOutput(record) {
     }
   }
   return { ok: true }
+}
+
+/**
+ * 从 run 记录解析出角色 id。
+ *
+ * 实测 run 记录的顶层 `role` 存的就是 roleId（如 `role-bajie`），
+ * 另有 `routing.roleId` 作为备份来源。
+ *
+ * @param {any} record
+ * @returns {string}
+ */
+export function resolveRecordRoleId(record) {
+  if (!record || typeof record !== 'object') return ''
+  for (const value of [record.roleId, record.role, record.routing?.roleId]) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return ''
 }
 
 /**
@@ -225,11 +271,28 @@ export function canRestartWithOutput(record) {
  */
 export function extractPartialOutput(record) {
   if (!record || typeof record !== 'object') return { text: '', truncated: false }
-  // run 记录里可能落 result / summary / output 三种形态，按优先级取。
+  // 优先级：result（完整产出）> summary（摘录）> output > detail。
+  // 为什么不先取 summary：summary 是截断过的摘录，重开时当然要尽量给完整产出。
   for (const key of ['result', 'summary', 'output', 'detail']) {
     const value = record[key]
     if (typeof value === 'string' && value.trim()) {
-      return { text: value.trim(), truncated: false }
+      return { text: value.trim(), truncated: record.resultTruncated === true || record.summaryTruncated === true }
+    }
+    if (value && typeof value === 'object') {
+      for (const inner of ['text', 'summary', 'content', 'message']) {
+        if (typeof value[inner] === 'string' && value[inner].trim()) {
+          return { text: value[inner].trim(), truncated: false }
+        }
+      }
+    }
+  }
+  // 结构化结果兜底：序列化后当参考内容。
+  if (record.structuredResult && typeof record.structuredResult === 'object') {
+    try {
+      const text = JSON.stringify(record.structuredResult)
+      if (text && text.trim() && text !== '{}') return { text, truncated: false }
+    } catch {
+      // 循环引用等，忽略
     }
   }
   return { text: '', truncated: false }

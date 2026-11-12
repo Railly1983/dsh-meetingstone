@@ -2,6 +2,31 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.11] - 2026-11-12
+
+### Fixed
+
+- **`meetingstone_steer_task` 首次真机测试失败**：明明是 spawn 进程内任务，却被判成
+  「无法确认是否支持插话」。两个成因：
+
+  1. `resolveRun()` 返回的是 `dispatcher.getTask()` 的**内存 live 视图**，只有
+     `status` / `reason` 等少数字段，**不含 provider / role / channel**；
+     而 run-store 落盘的记录里是全的（实测 `provider="spawn"`, `role="role-bajie"`）。
+     现改为**优先读磁盘完整记录**，内存视图只用来补实时状态（`liveStatus`）。
+  2. provider 解析只认 `record.provider` 一个字段。现补多源回退：
+     `provider` → `channel.kind` → `channel.provider` → `kind` → `providerName`。
+     宁可多找几个地方，也不要因为一个字段缺失就判定「不支持」。
+
+- 同类加固：
+  - `resolveRecordRoleId()`：`role` / `roleId` / `routing.roleId` 三源回退
+  - `extractPartialOutput()`：`result` 可能是对象，支持 `{text}` / `{summary}` / `{content}` / `{message}`；
+    再退化到 `structuredResult` 序列化；截断标记（`resultTruncated` / `summaryTruncated`）如实透传
+  - `liveStatus` 优先于落盘 `status`：磁盘还是 running 但内存已 completed 时按终态处理
+
+### 测试
+
+- 570 → 577 tests（+7 条回归测试，覆盖真实 run 记录形状）
+
 ## [0.1.0-alpha.10] - 2026-11-12
 
 ### Added

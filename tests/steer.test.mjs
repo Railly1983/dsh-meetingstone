@@ -13,6 +13,8 @@ import {
   buildSteerContent,
   canRestartWithOutput,
   extractPartialOutput,
+  resolveRecordProvider,
+  resolveRecordRoleId,
   steerCapability,
   steerInProcess,
   translateSteerError,
@@ -194,4 +196,77 @@ test('extractPartialOutput：空值/无记录返回空串，不抛', () => {
     assert.equal(result.text, '')
     assert.equal(result.truncated, false)
   }
+})
+
+// ── 回归：2026-11-12 实测踩到的「记录字段缺失」问题 ──────────────────────────
+// 真实 run 记录形状（实测自 .meetingstone/runs/*.json）：
+//   provider='spawn', role='role-bajie', status='running'
+// 而 dispatcher.getTask() 的内存视图只有 status/reason，没有 provider/role。
+
+test('回归：真实 run 记录形状（provider+role 在顶层）可插话', () => {
+  const record = {
+    childId: 'b3385304',
+    provider: 'spawn',
+    role: 'role-bajie',
+    channel: 'ch-inprocess',
+    status: 'running',
+  }
+  assert.equal(steerCapability(record).capable, true)
+  assert.equal(resolveRecordProvider(record), 'spawn')
+  assert.equal(resolveRecordRoleId(record), 'role-bajie')
+  assert.deepEqual(canRestartWithOutput(record), { ok: true })
+})
+
+test('resolveRecordProvider：多源回退，不因单个字段缺失就判定不支持', () => {
+  assert.equal(resolveRecordProvider({ provider: 'spawn' }), 'spawn')
+  assert.equal(resolveRecordProvider({ channel: { kind: 'spawn' } }), 'spawn')
+  assert.equal(resolveRecordProvider({ channel: { provider: 'spawn' } }), 'spawn')
+  assert.equal(resolveRecordProvider({ kind: 'spawn' }), 'spawn')
+  assert.equal(resolveRecordProvider({ providerName: 'spawn' }), 'spawn')
+  // 顶层优先
+  assert.equal(resolveRecordProvider({ provider: 'spawn', kind: 'acp' }), 'spawn')
+  // 全无
+  assert.equal(resolveRecordProvider({}), '')
+  assert.equal(resolveRecordProvider(null), '')
+})
+
+test('回归：内存视图只有 status 时，若磁盘记录补上 provider 仍可插话', () => {
+  // register.js 会把磁盘记录铺开、用 liveStatus 覆盖实时状态
+  const merged = { provider: 'spawn', role: 'role-bajie', status: 'running', liveStatus: 'running' }
+  assert.equal(steerCapability(merged).capable, true)
+})
+
+test('liveStatus 优先于 status：磁盘仍是 running 但内存已 completed 时不可插话', () => {
+  const record = { provider: 'spawn', status: 'running', liveStatus: 'completed' }
+  const result = steerCapability(record)
+  assert.equal(result.capable, false)
+  assert.match(result.reason, /completed/)
+})
+
+test('resolveRecordRoleId：role / roleId / routing.roleId 都能取到', () => {
+  assert.equal(resolveRecordRoleId({ role: 'role-bajie' }), 'role-bajie')
+  assert.equal(resolveRecordRoleId({ roleId: 'role-sashi' }), 'role-sashi')
+  assert.equal(resolveRecordRoleId({ routing: { roleId: 'role-xiaobai' } }), 'role-xiaobai')
+  assert.equal(resolveRecordRoleId({}), '')
+  assert.equal(resolveRecordRoleId(null), '')
+})
+
+test('extractPartialOutput：result 是对象时也能取出文本', () => {
+  assert.equal(extractPartialOutput({ result: { text: '对象里的文本' } }).text, '对象里的文本')
+  assert.equal(extractPartialOutput({ result: { summary: '对象摘要' } }).text, '对象摘要')
+  assert.equal(extractPartialOutput({ result: { content: '内容' } }).text, '内容')
+})
+
+test('extractPartialOutput：结构化结果兜底序列化', () => {
+  const result = extractPartialOutput({ structuredResult: { files: 3, lines: 1200 } })
+  assert.match(result.text, /1200/)
+  assert.match(result.text, /files/)
+  // 空对象不算产出
+  assert.equal(extractPartialOutput({ structuredResult: {} }).text, '')
+})
+
+test('extractPartialOutput：截断标记透传', () => {
+  assert.equal(extractPartialOutput({ summary: 'x', summaryTruncated: true }).truncated, true)
+  assert.equal(extractPartialOutput({ result: 'y', resultTruncated: true }).truncated, true)
+  assert.equal(extractPartialOutput({ summary: 'z' }).truncated, false)
 })
