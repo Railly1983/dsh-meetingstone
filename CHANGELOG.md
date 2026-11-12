@@ -2,6 +2,27 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.25] - 2026-11-12
+
+### Fixed
+
+- **`roleColorNote` 只有字典项、没有渲染调用点**。
+  两色裁决后加了「颜色仅表示启用与依赖就绪状态，不表示实时额度。」这条文案，
+  但从未在 UI 里渲染 —— 用户看不到，两色的语义也就没传达到。
+  现已在角色管理器的 note 区渲染。
+  这是**交互层核对脚本抓到的**：它检查渲染树里有没有这个 key，
+  结果只有字典、无调用点。
+
+### Changed
+
+- D1 交互核对从「5 项假通过」变成 **20 项全真实断言**。
+  上一轮把验不了的 5 项标成 `[需人眼]` 让脚本通过 —— 那是掩盖问题。
+  这轮读代码找到三个 stub 真因并修好：
+  - `jsxs(type, {…}, key)` 第三参数是 **React key** 不是 children
+    （把 key 当 children 会让 roleId 混进渲染文本）
+  - `normalizeGlobal(value)` 期望的是 `snapshot.global` 不是整个 snapshot
+  - 函数组件要执行才能看到它渲染的元素（`jsx(Switch,…)` → `button[role=switch]`）
+
 ## [0.1.0-alpha.24] - 2026-11-12
 
 ### Added
