@@ -101,10 +101,10 @@ if (result.status !== 0) {
 // 同步 profile 依赖串，避免 pnpm 把旧 tgz 装回
 try {
   const profilePkgPath = join(HOME, 'profiles', 'desktop', 'package.json')
-  const profilePkg = JSON.parse(fs.readFileSync(profilePkgPath, 'utf8'))
+  const profilePkg = JSON.parse(readFileSync(profilePkgPath, 'utf8'))
   profilePkg.dependencies = profilePkg.dependencies || {}
   profilePkg.dependencies['dsh-meetingstone'] = 'file:' + tgz.replace(/\\/g, '/')
-  fs.writeFileSync(profilePkgPath, JSON.stringify(profilePkg, null, 2) + '\n', 'utf8')
+  writeFileSync(profilePkgPath, JSON.stringify(profilePkg, null, 2) + '\n', 'utf8')
 } catch (error) {
   console.warn('install-safe: profile dependency sync warning:', error.message)
 }
@@ -161,5 +161,5 @@ if (spawned.status !== 0) {
 
 console.log('[3/3] detached watcher will restart DSH and verify boot.')
 console.log(`install-safe: result file: ${resultFile}`)
-console.log(`install-safe: rollback target: ${join(PACKAGES, fallback)}`)
+console.log(`install-safe: rollback target: ${fallback}`)
 process.exit(0)
