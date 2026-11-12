@@ -5,10 +5,10 @@ param(
   [Parameter(Mandatory = $true)][string]$ResultFile
 )
 
-# 这个脚本由 install-safe 通过 WMI 以**脱离 DSH 进程树**的方式启动，
-# 因此能安全重启 DSH 并在崩溃时回滚，不会被自身重启杀死。
-$dsh = "C:\Users\30673\AppData\Local\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
+# Started by install-safe via WMI, outside the DSH process tree, so it can
+# restart DSH and roll back without being killed by its own restart.
 $logDir = Join-Path $env:APPDATA "@deepseek-ai\dsh-desktop\logs"
+$targetDir = Join-Path $env:USERPROFILE ".dsh\profiles\desktop\node_modules\dsh-meetingstone"
 
 function Get-LatestCrashMs {
   try {
@@ -18,16 +18,22 @@ function Get-LatestCrashMs {
   } catch { return 0 }
 }
 
+function Overlay-Tgz([string]$tgz) {
+  $stage = Join-Path $env:TEMP ("ms-rollback-" + [guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory -Force -Path $stage | Out-Null
+  & tar -xzf $tgz -C $stage | Out-Null
+  $source = Join-Path $stage "package"
+  if (Test-Path $source) {
+    New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+    Copy-Item -Path (Join-Path $source "*") -Destination $targetDir -Recurse -Force
+  }
+  Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 function Restart-Dsh {
   & powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "D:\MeetingStone\scripts\restart-dsh.ps1" | Out-Null
 }
 
-function Install-Tgz([string]$tgz) {
-  & cmd.exe /d /s /c "`"$dsh`" plugin --profile desktop remove dsh-meetingstone" | Out-Null
-  & cmd.exe /d /s /c "`"$dsh`" plugin --profile desktop add `"$tgz`"" | Out-Null
-}
-
-# 先重启一次（安装已完成，尚未验证）
 Restart-Dsh
 Start-Sleep -Seconds 35
 
@@ -37,8 +43,7 @@ if (-not $crashed) {
   exit 0
 }
 
-# 崩溃 → 回滚
-Install-Tgz $PrevTgz
+Overlay-Tgz $PrevTgz
 Restart-Dsh
 Set-Content -Path $ResultFile -Value "ROLLED_BACK" -Encoding utf8
 exit 2

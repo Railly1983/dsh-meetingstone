@@ -40,8 +40,11 @@ export function restoreIfLost(file) {
   const snapshot = JSON.parse(readFileSync(file, 'utf8'))
   if (!snapshot || Object.keys(snapshot).length === 0) return false
   const doc = readPatch()
-  const row = meetingstoneRow(doc)
-  if (!row) return false
+  let row = meetingstoneRow(doc)
+  if (!row) {
+    row = { id: 'meetingstone', name: 'dsh-meetingstone', config: {} }
+    doc.push(row)
+  }
   const current = row.config ?? {}
   if (Object.keys(current).length > 0) return false
   row.config = snapshot

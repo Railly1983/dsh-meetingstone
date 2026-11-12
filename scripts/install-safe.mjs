@@ -1,20 +1,21 @@
 #!/usr/bin/env node
 /**
- * 安全安装：Canary 启动验证 → 安装到 desktop → 由独立 watcher 重启并验收（崩溃自动回滚）。
+ * Safe install: Canary boot check -> overlay plugin files -> detached watcher restarts DSH
+ * and verifies there is no new crash log (rolls back on failure).
  *
- * 用法：
- *   node scripts/install-safe.mjs --tgz C:\...\dsh-meetingstone-0.1.0-alpha.2.tgz
- *   node scripts/install-safe.mjs --tgz <new.tgz> --previous <old.tgz>
+ * Why file overlay instead of plugin manager:
+ *   pnpm remove/add rewrites cordis.patch.yml and drops our provider insert rows and
+ *   the meetingstone config (measured twice). Overlaying the package directory keeps
+ *   the profile patch untouched.
  *
- * 退出码：0 已安装并交由 watcher 重启验收；1 Canary 失败（未安装）；3 安装/启动 watcher 失败。
+ * Usage:
+ *   node scripts/install-safe.mjs --tgz <new.tgz> [--previous <old.tgz>] [--no-restart]
  *
- * 为什么重启放在独立 watcher：
- *   本进程是 DSH 的子进程，直接重启 DSH 会把自己一起杀掉，无法再做崩溃检测与回滚。
- *   watcher 通过 WMI 的 Win32_Process.Create 启动，脱离 DSH 进程树。
+ * Exit codes: 0 installed (watcher restarts + verifies); 1 canary failed, desktop untouched;
+ *             3 install/watcher failed.
  */
 import { spawnSync } from 'node:child_process'
-import { snapshotConfig, restoreIfLost } from './patch-config.mjs'
-import { readdirSync, statSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -56,14 +57,26 @@ function sh(command, timeout = 900000) {
   return { status: result.status ?? -1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
 }
 
+/** Overlay package/ from tgz onto the installed plugin directory. */
 function install(target) {
-  const remove = sh(`"${DSH}" plugin --profile desktop remove dsh-meetingstone`)
-  const add = sh(`"${DSH}" plugin --profile desktop add "${target}"`)
-  return { remove, add }
+  const targetDir = join(HOME, 'profiles', 'desktop', 'node_modules', 'dsh-meetingstone')
+  const stage = mkdtempSync(join(tmpdir(), 'ms-stage-'))
+  const extract = sh(`tar -xzf "${target}" -C "${stage}"`, 120000)
+  if (extract.status !== 0) {
+    return { status: extract.status, stdout: extract.stdout, stderr: extract.stderr }
+  }
+  const source = join(stage, 'package')
+  if (!existsSync(source)) {
+    return { status: 1, stdout: '', stderr: 'tgz has no package/ root' }
+  }
+  mkdirSync(targetDir, { recursive: true })
+  cpSync(source, targetDir, { recursive: true, force: true })
+  rmSync(stage, { recursive: true, force: true })
+  return { status: 0, stdout: 'overlaid', stderr: '' }
 }
 
 // 1) Canary
-console.log('[1/3] boot-canary …')
+console.log('[1/3] boot-canary ...')
 const canary = spawnSync(NODE, [join(process.cwd(), 'scripts', 'boot-canary.mjs'), '--tgz', tgz], {
   encoding: 'utf8',
   timeout: 900000,
@@ -76,35 +89,23 @@ if (canary.status !== 0) {
   process.exit(1)
 }
 
-// 2) 安装（先快照 profile patch 的 meetingstone 配置，安装器可能清空它）
-console.log('[2/3] install into desktop …')
-const configSnapshot = join(tmpdir(), `ms-patch-config-${Date.now()}.json`)
-try {
-  const saved = snapshotConfig(configSnapshot)
-  console.log(`[2/3] config snapshot: ${Object.keys(saved).length} keys`)
-} catch (error) {
-  console.error('install-safe: config snapshot warning:', error.message)
-}
+// 2) Overlay install
+console.log('[2/3] overlay into desktop profile ...')
 const startedAt = Date.now()
 const result = install(tgz)
-if (result.add.status !== 0) {
+if (result.status !== 0) {
   console.error('install-safe: install failed')
-  console.error((result.add.stderr || result.add.stdout).split('\n').slice(-8).join('\n'))
+  console.error((result.stderr || result.stdout).split('\n').slice(-8).join('\n'))
   process.exit(3)
-}
-try {
-  if (restoreIfLost(configSnapshot)) console.log('[2/3] profile config restored after install')
-} catch (error) {
-  console.error('install-safe: config restore warning:', error.message)
 }
 console.log('installed.')
 
 if (skipRestart) {
-  console.log('install-safe: --no-restart, done. Restart manually to verify.')
+  console.log('install-safe: --no-restart, done.')
   process.exit(0)
 }
 
-// 3) 独立 watcher 重启并验收
+// 3) Detached watcher restart + crash check + rollback
 const fallback =
   previous ??
   readdirSync(PACKAGES)
@@ -135,11 +136,8 @@ const watcherArgs = [
   `"${resultFile}"`,
 ].join(' ')
 
-const wmiCommand =
-  'powershell.exe ' +
-  watcherArgs.replace(/'/g, "''") +
-  ''
-const outer = `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='${wmiCommand}'} | Out-Null`
+const wmiCommand = 'powershell.exe ' + watcherArgs
+const outer = `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='${wmiCommand.replace(/'/g, "''")}'} | Out-Null`
 const spawned = sh(
   `powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "${outer}"`,
   60000,

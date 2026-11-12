@@ -1,4 +1,4 @@
-/** 恢复 profile 里 meetingstone 行的 channels/roles（安装器会清空 config）。 */
+/** 恢复 profile 里 meetingstone 行的 channels/roles（安装器可能清空或删掉该行）。 */
 import { readFileSync } from 'node:fs'
 import { meetingstoneRow, readPatch, writePatch } from './patch-config.mjs'
 
@@ -38,10 +38,11 @@ const roles = project.roles
   }))
 
 const doc = readPatch()
-const row = meetingstoneRow(doc)
+let row = meetingstoneRow(doc)
 if (!row) {
-  console.error('meetingstone row missing in profile patch')
-  process.exit(1)
+  row = { id: 'meetingstone', name: 'dsh-meetingstone', config: {} }
+  doc.push(row)
+  console.log('inserted missing meetingstone row')
 }
 row.config = {
   ...(row.config ?? {}),
@@ -49,4 +50,4 @@ row.config = {
   roles,
 }
 writePatch(doc)
-console.log(`restored: channels=${channels.length} roles=${roles.length}`)
+console.log(`restored: channels=${channels.length} roles=${roles.length} rows=${doc.length}`)

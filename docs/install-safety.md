@@ -51,6 +51,12 @@ node scripts/install-safe.mjs --tgz <新 tgz> [--previous <旧 tgz>]
 4. watcher 重启 DSH，等待 35 秒，检查是否出现新 crash 日志
 5. 出现崩溃 → 自动重装旧 tgz 并重启；结果写入 `%TEMP%\ms-install-safe-*.result`（`PASS` / `ROLLED_BACK`）
 
+### 4. 文件覆盖安装（不用 plugin manager 重装）
+
+`plugin remove/add` 会重写 `cordis.patch.yml`，实测会丢掉 provider insert 行与 meetingstone 的 channels/roles。
+因此 `install-safe` 现在直接把 tgz 里的 `package/` **覆盖**到 profile 的 `node_modules/dsh-meetingstone`，不触发 pnpm、不改 patch；
+回滚 watcher 也用同样的覆盖方式。
+
 ## 操作规则
 
 1. 发布前**只用** `install:safe`，不手工 remove/add
