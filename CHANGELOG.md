@@ -2,6 +2,44 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.7] - 2026-11-12
+
+### Fixed
+- **dsh（DeepSeek Harness）的模型永远为空、「刷新能力」必失败**（D1 阻塞缺陷 1）。
+  两个叠加成因：
+  - `refreshCli` / `setCliEnabled` 的 `cli` 枚举只有 3 个外部 CLI，
+    而 B2b 已把 CLI 扩到 4 个（多了 `dsh`）→ 网关侧直接拒绝。
+    且仅加枚举不够：业务层 `isKnownCli()` 用 `CLI_NAMES` 会二次拦截。
+    现 dsh 跳过 preflight（宿主内置 in-process 通道没有外部可执行文件，
+    “检测”本身不成立），只刷能力目录；外部 CLI 仍走 preflight + 能力刷新。
+  - 能力目录完全不读插件 channels，只读 provider 行 `--model`；
+    而 in-process 通道的模型声明在 `channel.llmModel` 里（不在 args）。
+    而派单侧 `adapter.js` 认的正是 `llmModel` → 目录与派单两套读法不一致。
+    新增 `channelsToCatalog()`（与派单侧同源）与 `mergeCatalogs()`，
+    channels 优先、provider 行补充。
+- **5 处文案仍教用户去已被删除的右侧栏「本对话角色」**（D1 阻塞缺陷 2）。
+  最严重一条在角色管理面板顶部常驻，用户照做找不到对应面板。
+  根因：`globalRolesNote` 未随 B3 清理；`renderRoleDetail` 的 `scopeGlobal*`
+  提示块在 `showScope:false` 时仍无条件渲染。现提示块服从 `showScope`。
+- 清理 16 个会话/右侧栏概念的死翻译键（zh/en 各一套共 32 行），
+  字典 164 → 148 键，两语言仍逐键对称。
+
+### Changed
+- 契约护栏加强：原先只比较两侧 `typeSymbol`，**枚举取值漂移测不出来** ——
+  这正是本次缺陷逃逸的原因。现增加取值一致性断言。
+
+### Removed
+- 会话覆盖的契约残留：`SESSION_REMOTE_TYPES` 的 4 个会话专用键与 6 个只服务
+  它们的局部函数（两侧同步删除）。remote descriptor 仍为 5 个配置方法。
+- `src/session/config.js` 的 4 个死导出（`diffRoleOverride` / `mergeRolePatch` /
+  `isEmptyPatch` / `removePatchField`）与同源死代码 `normalizeFieldPath`，
+  唯一消费方是已随 B3 删除的 `src/session/store.js`。
+  **注意该文件本身不可删** —— 它有 4 个生产调用方。
+
+### 测试
+- 541 → 551 tests（+10），无删除任何测试用例。
+- 每条新测试都验证过修复前会红（stash 掉修复后 4 failing / 3 failing）。
+
 ## [0.1.0-alpha.6] - 2026-11-12
 
 ### Changed

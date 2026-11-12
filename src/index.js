@@ -74,7 +74,7 @@ export const name = 'meetingstone'
 /** 包名，与 package.json 的 name 一致（补丁按包名解析入口）。 */
 export const PACKAGE_NAME = 'dsh-meetingstone'
 
-export const PLUGIN_VERSION = '0.1.0-alpha.6'
+export const PLUGIN_VERSION = '0.1.0-alpha.7'
 
 /**
  * 插件入口。
