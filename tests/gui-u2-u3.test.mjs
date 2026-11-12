@@ -113,6 +113,33 @@ const CHANNELS = [
   { channelId: 'ch-codex', description: '', kind: 'codex', provider: 'codex', model: 'sol-1', reasoning: 'high' },
 ]
 
+/** B2c：4 CLI 能力目录 fixture（与 Host `global.capabilities` 形状一致）。 */
+const CAPABILITIES = [
+  {
+    id: 'dsh', label: 'DeepSeek Harness', provider: 'spawn',
+    models: [], strengths: [],
+    sources: { models: 'unknown', strengths: 'unknown' }, refreshedAt: null, errors: [],
+  },
+  {
+    id: 'claude', label: 'Claude Code', provider: 'claude-code',
+    models: [{ id: 'sonnet', label: 'Sonnet', provider: 'claude-code', source: 'static' }],
+    strengths: [{ id: 'medium', label: 'Medium', source: 'static' }],
+    sources: { models: 'static', strengths: 'static' }, refreshedAt: null, errors: [],
+  },
+  {
+    id: 'codex', label: 'Codex', provider: 'codex',
+    models: [{ id: 'sol-1', label: 'Sol-1', provider: 'codex', source: 'static' }],
+    strengths: [{ id: 'high', label: 'High', source: 'static' }],
+    sources: { models: 'static', strengths: 'static' }, refreshedAt: null, errors: [],
+  },
+  {
+    id: 'codebuddy', label: 'CodeBuddy', provider: 'acp',
+    models: [{ id: 'm1', label: 'M1', provider: 'acp', source: 'static' }],
+    strengths: [{ id: 'low', label: 'Low', source: 'static' }],
+    sources: { models: 'static', strengths: 'static' }, refreshedAt: null, errors: [],
+  },
+]
+
 function viewWith(roles, extra = {}) {
   return {
     roles,
@@ -128,13 +155,18 @@ test('buildSessionChanges：只产生真实差异；等值 → 空；空名称/�
   const { __test } = await loadClient()
   const t = (key) => key
   const same = __test.draftOfRole(ROLE)
-  assert.deepEqual(__test.buildSessionChanges(t, ROLE, same, CHANNELS).changes, [], '没有修改就不写')
+  assert.deepEqual(
+    __test.buildSessionChanges(t, ROLE, same, CAPABILITIES, CHANNELS).changes,
+    [],
+    '没有修改就不写',
+  )
 
   // B2：单一角色设定；清空 → 恢复继承（不再有独立 prompt 字段）
   const changed = __test.buildSessionChanges(
     t,
     ROLE,
     { ...same, name: '沙僧2', setting: '' },
+    CAPABILITIES,
     CHANNELS,
   )
   assert.equal(changed.error, null)
@@ -143,7 +175,7 @@ test('buildSessionChanges：只产生真实差异；等值 → 空；空名称/�
     { field: 'setting', restore: true },
   ])
 
-  const invalid = __test.buildSessionChanges(t, ROLE, { ...same, name: '   ' }, CHANNELS)
+  const invalid = __test.buildSessionChanges(t, ROLE, { ...same, name: '   ' }, CAPABILITIES, CHANNELS)
   assert.equal(invalid.error, 'detailInvalidName')
   assert.deepEqual(invalid.changes, [])
 })
@@ -153,7 +185,7 @@ test('buildSessionChanges：切换 CLI+模型+强度组合时对齐内部 channe
   const t = (key) => key
   // B2：用户只改 CLI/模型/强度；内部由唯一匹配的已配置组合解析出 channel
   const draft = { ...__test.draftOfRole(ROLE), cli: 'codex', model: 'sol-1', reasoning: 'high' }
-  const built = __test.buildSessionChanges(t, ROLE, draft, CHANNELS)
+  const built = __test.buildSessionChanges(t, ROLE, draft, CAPABILITIES, CHANNELS)
   assert.equal(built.error, null)
   assert.deepEqual(built.changes, [
     { field: 'channel.channelId', value: 'ch-codex' },
@@ -168,9 +200,9 @@ test('buildGlobalPatch：只写差异；设定/组合变更写 setting 与内部
   const { __test } = await loadClient()
   const t = (key) => key
   const same = __test.draftOfRole(ROLE)
-  assert.deepEqual(__test.buildGlobalPatch(t, ROLE, same, CHANNELS).patch, {})
+  assert.deepEqual(__test.buildGlobalPatch(t, ROLE, same, CAPABILITIES, CHANNELS).patch, {})
 
-  const changed = __test.buildGlobalPatch(t, ROLE, { ...same, setting: '新设定' }, CHANNELS)
+  const changed = __test.buildGlobalPatch(t, ROLE, { ...same, setting: '新设定' }, CAPABILITIES, CHANNELS)
   assert.equal(changed.error, null)
   assert.deepEqual(changed.patch, { setting: '新设定' })
 
@@ -178,6 +210,7 @@ test('buildGlobalPatch：只写差异；设定/组合变更写 setting 与内部
     t,
     ROLE,
     { ...same, cli: 'codex', model: 'sol-1', reasoning: 'high' },
+    CAPABILITIES,
     CHANNELS,
   )
   assert.equal(combo.error, null)
@@ -528,11 +561,11 @@ test('B1b buildCreateRolePayload：必须名称+真实组合；payload 与编辑
     name: 'Deck Hand',
     aliases: 'DH, 甲板',
     setting: '负责甲板',
-    cli: 'acp-cli',
+    cli: 'codebuddy',
     model: 'm1',
     reasoning: 'low',
   }
-  const built = __test.buildCreateRolePayload(t, draft, CHANNELS, ['role-sashi'])
+  const built = __test.buildCreateRolePayload(t, draft, CAPABILITIES, CHANNELS, ['role-sashi'])
   assert.equal(built.error, null)
   assert.deepEqual(built.payload, {
     roleId: 'role-deck-hand',
@@ -543,17 +576,18 @@ test('B1b buildCreateRolePayload：必须名称+真实组合；payload 与编辑
     enabled: true,
   })
 
-  const noName = __test.buildCreateRolePayload(t, { ...draft, name: '  ' }, CHANNELS, [])
+  const noName = __test.buildCreateRolePayload(t, { ...draft, name: '  ' }, CAPABILITIES, CHANNELS, [])
   assert.equal(noName.error, 'detailInvalidName')
   assert.equal(noName.payload, null)
 
-  const noCli = __test.buildCreateRolePayload(t, { ...draft, cli: '', model: '', reasoning: '' }, CHANNELS, [])
+  const noCli = __test.buildCreateRolePayload(t, { ...draft, cli: '', model: '', reasoning: '' }, CAPABILITIES, CHANNELS, [])
   assert.equal(noCli.error, 'pendingConfig', '不选 CLI 不得伪造组合')
 
   // 组合在 channels 中不存在 → 待配置（与编辑保存一致），不写假 channel。
   const ghost = __test.buildCreateRolePayload(
     t,
     { ...draft, cli: 'codex', model: 'ghost', reasoning: '' },
+    CAPABILITIES,
     CHANNELS,
     [],
   )
@@ -721,4 +755,152 @@ test('B1b global-writer create/delete：同一 configEditor.edit 路径、角色
   const missing = await writer.deleteRole('role-deck-hand')
   assert.equal(missing.ok, false)
   assert.equal(missing.code, 'GLOBAL_CONFIG_ROLE_NOT_FOUND', '删除失败不改变配置')
+})
+
+test('B2c channelForCombo：CLI/模型 → 内部 channel（provider 映射 + 目录外组合拒绝）', async () => {
+  const { __test } = await loadClient()
+  const t = (key) => key
+  const caps = [
+    {
+      id: 'codex', label: 'Codex', provider: 'codex',
+      models: [{ id: 'gpt-6.1-sol', label: 'Sol', provider: 'codex-sol', source: 'discovered' }],
+      strengths: [{ id: 'high', label: 'High', source: 'discovered' }],
+      sources: { models: 'discovered', strengths: 'discovered' }, refreshedAt: 1, errors: [],
+    },
+    {
+      id: 'codebuddy', label: 'CodeBuddy', provider: 'acp',
+      models: [{ id: 'hy3', label: 'Hy3', provider: 'acp-hy4', source: 'static' }],
+      strengths: [],
+      sources: { models: 'static', strengths: 'unknown' }, refreshedAt: null, errors: [],
+    },
+  ]
+  const hit = __test.channelForCombo(
+    t,
+    { cli: 'codex', model: 'gpt-6.1-sol', reasoning: 'high' },
+    caps,
+    CHANNELS,
+  )
+  assert.equal(hit.error, null)
+  assert.deepEqual(hit.channel, {
+    kind: 'codex',
+    provider: 'codex-sol',
+    model: 'gpt-6.1-sol',
+    reasoning: 'high',
+  })
+
+  const ghost = __test.channelForCombo(
+    t,
+    { cli: 'codex', model: 'nope', reasoning: '' },
+    caps,
+    CHANNELS,
+  )
+  assert.equal(ghost.error, 'pendingConfig', '目录外模型不得伪造组合')
+
+  const noCli = __test.channelForCombo(t, { cli: '', model: '', reasoning: '' }, caps, CHANNELS)
+  assert.equal(noCli.error, 'pendingConfig')
+})
+
+test('B2c buildGlobalPatch：切到无对应实例的 CLI 明确拒绝（不写半套组合）', async () => {
+  const { __test } = await loadClient()
+  const t = (key) => key
+  const role = {
+    roleId: 'role-sashi',
+    name: '沙僧',
+    aliases: [],
+    setting: '骨干',
+    channel: { channelId: 'ch-acp', kind: 'acp-cli', provider: 'acp' },
+  }
+  // claude 在 CHANNELS 里没有实例；旧 channelId 无法在全局层删除 → 明确拒绝。
+  const built = __test.buildGlobalPatch(
+    t,
+    role,
+    { name: '沙僧', aliases: '', setting: '骨干', cli: 'claude', model: 'sonnet', reasoning: '' },
+    CAPABILITIES,
+    CHANNELS,
+  )
+  assert.equal(built.error, 'comboChannelUnsupported')
+})
+
+test('B2c renderRoleDetail：4 CLI 选项（无 ch-*）+ 模型/强度来源 + 未知置灰 + 刷新按钮', async () => {
+  const { __test } = await loadClient()
+  const t = (key) => key
+  const view = viewWith([ROLE], { capabilities: CAPABILITIES })
+  const detail = __test.renderRoleDetail(t, view, 'role-sashi', {
+    scope: 'session',
+    draft: __test.draftOfRole(ROLE),
+    onRefreshCapabilities: () => {},
+  })
+  const strings = collectStrings(detail)
+  for (const label of ['DeepSeek Harness', 'Claude Code', 'Codex', 'CodeBuddy']) {
+    assert.ok(strings.includes(label), `CLI 选项应包含 ${label}`)
+  }
+  assert.ok(!strings.some((value) => String(value).startsWith('ch-')), '不得把 ch-* 当 CLI 显示')
+  assert.ok(strings.includes('refreshCapabilities'), '有「刷新能力」动作')
+  assert.ok(
+    strings.some((value) => String(value).includes('capabilitySource')),
+    '显示能力来源',
+  )
+  assert.ok(
+    strings.some((value) => String(value).includes('M1') && String(value).includes('sourceStatic')),
+    '模型选项带来源标注',
+  )
+
+  // dsh 目录为空 → 模型/强度两个下拉置灰并标「不支持」。
+  const dshDetail = __test.renderRoleDetail(t, view, 'role-sashi', {
+    scope: 'session',
+    draft: { ...__test.draftOfRole(ROLE), cli: 'dsh', model: '', reasoning: '' },
+  })
+  const disabledSelects = collectNodes(dshDetail, (node) => node.type === 'select' && node.props?.disabled === true)
+  assert.ok(disabledSelects.length >= 2, '无模型/强度时置灰而非伪造选项')
+  assert.ok(
+    collectStrings(dshDetail).some((value) => String(value).startsWith('unsupported')),
+    '置灰项标「不支持」',
+  )
+})
+
+test('B2c renderGlobalRoleManager：每行启用开关（状态来自 enabled，pending 时禁用）', async () => {
+  const { __test } = await loadClient()
+  const t = (key) => key
+  const snapshot = __test.normalizeSnapshot({
+    roles: [
+      {
+        roleId: 'role-sashi',
+        name: '沙僧',
+        aliases: [],
+        setting: '骨干',
+        enabled: true,
+        channelId: 'ch-acp',
+        kind: 'acp-cli',
+        provider: 'acp',
+        model: 'm1',
+        reasoning: 'low',
+      },
+      {
+        roleId: 'role-bajie',
+        name: '八戒',
+        aliases: [],
+        setting: '调度',
+        enabled: false,
+        channelId: 'ch-inprocess',
+        kind: 'in-process',
+        provider: 'spawn',
+      },
+    ],
+    channels: [],
+    global: { capabilities: CAPABILITIES },
+  })
+  const tree = __test.renderGlobalRoleManager(t, snapshot, {})
+  const switches = collectNodes(
+    tree,
+    (node) => node.type === 'button' && node.props?.role === 'switch',
+  )
+  assert.equal(switches.length, 2, '每个全局角色行一个开关')
+  assert.deepEqual(switches.map((node) => node.props['aria-checked']), [true, false])
+
+  const pendingTree = __test.renderGlobalRoleManager(t, snapshot, { pendingRoleIds: ['role-sashi'] })
+  const pendingSwitches = collectNodes(
+    pendingTree,
+    (node) => node.type === 'button' && node.props?.role === 'switch',
+  )
+  assert.equal(pendingSwitches[0].props.disabled, true, 'pending 时开关禁用（不做乐观假切换）')
 })

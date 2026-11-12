@@ -404,18 +404,83 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** CLI 能力矩阵收窄（B2）：Host 已聚合；结构不对的项一律丢弃。 */
+    /** B2c：固定 4 个 CLI（与 Host 能力目录 `CLI_IDS` 一致）。 */
+    const CLI_IDS = ['dsh', 'claude', 'codex', 'codebuddy']
+
+    /** CLI id → 内部 channel.kind（B2 契约：保存仍写内部 channel）。 */
+    const CHANNEL_KIND_BY_CLI = {
+      dsh: 'in-process',
+      claude: 'claude-code',
+      codex: 'codex',
+      codebuddy: 'acp-cli',
+    }
+
+    /** 内部 channel.kind → CLI id（旧配置兼容展示）。 */
+    const CLI_BY_CHANNEL_KIND = {
+      'in-process': 'dsh',
+      'claude-code': 'claude',
+      codex: 'codex',
+      'acp-cli': 'codebuddy',
+    }
+
+    /** 能力来源 → i18n key（discovered/static/unknown，不猜）。 */
+    function capabilitySourceKey(source) {
+      if (source === 'discovered') return 'sourceDiscovered'
+      if (source === 'static') return 'sourceStatic'
+      return 'sourceUnknown'
+    }
+
+    /**
+     * 能力条目收窄（B2b）：`{id,label,provider,models[{id,label,provider,source}],
+     * strengths[{id,label,source}],sources,refreshedAt,errors}`；结构不对的项丢弃。
+     */
+    function normalizeCapabilityEntry(item) {
+      const source = asObject(item)
+      const id = asString(source.id)
+      const models = asArray(source.models)
+        .filter((model) => model && typeof model === 'object')
+        .map((model) => ({
+          id: asString(model.id),
+          label: asString(model.label) || asString(model.id),
+          provider: asString(model.provider),
+          source: asString(model.source) || 'unknown',
+        }))
+        .filter((model) => model.id)
+      const strengths = asArray(source.strengths)
+        .filter((strength) => strength && typeof strength === 'object')
+        .map((strength) => ({
+          id: asString(strength.id),
+          label: asString(strength.label) || asString(strength.id),
+          source: asString(strength.source) || 'unknown',
+        }))
+        .filter((strength) => strength.id)
+      const sources = asObject(source.sources)
+      return {
+        id,
+        label: asString(source.label) || id,
+        provider: asString(source.provider),
+        models,
+        strengths,
+        sources: {
+          models: asString(sources.models) || 'unknown',
+          strengths: asString(sources.strengths) || 'unknown',
+        },
+        refreshedAt: Number.isFinite(source.refreshedAt) ? source.refreshedAt : null,
+        errors: asArray(source.errors).map(String).slice(0, 5),
+      }
+    }
+
+    /** CLI 能力目录收窄：接受数组或 `{clis:[]}` 两种形状（B2b 契约）；只保留 4 个已知 CLI。 */
     function normalizeCapabilities(value) {
-      return asArray(value).map((row) => ({
-        cli: asString(row?.cli),
-        label: asString(row?.label) || asString(row?.cli),
-        models: asArray(row?.models).map((item) => ({
-          model: asString(item?.model),
-          efforts: asArray(item?.efforts).map(String),
-        })),
-        efforts: asArray(row?.efforts).map(String),
-        reasoningSupported: row?.reasoningSupported === true,
-      }))
+      const list = Array.isArray(value) ? value : asArray(asObject(value).clis)
+      const byId = new Map()
+      for (const item of list) {
+        if (!item || typeof item !== 'object') continue
+        const entry = normalizeCapabilityEntry(item)
+        if (!CLI_IDS.includes(entry.id) || byId.has(entry.id)) continue
+        byId.set(entry.id, entry)
+      }
+      return CLI_IDS.filter((id) => byId.has(id)).map((id) => byId.get(id))
     }
 
     /** 全局配置视图；缺字段回退到空串/默认值，不猜。 */
@@ -438,8 +503,12 @@ window.__ModuleLoader__.load({
         channels: asArray(source.channels)
           .filter((channel) => channel && typeof channel === 'object')
           .map(normalizeChannelDetail),
-        // B2：CLI→模型→强度 能力矩阵（Host 已按已配置组合聚合；缺失时客户端从 channels 现场推导）
+        // B2b/B2c：4 CLI × 模型 × 强度的能力目录（唯一能力来源；缺失时 UI 显示 4 CLI + 未知）。
         capabilities: normalizeCapabilities(source.capabilities),
+        capabilitiesRefreshedAt: Number.isFinite(source.capabilitiesRefreshedAt)
+          ? source.capabilitiesRefreshedAt
+          : null,
+        capabilitiesErrors: asArray(source.capabilitiesErrors).map(String).slice(0, 10),
         cli: normalizeCli(source.cli),
         cliError: asString(source.cliError) || null,
       }
@@ -1104,6 +1173,17 @@ window.__ModuleLoader__.load({
       globalRoleBadge: '全局',
       managerClose: '收起',
       managerOpenLabel: '打开全局角色管理',
+      capabilitySource: '能力来源',
+      sourceModels: '模型',
+      sourceStrengths: '强度',
+      sourceDiscovered: '动态',
+      sourceStatic: '静态',
+      sourceUnknown: '未知',
+      refreshCapabilities: '刷新能力',
+      refreshing: '刷新中…',
+      capabilityUnknown: '能力目录不可用（未知）',
+      comboChannelUnsupported:
+        '该角色仍引用旧执行组合，无法在全局层直接切换到没有对应实例的 CLI；请选择其它 CLI，或由维护者清理 profile。',
       addRole: '新增角色',
       createRoleTitle: '新建全局角色',
       createRoleHint: '角色 ID 自动生成（role-<名称>，冲突自动加序号）；保存后写入 profile，对所有会话生效。',
@@ -1267,6 +1347,17 @@ window.__ModuleLoader__.load({
       globalRoleBadge: 'Global',
       managerClose: 'Collapse',
       managerOpenLabel: 'Open global role management',
+      capabilitySource: 'Capability source',
+      sourceModels: 'Models',
+      sourceStrengths: 'Strengths',
+      sourceDiscovered: 'dynamic',
+      sourceStatic: 'static',
+      sourceUnknown: 'unknown',
+      refreshCapabilities: 'Refresh capabilities',
+      refreshing: 'Refreshing…',
+      capabilityUnknown: 'Capability catalog unavailable (unknown)',
+      comboChannelUnsupported:
+        'This role still references an old execution combo, so switching to a CLI without a matching instance is not possible at the global layer; pick another CLI or ask the maintainer to clean the profile.',
       addRole: 'Add role',
       createRoleTitle: 'New global role',
       createRoleHint:
@@ -1713,6 +1804,8 @@ window.__ModuleLoader__.load({
         typeof opts.onConfirmDelete === 'function' ? opts.onConfirmDelete : () => {}
       const onCancelDelete =
         typeof opts.onCancelDelete === 'function' ? opts.onCancelDelete : () => {}
+      const pendingRoleIds = new Set(asArray(opts.pendingRoleIds).map(String))
+      const onToggleRole = typeof opts.onToggleRole === 'function' ? opts.onToggleRole : () => {}
       const header = jsxs('div', {
         style: alignRow,
         children: [
@@ -1756,6 +1849,8 @@ window.__ModuleLoader__.load({
               onDraft: opts.onDraft,
               onSave: opts.onSave,
               onCancelConfirm: opts.onCancelConfirm,
+              refreshing: opts.refreshing === true,
+              onRefreshCapabilities: opts.onRefreshCapabilities,
             }),
             creating
               ? null
@@ -1840,9 +1935,13 @@ window.__ModuleLoader__.load({
                           onClick: () => onSelect(role.roleId),
                           children: role.name || role.roleId || t('unknown'),
                         }),
-                        jsx('span', {
-                          style: { ...meta, color: C.tertiary },
-                          children: role.enabled === true ? t('roleEnabled') : t('roleDisabled'),
+                        jsx(Switch, {
+                          checked: role.enabled === true,
+                          label: `${t('roleSwitchLabel')}: ${role.name || role.roleId}`,
+                          title: role.enabled === true ? t('roleEnabled') : t('roleDisabled'),
+                          disabled: pendingRoleIds.has(role.roleId),
+                          color: asObject(role.state).color,
+                          onChange: (next) => onToggleRole(role.roleId, next),
                         }),
                       ],
                     },
@@ -1902,6 +2001,9 @@ window.__ModuleLoader__.load({
       const [managerConfirming, setManagerConfirming] = react.useState(false)
       const [managerDeleteConfirming, setManagerDeleteConfirming] = react.useState(false)
       const [managerError, setManagerError] = react.useState(null)
+      // B2c：角色启用开关 pending + 能力刷新中。
+      const [managerPendingRoleIds, setManagerPendingRoleIds] = react.useState([])
+      const [managerRefreshing, setManagerRefreshing] = react.useState(false)
 
       react.useEffect(() => {
         let current = true
@@ -2105,7 +2207,13 @@ window.__ModuleLoader__.load({
             setManagerError({ code: 'REMOTE_UNAVAILABLE', message: t('remoteUnavailableHint') })
             return
           }
-          const built = buildCreateRolePayload(t, managerDraft, channels, asArray(state.snapshot?.roles).map((item) => item.roleId))
+          const built = buildCreateRolePayload(
+            t,
+            managerDraft,
+            capabilitiesOf(state.snapshot),
+            channels,
+            asArray(state.snapshot?.roles).map((item) => item.roleId),
+          )
           if (built.error) {
             setManagerConfirming(false)
             setManagerError({ code: 'DETAIL_INVALID', message: built.error })
@@ -2136,7 +2244,7 @@ window.__ModuleLoader__.load({
           setManagerError({ code: 'REMOTE_UNAVAILABLE', message: t('remoteUnavailableHint') })
           return
         }
-        const built = buildGlobalPatch(t, role, managerDraft, channels)
+        const built = buildGlobalPatch(t, role, managerDraft, capabilitiesOf(state.snapshot), channels)
         if (built.error) {
           setManagerConfirming(false)
           setManagerError({ code: 'DETAIL_INVALID', message: built.error })
@@ -2197,6 +2305,59 @@ window.__ModuleLoader__.load({
         backToManagerList()
       }
 
+      /** B2c：全局角色启用开关（写 profile enabled；失败不回滚假象，重新拉快照）。 */
+      async function toggleManagerRole(roleId, next) {
+        if (typeof updateGlobalRole !== 'function') {
+          setManagerError({ code: 'REMOTE_UNAVAILABLE', message: t('remoteUnavailableHint') })
+          return
+        }
+        setManagerPendingRoleIds((previous) => [...previous, roleId])
+        setManagerError(null)
+        const result = await updateGlobalRole(roleId, { enabled: next === true })
+        setManagerPendingRoleIds((previous) => previous.filter((id) => id !== roleId))
+        if (!result || result.ok !== true) {
+          setManagerError(result?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' })
+          return
+        }
+        const loaded = await reloadSnapshot()
+        if (loaded && loaded.ok === true) {
+          const role = asArray(loaded.view?.roles).find((item) => item.roleId === roleId)
+          setManagerDraft(role ? draftOfRole(role) : null)
+        }
+      }
+
+      /** B2c：刷新当前 CLI 的能力目录（模型/强度），只更新本地快照，不写配置。 */
+      async function refreshManagerCapabilities(cli) {
+        if (typeof refreshCli !== 'function' || !cli) return
+        setManagerRefreshing(true)
+        const result = await refreshCli(cli, true)
+        setManagerRefreshing(false)
+        if (!result || result.ok !== true) {
+          setManagerError(result?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' })
+          return
+        }
+        const payload = asObject(result.value)
+        const capabilities = normalizeCapabilities(payload.capabilities)
+        if (capabilities.length > 0) {
+          setState((previous) =>
+            previous.status === 'ready'
+              ? {
+                  ...previous,
+                  snapshot: {
+                    ...previous.snapshot,
+                    global: {
+                      ...(previous.snapshot.global ?? {}),
+                      capabilities,
+                      capabilitiesRefreshedAt: Date.now(),
+                    },
+                  },
+                }
+              : previous,
+          )
+        }
+        setManagerError(null)
+      }
+
       if (state.status === 'loading') {
         return jsx('div', {
           style: root,
@@ -2254,6 +2415,10 @@ window.__ModuleLoader__.load({
                   onRequestDelete: requestDeleteManagerRole,
                   onConfirmDelete: confirmDeleteManagerRole,
                   onCancelDelete: cancelDeleteManagerRole,
+                  onToggleRole: toggleManagerRole,
+                  pendingRoleIds: managerPendingRoleIds,
+                  onRefreshCapabilities: () => refreshManagerCapabilities(managerDraft?.cli),
+                  refreshing: managerRefreshing,
                   onClose: closeManager,
                 },
                 onToggleCli: toggleCli,
@@ -2600,11 +2765,13 @@ window.__ModuleLoader__.load({
       const channel = asObject(role?.channel)
       const setting =
         asString(role?.setting) || asString(role?.prompt) || asString(role?.description)
+      const kind = asString(channel.kind) || asString(role?.kind)
       return {
         name: asString(role?.name),
         aliases: asArray(role?.aliases).map(String).join(', '),
         setting,
-        cli: asString(channel.kind) || asString(role?.kind),
+        // B2c：CLI 用 4 个固定 id（旧 channel.kind 映射；未知 kind 不猜，留空由用户重选）
+        cli: CLI_BY_CHANNEL_KIND[kind] ?? '',
         model: asString(channel.model) || asString(role?.model),
         reasoning: asString(channel.reasoning) || asString(role?.reasoning),
       }
@@ -2650,25 +2817,18 @@ window.__ModuleLoader__.load({
      * 新建全局角色 payload（B1b）：roleId 系统生成 + 名称/简称/设定 + B2 的
      * CLI→模型→强度组合解析；组合不唯一/不支持时返回与编辑保存一致的错误（不伪造 channel）。
      */
-    function buildCreateRolePayload(t, draft, channels, existingRoleIds) {
+    function buildCreateRolePayload(t, draft, capabilities, channels, existingRoleIds) {
       const name = asString(draft?.name).trim()
       if (!name) return { payload: null, error: t('detailInvalidName') }
-      const combo = comboOf(draft, channels)
-      if (!combo.cli) return { payload: null, error: t('pendingConfig') }
-      if (!combo.instance) return { payload: null, error: t('pendingConfig') }
-      const instance = combo.instance
-      const channel = { channelId: asString(instance.channelId) }
-      for (const key of ['kind', 'provider', 'model', 'reasoning']) {
-        const value = asString(instance[key])
-        if (value) channel[key] = value
-      }
+      const built = channelForCombo(t, draft, capabilities, channels)
+      if (built.error || !built.channel) return { payload: null, error: built.error ?? t('pendingConfig') }
       return {
         payload: {
           roleId: generateRoleId(name, existingRoleIds),
           name,
           aliases: parseAliases(draft?.aliases),
           setting: asString(draft?.setting),
-          channel,
+          channel: built.channel,
           enabled: true,
         },
         error: null,
@@ -2702,97 +2862,129 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * CLI 能力矩阵（B2）：优先用 host 快照里的 `global.capabilities`；
-     * 旧快照没有时从 channels 现场聚合（结果等价，不伪造）。
+     * B2c：4 CLI 能力目录（唯一能力来源）。优先 `view.capabilities`（侧栏合并）或
+     * `view.global.capabilities`（设置页快照）；旧快照缺失时按 channels 兼容推导，
+     * 但**永远**补齐 4 个固定 CLI（空目录 = 未知），不再把 ch-* 当 CLI 展示。
      * @param {any} view
      */
     function capabilitiesOf(view) {
-      const fromHost = asArray(view?.global?.capabilities)
-      if (fromHost.length > 0) return fromHost
-      // 旧快照/侧栏视图没有 capabilities 时：优先用 global.channels（含模型/强度），再退化到 channels
-      const detailed = asArray(view?.global?.channels)
-      const channels = detailed.length > 0 ? detailed : asArray(view?.channels)
+      const direct = normalizeCapabilities(view?.capabilities)
+      const fromGlobal = normalizeCapabilities(view?.global?.capabilities)
+      const list = direct.length > 0 ? direct : fromGlobal.length > 0 ? fromGlobal : []
       /** @type {Map<string, any>} */
-      const byCli = new Map()
-      for (const channel of channels) {
-        const cli = asString(channel?.kind)
-        if (!cli) continue
-        let row = byCli.get(cli)
-        if (!row) {
-          row = { cli, label: cli, models: new Map(), efforts: new Set() }
-          byCli.set(cli, row)
+      const byId = new Map(list.map((entry) => [entry.id, entry]))
+      if (byId.size === 0) {
+        // 旧快照兜底：从 channel 实例推导（仅兼容旧数据，不等于真实能力目录）。
+        const detailed = asArray(view?.global?.channels)
+        const channels = detailed.length > 0 ? detailed : asArray(view?.channels)
+        for (const channel of channels) {
+          const id = CLI_BY_CHANNEL_KIND[asString(channel?.kind)]
+          if (!id) continue
+          let entry = byId.get(id)
+          if (!entry) {
+            entry = {
+              id,
+              label: id,
+              provider: asString(channel?.provider),
+              models: [],
+              strengths: [],
+              sources: { models: 'unknown', strengths: 'unknown' },
+              refreshedAt: null,
+              errors: [],
+            }
+            byId.set(id, entry)
+          }
+          const model = asString(channel?.model)
+          if (model && !entry.models.some((item) => item.id === model)) {
+            entry.models.push({ id: model, label: model, provider: asString(channel?.provider), source: 'unknown' })
+          }
+          const reasoning = asString(channel?.reasoning)
+          if (reasoning && !entry.strengths.some((item) => item.id === reasoning)) {
+            entry.strengths.push({ id: reasoning, label: reasoning, source: 'unknown' })
+          }
         }
-        const model = asString(channel?.model)
-        const reasoning = asString(channel?.reasoning)
-        if (reasoning) row.efforts.add(reasoning)
-        if (!model) continue
-        let entry = row.models.get(model)
-        if (!entry) {
-          entry = { effects: [], efforts: new Set() }
-          row.models.set(model, entry)
-        }
-        if (reasoning) entry.efforts.add(reasoning)
       }
-      return [...byCli.values()].map((row) => {
-        const models = [...row.models.entries()].map(([model, entry]) => ({
-          model,
-          efforts: [...entry.efforts],
-        }))
-        return {
-          cli: row.cli,
-          label: row.label,
-          models,
-          efforts: [...row.efforts],
-          reasoningSupported: row.efforts.size > 0,
-        }
-      })
+      // 固定 4 个 CLI：缺失项补空目录（source=unknown），保证下拉始终 4 项。
+      return CLI_IDS.map(
+        (id) =>
+          byId.get(id) ?? {
+            id,
+            label: id,
+            provider: '',
+            models: [],
+            strengths: [],
+            sources: { models: 'unknown', strengths: 'unknown' },
+            refreshedAt: null,
+            errors: [],
+          },
+      )
     }
 
-    /** 按「CLI + 模型 + 强度」在已配置组合里找唯一匹配项（找不到 → null，由保存时报待配置）。 */
-    function comboOf(draft, channels) {
-      const cli = asString(draft?.cli)
-      const model = asString(draft?.model)
-      const reasoning = asString(draft?.reasoning)
-      const list = asArray(channels)
-      if (!cli) return { instance: null, cli, model, reasoning }
-      const instance = list.find(
-        (item) =>
-          asString(item?.kind) === cli &&
-          (!model || asString(item?.model) === model) &&
-          (!reasoning || asString(item?.reasoning) === reasoning),
-      )
-      return { instance: instance ?? null, cli, model, reasoning }
+    /** 当前 CLI 条目（null = 未知 CLI）。 */
+    function cliEntryOf(view, cli) {
+      return capabilitiesOf(view).find((item) => item.id === cli) ?? null
     }
 
     /**
-     * 详情页的「CLI / 模型 / 思考强度」选项：只来自真实已配置组合。
-     * 联动：选 CLI → 该 CLI 的模型；选模型 → 该模型声明过的强度；没有声明 → 显示不支持。
+     * B2c：把 draft 的「CLI + 模型 + 强度」映射成内部 B2 channel 形状
+     * `{ kind, provider, model, reasoning, channelId? }`（不伪造；目录里没有的组合拒绝保存）。
+     * @returns {{ channel: any | null, error: string | null }}
+     */
+    function channelForCombo(t, draft, capabilities, channels) {
+      const cli = asString(draft?.cli)
+      if (!cli) return { channel: null, error: t('pendingConfig') }
+      const entry =
+        asArray(capabilities).find((item) => item?.id === cli) ?? cliEntryOf({ capabilities }, cli)
+      if (!entry) return { channel: null, error: t('pendingConfig') }
+      const modelId = asString(draft?.model)
+      if (modelId && !asArray(entry.models).some((item) => item.id === modelId)) {
+        return { channel: null, error: t('pendingConfig') }
+      }
+      const strengthId = asString(draft?.reasoning)
+      if (strengthId && !asArray(entry.strengths).some((item) => item.id === strengthId)) {
+        return { channel: null, error: t('pendingConfig') }
+      }
+      const kind = CHANNEL_KIND_BY_CLI[cli]
+      const modelEntry = modelId ? asArray(entry.models).find((item) => item.id === modelId) : null
+      const provider = asString(modelEntry?.provider) || asString(entry.provider)
+      if (!kind || !provider) return { channel: null, error: t('pendingConfig') }
+      const instance = asArray(channels).find(
+        (item) =>
+          asString(item?.kind) === kind &&
+          asString(item?.provider) === provider &&
+          (!modelId || !asString(item?.model) || asString(item?.model) === modelId) &&
+          (!strengthId || !asString(item?.reasoning) || asString(item?.reasoning) === strengthId),
+      )
+      /** @type {Record<string, string>} */
+      const channel = {}
+      if (instance && asString(instance.channelId)) channel.channelId = asString(instance.channelId)
+      channel.kind = kind
+      channel.provider = provider
+      if (modelId) channel.model = modelId
+      if (strengthId) channel.reasoning = strengthId
+      return { channel, error: null }
+    }
+
+    /**
+     * 详情页的「CLI / 模型 / 思考强度」选项（B2c：来自 4 CLI 能力目录，不伪造）。
      * @param {any} view
      * @param {any} role
      * @param {any} draft
      */
     function detailOptionsOf(view, role, draft) {
       const capabilities = capabilitiesOf(view)
-      const cli = asString(draft?.cli) || asString(role?.channel?.kind) || asString(role?.kind)
-      const row = capabilities.find((item) => item.cli === cli) ?? null
-      const models = row ? row.models.map((item) => item.model) : []
-      const model = asString(draft?.model)
-      const effortSet = new Set()
-      if (row) {
-        for (const item of row.models) {
-          if (model && item.model !== model) continue
-          for (const effort of item.efforts) effortSet.add(effort)
-        }
-      }
-      const efforts = [...effortSet]
+      const kind = asString(role?.channel?.kind) || asString(role?.kind)
+      const cli = asString(draft?.cli) || CLI_BY_CHANNEL_KIND[kind] || ''
+      const entry = capabilities.find((item) => item.id === cli) ?? null
       return {
         capabilities,
         clis: capabilities,
-        row,
+        entry,
         cli,
-        models,
-        efforts,
-        reasoningSupported: efforts.length > 0,
+        models: entry ? entry.models : [],
+        strengths: entry ? entry.strengths : [],
+        sources: entry ? entry.sources : { models: 'unknown', strengths: 'unknown' },
+        refreshedAt: entry ? entry.refreshedAt : null,
       }
     }
 
@@ -2802,7 +2994,7 @@ window.__ModuleLoader__.load({
      * - 切换通道实例时把 kind/provider/model/reasoning 一起对齐（避免派单 CHANNEL_MISMATCH）。
      * @returns {{ changes: Array<{field: string, value?: any, restore?: true}>, error: string | null }}
      */
-    function buildSessionChanges(t, role, draft, channels) {
+    function buildSessionChanges(t, role, draft, capabilities, channels) {
       const changes = []
       const current = asObject(role?.channel)
       const name = asString(draft?.name).trim()
@@ -2824,36 +3016,16 @@ window.__ModuleLoader__.load({
         else changes.push({ field: 'setting', value: setting })
       }
 
-      const combo = comboOf(draft, channels)
-      const targetChannelId = combo.instance ? asString(combo.instance.channelId) : ''
-      if (!combo.instance && (combo.cli || combo.model || combo.reasoning)) {
-        return { changes, error: t('pendingConfig') }
-      }
-      if (targetChannelId !== asString(current.channelId)) {
-        if (!targetChannelId) {
-          for (const key of ['channelId', 'kind', 'provider', 'model', 'reasoning']) {
-            changes.push({ field: `channel.${key}`, restore: true })
-          }
-        } else {
-          const instance = combo.instance
-          changes.push({ field: 'channel.channelId', value: targetChannelId })
-          if (asString(instance.kind)) changes.push({ field: 'channel.kind', value: asString(instance.kind) })
-          if (asString(instance.provider)) {
-            changes.push({ field: 'channel.provider', value: asString(instance.provider) })
-          }
-          for (const key of ['model', 'reasoning']) {
-            const value = asString(instance[key])
-            if (value) changes.push({ field: `channel.${key}`, value })
-            else if (asString(current[key])) changes.push({ field: `channel.${key}`, restore: true })
-          }
-        }
-      } else {
-        for (const key of ['model', 'reasoning']) {
-          const value = asString(draft?.[key])
-          if (value === asString(current[key])) continue
-          if (!value) changes.push({ field: `channel.${key}`, restore: true })
-          else changes.push({ field: `channel.${key}`, value })
-        }
+      // B2c：CLI + 模型 + 强度 → 内部 channel（按能力目录映射，不伪造组合）。
+      const built = channelForCombo(t, draft, capabilities, channels)
+      if (built.error || !built.channel) return { changes, error: built.error ?? t('pendingConfig') }
+      const target = built.channel
+      for (const key of ['channelId', 'kind', 'provider', 'model', 'reasoning']) {
+        const next = asString(target[key])
+        const previous = asString(current[key])
+        if (next === previous) continue
+        if (!next) changes.push({ field: `channel.${key}`, restore: true })
+        else changes.push({ field: `channel.${key}`, value: next })
       }
       return { changes, error: null }
     }
@@ -2863,7 +3035,7 @@ window.__ModuleLoader__.load({
      * 全局层没有「删除字段」语义，Prompt/名称留空视为无效输入。
      * @returns {{ patch: Record<string, any>, error: string | null }}
      */
-    function buildGlobalPatch(t, role, draft, channels) {
+    function buildGlobalPatch(t, role, draft, capabilities, channels) {
       /** @type {Record<string, any>} */
       const patch = {}
       const name = asString(draft?.name).trim()
@@ -2879,28 +3051,23 @@ window.__ModuleLoader__.load({
         asString(role?.setting) || asString(role?.prompt) || asString(role?.description)
       if (setting !== currentSetting) patch.setting = setting
 
+      // B2c：CLI + 模型 + 强度 → 内部 channel；全局层是字段合并（不能删旧 channelId）。
       const current = asObject(role?.channel)
-      const combo = comboOf(draft, channels)
-      const targetChannelId = combo.instance ? asString(combo.instance.channelId) : ''
-      if (!combo.instance && (combo.cli || combo.model || combo.reasoning)) {
-        return { patch, error: t('pendingConfig') }
-      }
+      const built = channelForCombo(t, draft, capabilities, channels)
+      if (built.error || !built.channel) return { patch, error: built.error ?? t('pendingConfig') }
+      const target = built.channel
       /** @type {Record<string, string>} */
       const channelPatch = {}
-      if (targetChannelId !== asString(current.channelId)) {
-        if (!targetChannelId) return { patch, error: t('scopeGlobalBlocked') }
-        const instance = combo.instance
-        channelPatch.channelId = targetChannelId
-        if (asString(instance.kind)) channelPatch.kind = asString(instance.kind)
-        if (asString(instance.provider)) channelPatch.provider = asString(instance.provider)
-        if (asString(instance.model)) channelPatch.model = asString(instance.model)
-        if (asString(instance.reasoning)) channelPatch.reasoning = asString(instance.reasoning)
-      } else {
-        for (const key of ['model', 'reasoning']) {
-          const value = asString(draft?.[key])
-          if (!value) continue
-          if (value !== asString(current[key])) channelPatch[key] = value
+      for (const key of ['channelId', 'kind', 'provider', 'model', 'reasoning']) {
+        const next = asString(target[key])
+        const previous = asString(current[key])
+        if (next === previous) continue
+        if (!next) {
+          // 全局字段合并没有删除语义：旧 channelId 无法清空 → 明确拒绝而不是写出半套组合。
+          if (key === 'channelId' && previous) return { patch, error: t('comboChannelUnsupported') }
+          continue
         }
+        channelPatch[key] = next
       }
       if (Object.keys(channelPatch).length > 0) patch.channel = channelPatch
       return { patch, error: null }
@@ -2993,6 +3160,8 @@ window.__ModuleLoader__.load({
      *   confirming?: boolean,
      *   error?: any,
      *   showScope?: boolean,
+     *   refreshing?: boolean,
+     *   onRefreshCapabilities?: Function,
      * }} [opts]
      */
     function renderRoleDetail(t, view, roleId, opts = {}) {
@@ -3025,7 +3194,11 @@ window.__ModuleLoader__.load({
           onChange: (event) => onDraft(field, event?.target?.value ?? ''),
           ...extra,
         })
-      // B2：CLI → 模型 → 思考强度 三级联动（选项只来自已配置组合，不伪造）
+      // B2c：CLI → 模型 → 思考强度（4 CLI 能力目录；来源可观测，不伪造）
+      const sourceText = (source) => t(capabilitySourceKey(source))
+      const capabilityNote = options.entry
+        ? `${t('capabilitySource')}: ${t('sourceModels')}=${sourceText(options.sources.models)} · ${t('sourceStrengths')}=${sourceText(options.sources.strengths)}`
+        : t('capabilityUnknown')
       const cliControl =
         options.clis.length === 0
           ? jsx('span', { style: noteStyle, children: t('pendingConfig') })
@@ -3041,14 +3214,23 @@ window.__ModuleLoader__.load({
               children: options.clis.map((item) =>
                 jsx(
                   'option',
-                  { value: item.cli, children: item.label || item.cli },
-                  `cli-${item.cli}`,
+                  { value: item.id, children: item.label || item.id },
+                  `cli-${item.id}`,
                 ),
               ),
             })
+      // 模型：来自能力目录；来源标注（动态/静态/未知），空目录置灰并标「不支持」。
       const modelControl =
         options.models.length === 0
-          ? jsx('span', { style: noteStyle, children: `${t('unsupported')} · ${t('noModelOptions')}` })
+          ? jsx('select', {
+              style: { ...inputStyle, color: C.tertiary },
+              disabled: true,
+              value: '',
+              children: jsx('option', {
+                value: '',
+                children: `${t('unsupported')} · ${t('noModelOptions')}`,
+              }),
+            })
           : jsxs('select', {
               style: inputStyle,
               value: asString(draft.model),
@@ -3057,22 +3239,53 @@ window.__ModuleLoader__.load({
                 onDraft('model', event?.target?.value ?? '')
                 onDraft('reasoning', '')
               },
-              children: options.models.map((value) => jsx('option', { value, children: value }, `model-${value}`)),
+              children: [
+                jsx('option', { value: '', children: t('fieldUnset') }, 'model-unset'),
+                ...options.models.map((item) =>
+                  jsx(
+                    'option',
+                    {
+                      value: item.id,
+                      children: `${item.label || item.id} · ${sourceText(item.source)}`,
+                    },
+                    `model-${item.id}`,
+                  ),
+                ),
+              ],
             })
-      const reasoningControl = !options.reasoningSupported
-        ? jsx('span', { style: noteStyle, children: `${t('unsupported')} · ${t('noReasoningOptions')}` })
-        : jsxs('select', {
-            style: inputStyle,
-            value: asString(draft.reasoning),
-            disabled,
-            onChange: (event) => onDraft('reasoning', event?.target?.value ?? ''),
-            children: [
-              jsx('option', { value: '', children: t('fieldUnset') }, 'reasoning-unset'),
-              ...options.efforts.map((value) =>
-                jsx('option', { value, children: value }, `reasoning-${value}`),
-              ),
-            ],
-          })
+      // 思考强度：来自能力目录；空/未知 → 置灰并标「不支持」（不伪造）。
+      const reasoningControl =
+        options.strengths.length === 0
+          ? jsx('select', {
+              style: { ...inputStyle, color: C.tertiary },
+              disabled: true,
+              value: '',
+              children: jsx('option', {
+                value: '',
+                children: `${t('unsupported')} · ${t('noReasoningOptions')}`,
+              }),
+            })
+          : jsxs('select', {
+              style: inputStyle,
+              value: asString(draft.reasoning),
+              disabled,
+              onChange: (event) => onDraft('reasoning', event?.target?.value ?? ''),
+              children: [
+                jsx('option', { value: '', children: t('fieldUnset') }, 'reasoning-unset'),
+                ...options.strengths.map((item) =>
+                  jsx(
+                    'option',
+                    {
+                      value: item.id,
+                      children: `${item.label || item.id} · ${sourceText(item.source)}`,
+                    },
+                    `reasoning-${item.id}`,
+                  ),
+                ),
+              ],
+            })
+
+
 
       const fields = [
         detailField(t, {
@@ -3117,6 +3330,7 @@ window.__ModuleLoader__.load({
           onRestore: () => onRestore('channel.kind'),
           disabled,
           control: cliControl,
+          note: capabilityNote,
         }),
         detailField(t, {
           key: 'model',
@@ -3155,6 +3369,14 @@ window.__ModuleLoader__.load({
                 children: opts.title ? String(opts.title) : role.name || role.roleId,
               }),
               jsx(Tag, { tone: roleColorTone(asObject(role.state).color), children: t('detailTitle') }),
+              jsx('span', { style: grow }),
+              jsx('button', {
+                type: 'button',
+                style: linkButton,
+                disabled: opts.refreshing === true,
+                onClick: opts.onRefreshCapabilities,
+                children: opts.refreshing === true ? t('refreshing') : t('refreshCapabilities'),
+              }),
             ],
           }),
           showScope
@@ -3413,12 +3635,17 @@ window.__ModuleLoader__.load({
     function SidebarRolePane({
       t,
       loadSession,
+      loadCapabilities,
+      refreshCli,
       setOverride,
       clearOverride,
     }) {
       const [state, setState] = react.useState({ status: 'loading' })
       const [selectedRoleId, setSelectedRoleId] = react.useState('')
       const [draft, setDraft] = react.useState(null)
+      // B2c：侧栏也需要能力目录（4 CLI/模型/强度）；来自无参 list()，不影响会话覆盖数据源。
+      const [capabilities, setCapabilities] = react.useState([])
+      const [refreshing, setRefreshing] = react.useState(false)
       const [pendingRoleIds, setPendingRoleIds] = react.useState([])
       const [saving, setSaving] = react.useState(false)
       const [confirming, setConfirming] = react.useState(false)
@@ -3460,6 +3687,41 @@ window.__ModuleLoader__.load({
         }
       }, [loadSession])
 
+      // B2c：能力目录（无参 list() 快照），用于编辑器 4 CLI / 模型 / 强度联动。
+      react.useEffect(() => {
+        let current = true
+        Promise.resolve()
+          .then(() => (typeof loadCapabilities === 'function' ? loadCapabilities() : []))
+          .then(
+            (list) => {
+              if (current) setCapabilities(asArray(list))
+            },
+            () => {
+              if (current) setCapabilities([])
+            },
+          )
+        return () => {
+          current = false
+        }
+      }, [loadCapabilities])
+
+      /** B2c：刷新当前 CLI 能力（refreshCli），只更新本地目录，不写角色配置。 */
+      async function refreshCapabilities() {
+        const cli = asString(draft?.cli)
+        if (typeof refreshCli !== 'function' || !cli) return
+        setRefreshing(true)
+        const result = await refreshCli(cli, true)
+        setRefreshing(false)
+        if (!result || result.ok !== true) {
+          setActionError(result?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' })
+          return
+        }
+        const payload = asObject(result.value)
+        const list = normalizeCapabilities(payload.capabilities)
+        if (list.length > 0) setCapabilities(list)
+        setActionError(null)
+      }
+
       /** 重新读取会话视图（写操作后刷新；失败不覆盖当前列表）。 */
       async function reload() {
         const result = await loadSession()
@@ -3489,16 +3751,13 @@ window.__ModuleLoader__.load({
         setActionError(null)
       }
 
-      /** 改 draft；切换通道实例时把模型/强度带成该实例的值。 */
+      /** 改 draft；切 CLI 时清空模型/强度，避免残留不属于该 CLI 的组合。 */
       function updateDraft(field, value) {
         setDraft((previous) => {
           const next = { ...(previous ?? {}), [field]: value }
-          if (field === 'channelId') {
-            const instance = asArray(state.view?.channels).find(
-              (channel) => asString(channel.channelId) === asString(value),
-            )
-            next.model = instance ? asString(instance.model) : ''
-            next.reasoning = instance ? asString(instance.reasoning) : ''
+          if (field === 'cli') {
+            next.model = ''
+            next.reasoning = ''
           }
           return next
         })
@@ -3547,7 +3806,7 @@ window.__ModuleLoader__.load({
         const role = asArray(state.view?.roles).find((item) => item.roleId === selectedRoleId)
         if (!role || !draft) return
 
-        const built = buildSessionChanges(t, role, draft, state.view?.channels)
+        const built = buildSessionChanges(t, role, draft, capabilitiesOf({ capabilities }), state.view?.channels)
         if (built.error) {
           setActionError({ code: 'DETAIL_INVALID', message: built.error })
           return
@@ -3575,11 +3834,16 @@ window.__ModuleLoader__.load({
       if (state.status === 'loading') return renderPaneLoading(t)
       if (state.status === 'error') return renderPaneError(t, state.error)
       const warnings = asArray(state.view?.warnings).map((item) => asString(item.message)).filter(Boolean)
+      // B2c：把能力目录并入视图（renderRoleDetail / 保存映射都读它）。
+      const capabilityView =
+        Array.isArray(capabilities) && capabilities.length > 0
+          ? { ...state.view, capabilities }
+          : state.view
       return safeRender(
         'sidebar',
         'render',
         () =>
-          renderRolePane(t, state.view, {
+          renderRolePane(t, capabilityView, {
             selectedRoleId,
             draft,
             saving,
@@ -3597,6 +3861,8 @@ window.__ModuleLoader__.load({
             onRestore: restoreField,
             onCancelConfirm: () => setConfirming(false),
             onToggleRole: toggleRole,
+            refreshing,
+            onRefreshCapabilities: refreshCapabilities,
           }),
         () => renderPaneError(t, { code: 'RENDER_FAILED', message: t('renderFailed') }),
       )
@@ -3685,6 +3951,8 @@ window.__ModuleLoader__.load({
       const loadSession = makeSessionConfigLoader(deps.getService, deps.mountError)
       const sessionActions =
         deps.sessionActions ?? makeSessionActions(deps.getService, deps.mountError)
+      const configActions = deps.configActions ?? makeConfigActions(deps.getService, deps.mountError)
+      const loadSnapshot = makeLoader(deps.getService, deps.mountError)
       // 2) keyed seats（scope session；B1 起右侧栏不再承载全局编辑）
       slotCtx.slots.inject('sidebar.right.pane.tab', () =>
         slotCtx.slots.register(
@@ -3698,6 +3966,9 @@ window.__ModuleLoader__.load({
               setOverride: (roleId, field, value) =>
                 sessionActions.setOverride(sessionId, roleId, field, value),
               clearOverride: (roleId, field) => sessionActions.clearOverride(sessionId, roleId, field),
+              // B2c：能力目录来自无参 list()（不消费会话角色数据），刷新复用 refreshCli。
+              loadCapabilities: async () => asArray((await loadSnapshot())?.global?.capabilities),
+              refreshCli: (cli, force) => configActions.refreshCli(cli, force),
               t,
             }),
           },
@@ -3846,6 +4117,12 @@ window.__ModuleLoader__.load({
       renderPaneLoading,
       draftOfRole,
       emptyRoleDraft,
+      capabilitiesOf,
+      cliEntryOf,
+      channelForCombo,
+      capabilitySourceKey,
+      normalizeCapabilities,
+      CLI_IDS,
       generateRoleId,
       buildCreateRolePayload,
       saveCreateGlobalRole,

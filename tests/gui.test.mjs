@@ -787,6 +787,8 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
     limits: { serializeWrites: true, maxParallelWritesTotal: 4, defaultIsolation: 'worktree' },
     channels: [],
     capabilities: [],
+    capabilitiesRefreshedAt: null,
+    capabilitiesErrors: [],
     cli: null,
     cliError: null,
   })
@@ -810,6 +812,8 @@ test('Browser half：normalizeSnapshot 对脏数据回退为空数组/无错误'
     limits: { serializeWrites: true, maxParallelWritesTotal: 4, defaultIsolation: 'worktree' },
     channels: [],
     capabilities: [],
+    capabilitiesRefreshedAt: null,
+    capabilitiesErrors: [],
     cli: null,
     cliError: null,
   }
@@ -903,8 +907,35 @@ test('Browser half：本地 Tag / 内联 SVG 只用宿主 token（无 primitives
   assert.equal(icon.props.height, 16)
 })
 
-test('Browser half：normalizeSessionConfigView 收窄脏数据（未知来源→unknown）', async () => {
+test('Browser half：B2c 能力目录收窄（4 CLI 形状/来源）且 capabilitiesOf 补齐 4 项', async () => {
   const { exports } = await loadClientHarness()
+  const entry = {
+    id: 'codex',
+    label: 'Codex',
+    provider: 'codex',
+    models: [{ id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol', provider: 'codex-sol', source: 'discovered' }],
+    strengths: [{ id: 'high', label: 'High', source: 'discovered' }],
+    sources: { models: 'discovered', strengths: 'discovered' },
+    refreshedAt: 1700000000000,
+    errors: ['probe partial'],
+  }
+  const normalized = exports.__test.normalizeCapabilities([entry, { id: 'unknown-cli' }, null])
+  assert.equal(normalized.length, 1)
+  assert.equal(normalized[0].models[0].provider, 'codex-sol')
+  assert.equal(normalized[0].sources.models, 'discovered')
+  assert.equal(normalized[0].refreshedAt, 1700000000000)
+
+  // capabilitiesOf：部分/缺失时仍返回固定 4 个 CLI（空目录标记 unknown），不把 ch-* 当 CLI。
+  const four = exports.__test.capabilitiesOf({ capabilities: [entry] })
+  assert.deepEqual(four.map((item) => item.id), ['dsh', 'claude', 'codex', 'codebuddy'])
+  assert.equal(four.find((item) => item.id === 'codex').models.length, 1)
+  assert.deepEqual(four.find((item) => item.id === 'dsh').models, [])
+  assert.equal(exports.__test.capabilitySourceKey('discovered'), 'sourceDiscovered')
+  assert.equal(exports.__test.capabilitySourceKey('static'), 'sourceStatic')
+  assert.equal(exports.__test.capabilitySourceKey('bogus'), 'sourceUnknown')
+})
+
+test('Browser half：normalizeSessionConfigView 收窄脏数据（未知来源→unknown）', async () => {  const { exports } = await loadClientHarness()
   assert.deepEqual(exports.__test.normalizeSessionConfigView(null), {
     roles: [],
     defaultRoleId: '',
@@ -1145,6 +1176,9 @@ test('Browser half：右侧栏列表只有名称 + 三色二态开关；详情�
   assert.equal(props.list, undefined, '侧栏不再消费无参 list 快照')
   assert.equal(typeof props.setOverride, 'function', '列表开关只写会话覆盖')
   assert.equal(typeof props.clearOverride, 'function', '字段可恢复继承')
+  // B2c：侧栏编辑器同样需要 4 CLI 能力目录（来自无参 list()）与能力刷新入口。
+  assert.equal(typeof props.loadCapabilities, 'function', '侧栏注入能力目录加载器')
+  assert.equal(typeof props.refreshCli, 'function', '侧栏注入能力刷新')
   // B1：右侧栏只承载会话覆盖；全局角色编辑已移到设置页内联管理器，
   // 不再从这里注入 global writer（全局与会话入口彻底分离）。
   assert.equal(props.updateGlobalRole, undefined, '右侧栏不再承载全局写入')

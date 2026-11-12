@@ -758,3 +758,48 @@ Host 侧新增两个 handler（`src/gui/host.js`），参数 codec 与 client de
 - **真机渲染/真实网关往返**：未启动 DSH 桌面端、未改 profile、未重启；新增/删除的
   二次确认、错误提示、下拉联动只做 stub/单测断言。
 - 会话覆盖指向已删角色时的运行时表现（宿主读配置会报 `UNKNOWN_ROLE_ID` 告警）未真机验证。
+
+## 13. B2c：角色开关 + 4 CLI + 模型刷新 + 强度联动（2026-11-12，task-16）
+
+> 对应 D1 用户真机 4 问题（`docs/plan/verify/2026-11-13-d1-windows.md` §5.1 B2c-1..4）。
+> 后端能力目录来自 B2b（`docs/design/cli-capabilities.md` §8）：客户端只消费 `global.capabilities`，
+> **不再从 channel 实例推导 CLI**；未新增 remote。
+
+### 13.1 四项修复对照
+
+| # | 用户问题 | 实现 | 证据 |
+| --- | --- | --- | --- |
+| B2c-1 | 全局角色管理没有启用开关 | `renderGlobalRoleManager` 每行加原生 `Switch`（`role=switch`、`aria-checked=role.enabled`）；`onChange` → `updateGlobalRole(roleId,{enabled})`；失败重新拉快照、不做乐观切换；写盘期间该行禁用 | `src/client/index.js:1785`、`:2309`；测试「B2c renderGlobalRoleManager：每行启用开关」 |
+| B2c-2 | CLI 选项错误（显示 ch-*） | `capabilitiesOf()` 固定返回 **4 个 CLI**（dsh/claude/codex/codebuddy，缺失补 unknown）；编辑器 CLI 下拉用能力目录的 `id/label`，不显示 `ch-*` | `src/client/index.js:2870`、`:2974`；测试「B2c renderRoleDetail：4 CLI 选项」 |
+| B2c-3 | 模型可选但不刷新 | 模型下拉来自 `capability.models[]`（`id/label/provider/source`）；「刷新能力」按钮调用 `refreshCli(cli,true)`，返回的 `capabilities` 更新本地快照（设置页/侧栏各自路径）；来源标注动态/静态/未知 | `src/client/index.js:2330`、`:3970`；测试「B2c renderRoleDetail：…刷新按钮」 |
+| B2c-4 | 思考强度不可用 | 强度下拉来自 `capability.strengths[]`；该 CLI 无强度（空/unknown）时**置灰并标「不支持」**；有值时按目录联动（切 CLI 清空模型/强度、切模型清空强度） | `src/client/index.js:2974`、`:3167`；同上测试 |
+
+### 13.2 保存映射（B2 契约不变）
+
+`channelForCombo(t, draft, capabilities, channels)`（`src/client/index.js:2933`）把
+「CLI + 模型 + 强度」映射成内部 `channel{kind,provider,model,reasoning}`（匹配到实例时附 `channelId`）：
+
+- `kind`：dsh→`in-process`、claude→`claude-code`、codex→`codex`、codebuddy→`acp-cli`
+- `provider`：优先所选模型的 `model.provider`，回退 `capability.provider`（与 B2b 映射一致：codex `gpt-6.1-sol→codex-sol`、codebuddy `hy3→acp-hy4` 等）
+- 目录里不存在的模型/强度 → `pendingConfig`（不伪造组合）
+- 全局层不能清空旧 `channelId`：切到没有对应实例的 CLI 时明确返回 `comboChannelUnsupported`，不写半套组合
+- 会话层用逐字段覆盖（可 restore 清空旧 `channel.*`），与右侧栏「只写会话覆盖」一致
+
+### 13.3 兼容旧 channel 形状
+
+`draftOfRole()` 把旧 `channel.kind` 映射回 CLI id 用于展示；能力目录缺失/旧快照时
+`capabilitiesOf()` 从 channels 兼容推导且**永远补 4 个 CLI 槽位**（未知=空目录），
+不再把 `ch-*` 当 CLI；旧 `channelId` 在保存时按实例匹配保留。用户可见文案不含「通道」。
+
+### 13.4 测试
+
+- 新增 5 项：能力目录收窄 + `capabilitiesOf` 补齐 4 CLI；`channelForCombo` provider 映射/目录外拒绝；
+  全局切到无实例 CLI 明确拒绝；`renderRoleDetail` 4 CLI/来源/不支持置灰/刷新按钮；
+  `renderGlobalRoleManager` 每行开关（enabled 状态 + pending 禁用）。
+- 全量：`npm test` **589 tests / 588 pass / 0 fail / 1 skip**；`npm run verify` exit=0。
+
+### 13.5 未验证（待 alpha.5 真机）
+
+- 真机设置页/编辑器/开关/刷新按钮的真实渲染与 `refreshCli` 网关往返；
+- Codex 动态模型发现的实机可用性（B2b 仅独立脚本验证；DSH host llm 在插件内未真机确认）；
+- 刷新失败的 UI 错误提示与来源标注在真实宿主下的可读性。
