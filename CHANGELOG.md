@@ -2,6 +2,38 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.8] - 2026-11-12
+
+### Added
+
+- **`spawn_teammate_as` 工具**：按角色创建 Agent Teams teammate，并把它钉在
+  该角色配置的模型上，而不是继承当前会话的模型。
+  - `role` 收中文角色名（如「沙僧」）或拼音（`shaseng`），内部映射成
+    lower-kebab-case 成员名（宿主 `MEMBER_NAME` 正则硬编码，面板仍显示拼音）。
+  - 路由取角色绑定的 in-process 通道 `llmProvider`/`llmModel`/`reasoning`，
+    与派单路径 `buildChildAgentOptions` 同源。
+  - 建完成员立刻调 `agent.model.select()`，首轮请求即生效，不浪费一轮继承模型的调用。
+  - **只新增、不接管**官方 `spawn_teammate`：同 scope 同名注册会被 `dsh-tools` 拒绝，
+    且官方工具原样保留可避免行为差异。
+
+### Fixed
+
+- 修正了「teammate 无法指定模型」这一能力缺口。底层早已支持
+  （`dsh-subagent-spawn-in-process` 的 `capabilities.agentOptions = true`），
+  只是内置工具层没有透传 `agentOptions`。
+
+### 已知限制
+
+- **不能挂 `agent/request` 覆写路由**：`dsh-agent-loop` 的 `prepareRequest()` 有硬断言，
+  改了直接抛 `use agent.model.select() before step preparation`。已加反证测试锁住。
+- 成员名仍只能用拼音，不能改名、不能删除（宿主无 `removeMember`，名字 once-used 永不回收）。
+- 角色若绑定外部 CLI 通道（codebuddy/codex/claude），本工具会拒绝 ——
+  teammate 跑在宿主进程内，不能挂外部 CLI 子进程。
+
+### 测试
+
+- 551 → 589 tests（+38），无删测。
+
 ## [0.1.0-alpha.7] - 2026-11-12
 
 ### Fixed
