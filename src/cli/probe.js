@@ -27,6 +27,17 @@ export const CLI_SPECS = Object.freeze({
     /** 商店包内相对路径 */
     appxRelative: ['app', 'resources', 'codex.exe'],
     npmPackages: ['@openai/codex'],
+    // 2026-11-13 真机实测：Codex 桌面应用会在用户目录下放一份自己的 CLI：
+    //   C:\Users\<user>\.codex\.sandbox-bin\codex.exe   （360 MB，可直接跑 app-server）
+    // 它既不在 PATH、也不在 Appx 安装目录，之前完全没覆盖 → resolveExecutable 返回 null
+    // → capabilities 的 codex probe 永不执行 → UI 只显示静态表里的 2 个模型
+    //（用户反馈「codex 怎么可能只有 2 个模型」）。
+    // 注意：文件名带版本号的（codex-command-runner-0.153.4.exe）要排除，
+    // 只认不带版本后缀的 `codex.exe`。
+    knownDirs: [
+      ['~', '.codex', '.sandbox-bin', 'codex.exe'],
+      ['~', '.codex', 'bin', 'codex.exe'],
+    ],
     versionArgs: ['--version'],
     /** 输出形如 "codex-cli 0.167.0-alpha.3.2" */
     versionPattern: /codex-cli\s+([0-9][^\s]*)/i,

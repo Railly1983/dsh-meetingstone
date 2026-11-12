@@ -21,6 +21,7 @@ import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fillContextWindows } from './model-context-library.js'
 
 /** 固定 4 个 CLI（顺序稳定，GUI 按此渲染）。 */
 export const CLI_IDS = Object.freeze(['dsh', 'claude', 'codex', 'codebuddy'])
@@ -1465,7 +1466,10 @@ export function createDefaultProbes(deps = {}) {
     codex: async ({ executable }) => {
       const exe = executable || (await resolveExecutable('codex'))
       if (!exe) throw new Error('codex 可执行文件不可用')
-      return probeCodexModels({ executable: exe, spawnImpl: deps.spawnImpl })
+      const models = await probeCodexModels({ executable: exe, spawnImpl: deps.spawnImpl })
+      // Codex app-server 的 model/list **不带** contextWindow，
+      // 用模型上下文库补（GPT 系列官方都是 1.05M）。
+      return fillContextWindows(models, { cli: 'codex' })
     },
     // CodeBuddy：走 ACP session/new 拿账号实际可用的模型（2026-11-12 实测 20 个）。
     // 之前没有这个 probe，模型只来自 profile 配置（用户看到 4 个）。
@@ -1478,11 +1482,15 @@ export function createDefaultProbes(deps = {}) {
       // 改从安装包自带的 product.json 取 maxInputTokens。
       // **只对命中的模型补**；不命中的保持 undefined，UI 显示「未知」。
       const productModels = readCodebuddyProductModels(exe)
-      return models.map((m) => {
+      const withProduct = models.map((m) => {
         const meta = productModels.get(m.id)
         if (!meta) return m
         return { ...m, contextWindow: meta.maxInputTokens, contextWindowSource: 'product.json' }
       })
+      // product.json 只覆盖账号可用列表的一部分（实测 6/20），
+      // 剩下的走模型上下文库的智能匹配（厂商官方规格）。
+      // fillContextWindows **不覆盖**已有值 —— product.json 优先。
+      return fillContextWindows(withProduct, { cli: 'codebuddy' })
     },
     dsh: async () => {
       const ctx = deps.ctx
@@ -1496,9 +1504,70 @@ export function createDefaultProbes(deps = {}) {
       if (!llm || typeof llm.listModels !== 'function') {
         throw new Error('宿主 llm.listModels 不可用')
       }
-      const value = await llm.listModels()
-      const { models } = extractHostModels(value)
-      return models
+
+      // **关键修复（2026-11-13）**：宿主 `llm.listModels(provider)` **需要 provider 参数**。
+      //
+      // 取证：`app.asar: dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js`
+      //   async listModels(provider) {
+      //     return this.dependencies.discoverModels?.(provider) ?? []
+      //   }
+      //
+      // 之前我们调 `llm.listModels()`（无参）→ `discoverModels(undefined)` → 返回空，
+      // 于是 DSH 的模型列表只剩配置里的那一个。用户反馈「我接的起码有 20 个模型」
+      // 就是这个原因。
+      //
+      // 现在：先问宿主有哪些 provider，再逐个 `listModels(provider)` 并合并去重。
+      // 拿不到 provider 清单时退回无参调用（保持旧行为，不至于完全失效）。
+      /** @type {string[]} */
+      let providers = []
+      try {
+        // 宿主的 llm 服务通常有 providers() / listProviders()；两种都试。
+        if (typeof llm.providers === 'function') {
+          const raw = await llm.providers()
+          if (Array.isArray(raw)) providers = raw.map((p) => asString(p?.id ?? p?.name ?? p)).filter(Boolean)
+        } else if (typeof llm.listProviders === 'function') {
+          const raw = await llm.listProviders()
+          if (Array.isArray(raw)) providers = raw.map((p) => asString(p?.id ?? p?.name ?? p)).filter(Boolean)
+        }
+      } catch {
+        providers = []
+      }
+
+      /** @type {Map<string, any>} */
+      const merged = new Map()
+      /** @type {string[]} */
+      const errors = []
+
+      const takeFrom = (value) => {
+        const { models } = extractHostModels(value)
+        for (const m of models) {
+          if (m && m.id && !merged.has(m.id)) merged.set(m.id, m)
+        }
+        return models.length
+      }
+
+      if (providers.length > 0) {
+        for (const provider of providers) {
+          try {
+            const value = await llm.listModels(provider)
+            takeFrom(value)
+          } catch (error) {
+            errors.push(`${provider}: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+      } else {
+        // 拿不到 provider 清单：退回无参（旧行为）
+        const value = await llm.listModels()
+        takeFrom(value)
+      }
+
+      const models = [...merged.values()]
+      if (models.length === 0 && errors.length > 0) {
+        throw new Error(`宿主 llm.listModels 全部失败：${errors.slice(0, 3).join(' | ')}`)
+      }
+      // 宿主 listModels 不保证带 contextWindow，用模型上下文库补。
+      // 已经有值的不覆盖。
+      return fillContextWindows(models, { cli: 'dsh' })
     },
   }
 }

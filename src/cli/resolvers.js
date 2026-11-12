@@ -225,6 +225,30 @@ export function createKnownDirResolver(deps = {}) {
         }
       }
     }
+
+    // `spec.knownDirs`：CLI 自己放在非标准位置的可执行文件（2026-11-13）。
+    //
+    // 为什么需要：Codex 桌面应用把 CLI 放在 `~/.codex/.sandbox-bin/codex.exe`
+    // （360 MB，可直接跑 app-server）。这个位置既不在 PATH、也不在 Appx 安装目录、
+    // 也不在上面那三个固定目录里 —— 之前完全探测不到，导致
+    // `resolveExecutable('codex')` 返回 null，能力目录的 codex probe 永不执行，
+    // UI 只显示静态表里的 2 个模型（用户反馈「codex 怎么可能只有 2 个模型」）。
+    //
+    // 每项是路径片段数组；`'~'` 展开为用户主目录。最后一段是文件名（含扩展名）。
+    const HOME = env.USERPROFILE || env.HOME || ''
+    if (Array.isArray(spec.knownDirs)) {
+      for (const parts of spec.knownDirs) {
+        if (!Array.isArray(parts) || parts.length === 0) continue
+        const expanded = parts.map((/** @type {string} */ seg) =>
+          seg === '~' ? HOME : seg,
+        )
+        if (expanded.some((/** @type {string} */ seg) => !seg)) continue
+        const candidate = P.join(...expanded)
+        if (exists(candidate) && !out.some((o) => o.path === candidate)) {
+          out.push({ path: candidate, source: 'known-dir' })
+        }
+      }
+    }
     return out
   }
 }
