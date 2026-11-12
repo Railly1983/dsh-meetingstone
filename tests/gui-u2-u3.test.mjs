@@ -151,50 +151,7 @@ function viewWith(roles, extra = {}) {
   }
 }
 
-test('buildSessionChanges：只产生真实差异；等值 → 空；空名称/清空 Prompt 有明确语义', async () => {
-  const { __test } = await loadClient()
-  const t = (key) => key
-  const same = __test.draftOfRole(ROLE)
-  assert.deepEqual(
-    __test.buildSessionChanges(t, ROLE, same, CAPABILITIES, CHANNELS).changes,
-    [],
-    '没有修改就不写',
-  )
 
-  // B2：单一角色设定；清空 → 恢复继承（不再有独立 prompt 字段）
-  const changed = __test.buildSessionChanges(
-    t,
-    ROLE,
-    { ...same, name: '沙僧2', setting: '' },
-    CAPABILITIES,
-    CHANNELS,
-  )
-  assert.equal(changed.error, null)
-  assert.deepEqual(changed.changes, [
-    { field: 'name', value: '沙僧2' },
-    { field: 'setting', restore: true },
-  ])
-
-  const invalid = __test.buildSessionChanges(t, ROLE, { ...same, name: '   ' }, CAPABILITIES, CHANNELS)
-  assert.equal(invalid.error, 'detailInvalidName')
-  assert.deepEqual(invalid.changes, [])
-})
-
-test('buildSessionChanges：切换 CLI+模型+强度组合时对齐内部 channel 字段', async () => {
-  const { __test } = await loadClient()
-  const t = (key) => key
-  // B2：用户只改 CLI/模型/强度；内部由唯一匹配的已配置组合解析出 channel
-  const draft = { ...__test.draftOfRole(ROLE), cli: 'codex', model: 'sol-1', reasoning: 'high' }
-  const built = __test.buildSessionChanges(t, ROLE, draft, CAPABILITIES, CHANNELS)
-  assert.equal(built.error, null)
-  assert.deepEqual(built.changes, [
-    { field: 'channel.channelId', value: 'ch-codex' },
-    { field: 'channel.kind', value: 'codex' },
-    { field: 'channel.provider', value: 'codex' },
-    { field: 'channel.model', value: 'sol-1' },
-    { field: 'channel.reasoning', value: 'high' },
-  ])
-})
 
 test('buildGlobalPatch：只写差异；设定/组合变更写 setting 与内部 channel', async () => {
   const { __test } = await loadClient()
@@ -219,238 +176,10 @@ test('buildGlobalPatch：只写差异；设定/组合变更写 setting 与内部
   })
 })
 
-test('toggleSessionRole：只写 enabled 会话覆盖；失败不 reload、不做乐观更新', async () => {
-  const { __test } = await loadClient()
-  const writes = []
-  let reloads = 0
-  const failure = { ok: false, error: { code: 'SESSION_CONFIG_WRITE_FAILED', message: '写失败' } }
 
-  const failed = await __test.toggleSessionRole({
-    roleId: 'role-sashi',
-    next: true,
-    setOverride: async (...args) => {
-      writes.push(args)
-      return failure
-    },
-    reload: async () => {
-      reloads += 1
-      return { ok: true, view: { roles: [] } }
-    },
-  })
-  assert.equal(failed.ok, false)
-  assert.equal(failed.error.code, 'SESSION_CONFIG_WRITE_FAILED')
-  assert.equal(reloads, 0, '失败不得 reload（否则会掩盖未写入）')
-  assert.deepEqual(writes, [['role-sashi', 'enabled', true]], '只写当前会话 enabled')
 
-  const okView = viewWith([{ ...ROLE, enabled: false }])
-  const ok = await __test.toggleSessionRole({
-    roleId: 'role-sashi',
-    next: false,
-    setOverride: async (...args) => {
-      writes.push(args)
-      return { ok: true, value: { ok: true, written: true } }
-    },
-    reload: async () => {
-      reloads += 1
-      return { ok: true, view: okView }
-    },
-  })
-  assert.equal(ok.ok, true)
-  assert.equal(reloads, 1)
-  assert.equal(ok.view, okView)
-})
 
-test('saveSessionChanges：逐字段只写差异；失败立即停止且不 reload', async () => {
-  const { __test } = await loadClient()
-  const writes = []
-  let reloads = 0
-  const reload = async () => {
-    reloads += 1
-    return { ok: true, view: viewWith([]) }
-  }
 
-  const saved = await __test.saveSessionChanges({
-    roleId: 'role-sashi',
-    changes: [
-      { field: 'name', value: 'A' },
-      { field: 'channel.model', value: 'm2' },
-    ],
-    setOverride: async (...args) => {
-      writes.push(['set', ...args])
-      return { ok: true }
-    },
-    clearOverride: async () => ({ ok: true }),
-    reload,
-  })
-  assert.equal(saved.ok, true)
-  assert.equal(saved.applied, 2)
-  assert.equal(reloads, 1)
-  assert.deepEqual(writes, [
-    ['set', 'role-sashi', 'name', 'A'],
-    ['set', 'role-sashi', 'channel.model', 'm2'],
-  ])
-
-  const stopped = await __test.saveSessionChanges({
-    roleId: 'role-sashi',
-    changes: [{ field: 'name', value: 'A' }, { field: 'description', value: 'x' }],
-    setOverride: async () => ({ ok: false, error: { code: 'BAD', message: 'bad' } }),
-    clearOverride: async () => ({ ok: true }),
-    reload,
-  })
-  assert.equal(stopped.ok, false)
-  assert.equal(stopped.applied, 0)
-  assert.equal(reloads, 1, '第一次成功后才 reload；失败路径不 reload')
-
-  const restored = await __test.saveSessionChanges({
-    roleId: 'role-sashi',
-    changes: [{ field: 'prompt', restore: true }],
-    setOverride: async () => {
-      throw new Error('不应写 setOverride')
-    },
-    clearOverride: async (...args) => {
-      writes.push(['clear', ...args])
-      return { ok: true }
-    },
-    reload: async () => ({ ok: true, view: viewWith([]) }),
-  })
-  assert.equal(restored.ok, true)
-  assert.deepEqual(writes.at(-1), ['clear', 'role-sashi', 'prompt'])
-})
-
-test('normalizeSessionConfigView：三色派生 + 字段来源 + 选项只来自真实通道', async () => {
-  const { __test } = await loadClient()
-  const view = __test.normalizeSessionConfigView({
-    effective: {
-      roles: [
-        { ...ROLE, roleId: 'r-green', name: '绿' },
-        { ...ROLE, roleId: 'r-yellow', name: '黄' },
-        { ...ROLE, roleId: 'r-gray', name: '灰', enabled: false },
-      ],
-    },
-    overrides: {},
-    sources: {
-      roles: {
-        'r-green': { layer: 'global', fields: { name: 'global', 'channel.model': 'session' } },
-      },
-    },
-    channels: CHANNELS,
-    roleStates: [
-      { roleId: 'r-green', userPreference: 'enabled', readiness: 'ready', quota: 'unknown', color: 'green' },
-      { roleId: 'r-yellow', userPreference: 'enabled', readiness: 'ready', quota: 'exhausted', color: 'yellow' },
-      { roleId: 'r-gray', userPreference: 'disabled', readiness: 'blocked', quota: 'unknown', color: 'gray' },
-    ],
-  })
-  assert.deepEqual(view.roles.map((role) => role.state.color), ['green', 'yellow', 'gray'])
-  assert.equal(view.roles[0].fieldSources['channel.model'], 'session')
-  assert.equal(view.roles[0].fieldSources.name, 'global')
-  assert.equal(view.roles[0].fieldSources.setting, 'default')
-  assert.deepEqual(view.channels.map((channel) => channel.channelId), ['ch-acp', 'ch-codex'])
-})
-
-test('renderRoleList：只有名称 + 三色二态开关；阻断原因给出说明', async () => {
-  const { __test } = await loadClient()
-  const t = (key) => key
-  const view = viewWith([
-    {
-      ...__test.normalizeSessionConfigView({
-        effective: { roles: [ROLE] },
-        sources: { roles: {} },
-        roleStates: [{ roleId: 'role-sashi', readiness: 'ready', color: 'green' }],
-      }).roles[0],
-    },
-    {
-      ...__test.normalizeSessionConfigView({
-        effective: { roles: [{ ...ROLE, roleId: 'role-bajie', name: '八戒' }] },
-        sources: { roles: {} },
-        roleStates: [{ roleId: 'role-bajie', readiness: 'blocked', readinessReason: 'PROVIDER_UNAVAILABLE', color: 'gray' }],
-      }).roles[0],
-    },
-    {
-      ...__test.normalizeSessionConfigView({
-        effective: { roles: [{ ...ROLE, roleId: 'role-xiaobai', name: '小白', enabled: false }] },
-        sources: { roles: {} },
-        roleStates: [{ roleId: 'role-xiaobai', readiness: 'ready', color: 'gray', userPreference: 'disabled' }],
-      }).roles[0],
-    },
-  ])
-  const tree = __test.renderRolePane(t, view)
-  const strings = collectStrings(tree)
-  assert.ok(strings.includes('沙僧') && strings.includes('八戒'))
-  assert.ok(!strings.includes('SS'), '列表不显示别名')
-  assert.ok(!strings.includes('m1'), '列表不显示模型')
-  const switches = collectNodes(tree, (node) => node.type === 'button' && node.props?.role === 'switch')
-  assert.equal(switches.length, 3)
-  assert.deepEqual(switches.map((node) => node.props['aria-checked']), [true, true, false])
-  assert.ok(strings.some((value) => String(value).startsWith('roleBlocked')), '阻断原因可见')
-  assert.ok(strings.includes('roleDisabled'), '关闭原因可见')
-  assert.equal(__test.renderRolePane(t, viewWith([])).props.children.length > 0, true, '空列表仍渲染说明')
-})
-
-test('renderRoleDetail：字段来源/恢复继承/真实选项；无选项显示不支持', async () => {
-  const { __test } = await loadClient()
-  const t = (key) => key
-  const normalized = __test.normalizeSessionConfigView({
-    effective: { roles: [ROLE] },
-    sources: {
-      roles: {
-        'role-sashi': {
-          layer: 'session',
-          fields: { name: 'global', aliases: 'global', setting: 'project', 'channel.model': 'session' },
-        },
-      },
-    },
-    channels: CHANNELS,
-    roleStates: [{ roleId: 'role-sashi', readiness: 'ready', color: 'green' }],
-  })
-  const detail = __test.renderRoleDetail(t, normalized, 'role-sashi', {
-    scope: 'session',
-    draft: __test.draftOfRole(normalized.roles[0]),
-  })
-  const strings = collectStrings(detail)
-  for (const key of [
-    'fieldName',
-    'fieldAliases',
-    'fieldSetting',
-    'fieldCli',
-    'fieldModel',
-    'fieldReasoning',
-    'sourceGlobal',
-    'sourceProject',
-    'sourceSession',
-    'restoreInherit',
-  ]) {
-    assert.ok(strings.includes(key), `详情应包含 ${key}`)
-  }
-  const modelSelect = collectNodes(detail, (node) => node.type === 'select')
-  assert.ok(modelSelect.length >= 3, 'CLI/模型/强度都是真实 select')
-  const inputs = collectNodes(detail, (node) => node.type === 'input')
-  assert.ok(inputs.length >= 2, '名称/别名可编辑')
-  assert.ok(collectNodes(detail, (node) => node.type === 'textarea').length === 1, '设定是唯一多行文本')
-
-  // 无可用组合：模型/强度显示「不支持」而不是伪造选项。
-  const noOptions = __test.renderRoleDetail(
-    t,
-    viewWith([{ ...normalized.roles[0], channelId: 'ghost', channel: { channelId: 'ghost', kind: '', provider: '' } }]),
-    'role-sashi',
-    { scope: 'session', draft: { ...__test.draftOfRole(ROLE), cli: '', model: '', reasoning: '' } },
-  )
-  const noOptionStrings = collectStrings(noOptions)
-  assert.ok(
-    noOptionStrings.some((value) => String(value).startsWith('unsupported')),
-    '没有真实选项时显示不支持',
-  )
-
-  // 全局 scope：保存前显示二次确认。
-  const confirming = __test.renderRoleDetail(t, normalized, 'role-sashi', {
-    scope: 'global',
-    draft: __test.draftOfRole(normalized.roles[0]),
-    confirming: true,
-  })
-  const confirmStrings = collectStrings(confirming)
-  assert.ok(confirmStrings.includes('scopeGlobalNote'))
-  assert.ok(confirmStrings.includes('confirmGlobal'))
-  assert.ok(confirmStrings.includes('confirm') && confirmStrings.includes('cancel'))
-})
 
 test('saveGlobalPatch：一次 patch 写入 + reload；失败不 reload（B1 设置页全局管理器复用）', async () => {
   const { __test } = await loadClient()
@@ -841,7 +570,11 @@ test('B2c renderRoleDetail：4 CLI 选项（无 ch-*）+ 模型/强度来源 + �
     '显示能力来源',
   )
   assert.ok(
-    strings.some((value) => String(value).includes('M1') && String(value).includes('sourceStatic')),
+    strings.some(
+      (value) =>
+        String(value).includes('M1') &&
+        (String(value).includes('sourceStatic') || String(value).includes('sourceConfig')),
+    ),
     '模型选项带来源标注',
   )
 
@@ -903,4 +636,23 @@ test('B2c renderGlobalRoleManager：每行启用开关（状态来自 enabled，
     (node) => node.type === 'button' && node.props?.role === 'switch',
   )
   assert.equal(pendingSwitches[0].props.disabled, true, 'pending 时开关禁用（不做乐观假切换）')
+})
+
+test('B3：设置页角色区有「返回」按钮（回到集合石主区，不引入新路由）', async () => {
+  const { __test } = await loadClient()
+  const t = (key) => key
+  const snapshot = __test.normalizeSnapshot({ roles: [], channels: [], global: { capabilities: CAPABILITIES } })
+  let closed = 0
+  const tree = __test.renderGlobalRoleManager(t, snapshot, {
+    onBackToSettings: () => {
+      closed += 1
+    },
+  })
+  const back = collectNodes(
+    tree,
+    (node) => node.type === 'button' && String(node.props?.children ?? '').includes('backToSettings'),
+  )
+  assert.equal(back.length, 1, '管理器头部有返回按钮')
+  back[0].props.onClick()
+  assert.equal(closed, 1, '点击返回调用 onBackToSettings')
 })

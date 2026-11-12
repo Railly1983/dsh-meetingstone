@@ -661,21 +661,11 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
 
   assert.equal(mounted.length, 1)
   assert.equal(mounted[0].package, 'dsh-meetingstone')
-  // list（无参 SRC）+ 会话 3 个 strict 方法 + 配置 5 个 strict 方法（U2 + B1b）。
-  assert.equal(mounted[0].descriptors.length, 9)
+  // B3：list（无参 SRC）+ 5 个配置方法；会话级 remote 已整体下线。
+  assert.equal(mounted[0].descriptors.length, 6)
   assert.deepEqual(
     mounted[0].descriptors.map((d) => d.method),
-    [
-      'list',
-      'getSessionConfig',
-      'setSessionOverride',
-      'clearSessionOverride',
-      'setCliEnabled',
-      'refreshCli',
-      'updateGlobalRole',
-      'createGlobalRole',
-      'deleteGlobalRole',
-    ],
+    ['list', 'setCliEnabled', 'refreshCli', 'updateGlobalRole', 'createGlobalRole', 'deleteGlobalRole'],
   )
   assert.deepEqual(mounted[0].descriptors[0].parameters, [], 'list 必须无参')
   const listDesc = mounted[0].descriptors.find((d) => d.method === 'list')
@@ -689,33 +679,21 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
     result: { mode: 'src-json' },
   })
 
-  // 参数 codec 必须是 strict + 真实 zod，且 typeSymbol 与 Host 契约逐字一致。
-  const getDesc = mounted[0].descriptors.find((d) => d.method === 'getSessionConfig')
-  const setDesc = mounted[0].descriptors.find((d) => d.method === 'setSessionOverride')
-  const clearDesc = mounted[0].descriptors.find((d) => d.method === 'clearSessionOverride')
-  assert.equal(getDesc.parameters.length, 1)
-  assert.equal(getDesc.parameters[0].codec.mode, 'strict')
-  assert.equal(getDesc.parameters[0].codec.typeSymbol, SESSION_REMOTE_TYPES.sessionId)
-  assert.equal(typeof getDesc.parameters[0].codec.create, 'function')
-  assert.doesNotThrow(() => getDesc.parameters[0].codec.create().parse('sess-1'))
-  assert.throws(() => getDesc.parameters[0].codec.create().parse(''))
-  assert.throws(() => getDesc.parameters[0].codec.create().parse(123))
-
-  assert.deepEqual(
-    setDesc.parameters.map((p) => p.wire),
-    ['sessionId', 'roleId', 'field', 'value'],
+  // 参数 codec 必须是 strict + 真实 zod（配置方法）。
+  const byMethod = Object.fromEntries(mounted[0].descriptors.map((d) => [d.method, d]))
+  assert.deepEqual(byMethod.setCliEnabled.parameters.map((p) => p.wire), ['cli', 'enabled'])
+  assert.deepEqual(byMethod.refreshCli.parameters.map((p) => p.wire), ['cli', 'force'])
+  assert.deepEqual(byMethod.updateGlobalRole.parameters.map((p) => p.wire), ['roleId', 'patch'])
+  assert.deepEqual(byMethod.createGlobalRole.parameters.map((p) => p.wire), ['role'])
+  assert.deepEqual(byMethod.deleteGlobalRole.parameters.map((p) => p.wire), ['roleId'])
+  assert.ok(
+    Object.entries(byMethod)
+      .filter(([method]) => method !== 'list')
+      .every(([, descriptor]) =>
+        descriptor.parameters.every((p) => p.codec.mode === 'strict' && p.codec.typeSymbol),
+      ),
+    '配置方法参数全部 strict',
   )
-  assert.ok(setDesc.parameters.every((p) => p.codec.mode === 'strict' && p.codec.typeSymbol))
-  assert.equal(setDesc.parameters[1].codec.typeSymbol, SESSION_REMOTE_TYPES.roleId)
-  assert.equal(setDesc.parameters[2].codec.typeSymbol, SESSION_REMOTE_TYPES.field)
-  assert.equal(setDesc.parameters[3].codec.typeSymbol, SESSION_REMOTE_TYPES.value)
-
-  assert.deepEqual(
-    clearDesc.parameters.map((p) => p.wire),
-    ['sessionId', 'roleId', 'field'],
-  )
-  assert.equal(clearDesc.parameters[2].acceptsUndefined, true, 'clear.field 可省略')
-  assert.ok(clearDesc.parameters.every((p) => p.codec.mode === 'strict' && p.codec.typeSymbol))
 
   const injected = options.inject()
   // B1：设置页内联全局角色管理复用 updateGlobalRole 写路径；不再注入 openRoles
@@ -935,47 +913,6 @@ test('Browser half：B2c 能力目录收窄（4 CLI 形状/来源）且 capabili
   assert.equal(exports.__test.capabilitySourceKey('bogus'), 'sourceUnknown')
 })
 
-test('Browser half：normalizeSessionConfigView 收窄脏数据（未知来源→unknown）', async () => {  const { exports } = await loadClientHarness()
-  assert.deepEqual(exports.__test.normalizeSessionConfigView(null), {
-    roles: [],
-    defaultRoleId: '',
-    defaultRoleSource: 'default',
-    channels: [],
-    capabilities: [],
-    warnings: [],
-  })
-
-  const view = exports.__test.normalizeSessionConfigView({
-    effective: {
-      roles: [
-        null,
-        1,
-        { roleId: 'r1', name: 'A', aliases: 'x', channel: null },
-        { roleId: 'r2', channel: { model: 'm' } },
-      ],
-      defaultRoleId: 'r1',
-    },
-    overrides: { r1: {}, r2: { model: 'm' } },
-    sources: {
-      roles: { r1: { layer: 'session' }, r2: { layer: 'bogus' } },
-      defaultRoleId: 'session',
-    },
-  })
-  assert.deepEqual(
-    view.roles.map((role) => [role.roleId, role.sourceLayer, role.overrideFields]),
-    [
-      ['r1', 'session', []],
-      ['r2', 'unknown', ['model']],
-    ],
-  )
-  assert.deepEqual(view.roles[0].aliases, [])
-  assert.equal(view.defaultRoleSource, 'session')
-  // 字段来源缺失 → default；三色状态缺失 → 灰/unknown（不伪造 ready）。
-  assert.equal(view.roles[0].fieldSources.name, 'default')
-  assert.equal(view.roles[0].state.color, 'gray')
-  assert.equal(view.roles[0].state.readiness, 'unknown')
-  assert.deepEqual(view.channels, [])
-})
 
 test('Browser half：渲染期错误走统一日志（module/phase/version/stack），返回回退节点', async () => {
   const { exports, logs } = await loadClientHarness()
@@ -996,282 +933,15 @@ test('Browser half：渲染期错误走统一日志（module/phase/version/stack
   assert.doesNotMatch(errLine, /token|secret|password|api[_-]?key/i, '日志不记录凭证')
 })
 
-test('Browser half：$mount 失败时 header/section/sidebar 都注册，header 不消失且可提示', async () => {
-  const { registrations, injectCalls, react } = await loadClientHarness({
-    mountError: new Error('mount boom'),
-  })
-  assert.equal(injectCalls.length, 0, 'mount 失败不得进入动态注入')
-  const names = registrations.map((r) => r.options.name)
-  assert.deepEqual(names, [
-    'conversation.session.header.actions',
-    'settings.section',
-    'sidebar.right.pane.tab',
-    'sidebar.right.pane.tab.title',
-  ])
-  assert.equal(registrations[0].options.name, 'conversation.session.header.actions', 'header 必须最先注册')
-
-  const section = registrations.find((r) => r.options.name === 'settings.section')
-  const snapshot = await section.options.inject().list()
-  assert.equal(snapshot.unavailable.code, 'REMOTE_MOUNT_FAILED')
-  assert.match(snapshot.unavailable.message, /mount boom/)
-  assert.deepEqual(snapshot.roles, [])
-
-  const pane = registrations.find((r) => r.options.name === 'sidebar.right.pane.tab')
-  const paneResult = await pane.options.inject('sess-1').loadSession()
-  assert.equal(paneResult.ok, false, 'mount 失败时侧栏 loader 返回错误结果而不是抛')
-  assert.equal(paneResult.error.code, 'REMOTE_MOUNT_FAILED')
-  assert.match(paneResult.error.message, /mount boom/)
-
-  // header 仍在：render 时 remoteReady=false，点击显示「远程不可用」。
-  const header = registrations[0]
-  const props = header.options.inject('sess-h1')
-  assert.equal(props.remoteReady, false)
-  react.reset()
-  const first = header.Component(props)
-  const button = first.props.children.find((c) => c && c.type === 'button')
-  assert.equal(button.props.title, 'remoteUnavailableHint')
-  button.props.onClick()
-  react.reset()
-  const strings = []
-  collectStrings(header.Component(props), strings)
-  assert.ok(strings.includes('remoteUnavailableHint'), '点击后出现远程不可用提示')
-})
-
-test('Browser half：单个模块注册失败不影响其他模块（独立 guard）', async () => {
-  const { registrations, logs } = await loadClientHarness({ failRegisterFor: 'settings.section' })
-  const names = registrations.map((r) => r.options.name)
-  assert.ok(names.includes('conversation.session.header.actions'), 'header 不受 section 失败影响')
-  assert.ok(!names.includes('settings.section'), 'section 注册确实失败')
-  assert.ok(names.includes('sidebar.right.pane.tab'), 'sidebar 不受 section 失败影响')
-
-  const errorLine = logs.find(([level]) => level === 'error')?.[1] ?? ''
-  assert.match(errorLine, /^\[meetingstone\] gui module=section phase=register version=0\.1\.0-alpha /)
-  assert.match(errorLine, /register settings\.section boom/)
-  assert.match(errorLine, /stack=/)
-  assert.doesNotMatch(errorLine, /token|secret|password|api[_-]?key/i, '日志不记录凭证')
-})
-
-test('Browser half：缺少 slots 能力时 apply 不抛，三个模块各自记录错误', async () => {
-  const { registrations, logs } = await loadClientHarness({ omitSlots: true })
-  assert.deepEqual(registrations, [])
-  const errors = logs.filter(([level]) => level === 'error').map(([, line]) => line)
-  assert.equal(errors.length, 3, 'header / section / sidebar 各一条，互不影响')
-  for (const line of errors) {
-    assert.match(line, /^\[meetingstone\] gui module=(header|section|sidebar) phase=register version=0\.1\.0-alpha /)
-    assert.match(line, /CAPABILITY_MISSING/)
-    assert.doesNotMatch(line, /token|secret|password|api[_-]?key/i, '日志不记录凭证')
-  }
-})
-
-test('Browser half：GUI 注册日志统一格式（模块/阶段/版本），成功也记录', async () => {
-  const { logs } = await loadClientHarness()
-  const infos = logs.filter(([level]) => level === 'info').map(([, line]) => line)
-  for (const [module, phase] of [
-    ['remote', 'mount'],
-    ['header', 'register'],
-    ['section', 'register'],
-    ['sidebar', 'register'],
-  ]) {
-    assert.ok(
-      infos.includes(`[meetingstone] gui module=${module} phase=${phase} version=0.1.0-alpha status=ok`),
-      `缺少 ${module}/${phase} 日志`,
-    )
-  }
-  assert.ok(infos.every((line) => !/token|secret|password|api[_-]?key/i.test(line)), '日志不记录凭证')
-})
-
-test('Browser half：顶部集合石入口（conversation.session.header.actions）注册，点击打开右侧栏', async () => {
-  const { exports, registrations, sidebarOpenCalls } = await loadClientHarness()
-  const TAB_ID = exports.__test.TAB_ID
-
-  const header = registrations.filter((r) => r.options.name === 'conversation.session.header.actions')
-  assert.equal(header.length, 1, 'header.action 注册一次')
-  const { options, Component } = header[0]
-  assert.equal(options.id, exports.__test.HEADER_ACTION_ID)
-  assert.equal(typeof options.order, 'number')
-  assert.equal(options.locale, 'settings.meetingstone')
-  assert.equal(typeof options.inject, 'function', 'host 用 inject(sessionId) 注入 props')
-  assert.equal(typeof Component, 'function')
-
-  // 模拟 host 用 inject(sessionId) 拿到 props 并渲染，再触发点击。
-  const props = options.inject('sess-h1')
-  assert.equal(props.sessionId, 'sess-h1')
-  assert.equal(props.remoteReady, true, 'remote 就绪时入口可用')
-  assert.equal(typeof props.openRolePanel, 'function')
-  const element = Component(props)
-  const button = element.props.children.find((c) => c && c.type === 'button')
-  assert.ok(button, '入口是按钮')
-  // 无障碍：可访问名在外层 button，SVG 自身 aria-hidden。
-  assert.equal(button.props['aria-label'], 'headerTitle')
-  assert.equal(button.props.title, 'headerDesc')
-  assert.equal(button.props.type, 'button')
-  assert.equal(button.props.className, 'dsh-meetingstone-header-entry')
-  // 宿主 token 样式：去掉默认粗边框 + 0.5px border token + 官方 sm toolbar 背景/圆角 + hover/focus 钩子。
-  assert.match(button.props.style.border, /0\.5px solid var\(--dsw-alias-border-l3\)/)
-  assert.match(button.props.style.background, /--dsw-alias-button-tool-bar-fill/)
-  assert.match(button.props.style.borderRadius, /--dsw-radius-sm/)
-  assert.equal(typeof button.props.onMouseEnter, 'function')
-  assert.equal(typeof button.props.onFocus, 'function')
-  // 内联 SVG（不再依赖 primitives.Icon）：16px、aria-hidden、focusable=false。
-  const findSvg = (node) => {
-    if (!node || typeof node !== 'object') return null
-    if (node.type === 'svg') return node
-    // stub jsx 不执行函数组件；展开一次（IconUsers）后再找。
-    if (typeof node.type === 'function' && node.props?.children === undefined) {
-      return findSvg(node.type(node.props))
-    }
-    const children = node.props?.children
-    const list = Array.isArray(children) ? children : children ? [children] : []
-    for (const child of list) {
-      const found = findSvg(child)
-      if (found) return found
-    }
-    return null
-  }
-  const svgNode = findSvg(button)
-  assert.ok(svgNode, 'header 必须渲染内联 SVG')
-  assert.equal(svgNode.props['aria-hidden'], 'true')
-  assert.equal(svgNode.props.focusable, 'false')
-  assert.equal(svgNode.props.width, 16)
-  // 文案「角色」在按钮内可见（测试 locale 用 key 回退，真实 zh 字典在源码断言）。
-  const buttonStrings = []
-  collectStrings(button, buttonStrings)
-  assert.ok(buttonStrings.includes('headerTitle'), '顶部入口显示文案')
-  assert.equal(typeof button.props.onClick, 'function')
-  button.props.onClick()
-  assert.deepEqual(sidebarOpenCalls, ['meetingstone-roles', { params: {} }], '点击应打开右侧栏 tab（openTab(kind, {params})）')
-})
-
-test('Browser half：右侧栏两步式注册（sidebarRightTabs + 两个 keyed seat）', async () => {
-  const { exports, registrations, sidebarTabRegisters } = await loadClientHarness()
-  const TAB_ID = exports.__test.TAB_ID
-
-  // 第 1 步：tab 本体
-  assert.equal(sidebarTabRegisters.length, 1)
-  const tab = sidebarTabRegisters[0]
-  assert.equal(tab.id, TAB_ID)
-  assert.equal(tab.kind, 'meetingstone-roles')
-  // 官方契约：priority 是档位字符串 extension|builtin|fallback，不是数字。
-  assert.equal(tab.priority, 'extension')
-  assert.equal(typeof tab.priority, 'string')
-  assert.equal(typeof tab.title, 'function')
-
-  // 第 2 步：keyed seat（内容 + 标题，scope session）
-  const pane = registrations.filter((r) => r.options.name === 'sidebar.right.pane.tab')
-  const title = registrations.filter((r) => r.options.name === 'sidebar.right.pane.tab.title')
-  assert.equal(pane.length, 1)
-  assert.equal(title.length, 1)
-  assert.equal(pane[0].options.key, TAB_ID, 'seat 用 key（不是 id）对齐到右侧栏')
-  assert.equal(title[0].options.key, TAB_ID)
-  assert.equal(pane[0].options.locale, 'settings.meetingstone')
-  assert.equal(typeof pane[0].Component, 'function')
-})
-
-test('Browser half：右侧栏列表只有名称 + 三色二态开关；详情展示字段来源并可恢复继承', async () => {
-  const { exports, registrations, sessionCalls } = await loadClientHarness()
-  const pane = registrations.find((r) => r.options.name === 'sidebar.right.pane.tab')
-  const props = pane.options.inject('sess-p1')
-  assert.equal(props.sessionId, 'sess-p1')
-  assert.equal(typeof props.loadSession, 'function')
-  assert.equal(props.list, undefined, '侧栏不再消费无参 list 快照')
-  assert.equal(typeof props.setOverride, 'function', '列表开关只写会话覆盖')
-  assert.equal(typeof props.clearOverride, 'function', '字段可恢复继承')
-  // B2c：侧栏编辑器同样需要 4 CLI 能力目录（来自无参 list()）与能力刷新入口。
-  assert.equal(typeof props.loadCapabilities, 'function', '侧栏注入能力目录加载器')
-  assert.equal(typeof props.refreshCli, 'function', '侧栏注入能力刷新')
-  // B1：右侧栏只承载会话覆盖；全局角色编辑已移到设置页内联管理器，
-  // 不再从这里注入 global writer（全局与会话入口彻底分离）。
-  assert.equal(props.updateGlobalRole, undefined, '右侧栏不再承载全局写入')
-
-  const result = await props.loadSession()
-  assert.deepEqual(sessionCalls, ['sess-p1'], '必须带 sessionId 调 strict getSessionConfig')
-  assert.equal(result.ok, true)
-  const role = result.view.roles[0]
-  assert.equal(role.roleId, 'role-sashi')
-  assert.equal(role.sourceLayer, 'session', '来源层来自 sources.roles[].layer')
-  assert.deepEqual(role.overrideFields, ['channel'], '覆盖来自 overrides[roleId]')
-  assert.equal(role.state.color, 'green', '三色来自 Host roleStates')
-  assert.equal(role.fieldSources['channel.model'], 'session')
-  assert.equal(role.fieldSources.name, 'global')
-  assert.equal(result.view.defaultRoleSource, 'project')
-
-  const t = (k) => k
-  const listTree = exports.__test.renderRolePane(t, result.view)
-  const listStrings = []
-  collectStringsDeep(listTree, listStrings)
-  assert.ok(listStrings.includes('沙僧'), '角色名可见')
-  assert.ok(listStrings.includes('roleListNote'), '面板说明可见')
-  const switchNode = findNodeDeep(
-    listTree,
-    (node) => node.type === 'button' && node.props && node.props.role === 'switch',
-  )
-  assert.ok(switchNode, '每行有原生 role=switch 控件')
-  assert.equal(switchNode.props['aria-checked'], true)
-  assert.match(String(switchNode.props.style.background), /state-success-primary/, '绿色=启用且正常/未知')
-  assert.ok(!listStrings.includes('SS'), '列表不显示别名')
-  assert.ok(!listStrings.includes('flash-1') && !listStrings.includes('flash-2'), '列表不显示模型')
-  assert.ok(!listStrings.includes('ch-acp-flash'), '列表不显示通道细节')
-
-  const detailTree = exports.__test.renderRolePane(t, result.view, {
-    selectedRoleId: 'role-sashi',
-    scope: 'session',
-    showScope: false,
-    draft: exports.__test.draftOfRole(role),
-  })
-  const detailStrings = []
-  collectStringsDeep(detailTree, detailStrings)
-  // B2：单一角色设定 + CLI/模型/强度；不再有「通道」用户概念
-  for (const key of ['fieldName', 'fieldAliases', 'fieldSetting', 'fieldCli', 'fieldModel', 'fieldReasoning']) {
-    assert.ok(detailStrings.includes(key), `详情字段 ${key} 可见`)
-  }
-  assert.ok(detailStrings.includes('sourceGlobal'), '字段来源（全局）可见')
-  assert.ok(detailStrings.includes('sourceSession'), '字段来源（会话）可见')
-  assert.ok(detailStrings.includes('restoreInherit'), '会话覆盖字段有恢复继承')
-  assert.ok(findNodeDeep(detailTree, (node) => node.type === 'input'), '详情可编辑（input）')
-  assert.ok(findNodeDeep(detailTree, (node) => node.type === 'select'), 'CLI/模型是真实选项（select）')
-  assert.ok(findNodeDeep(detailTree, (node) => node.type === 'textarea'), '角色设定可编辑（textarea）')
-  // B1：不再渲染「本会话 / 全局」scope 切换按钮（全局编辑在设置页内联面板）。
-  assert.ok(!detailStrings.includes('scopeSession'), '右侧栏无会话 scope 按钮')
-  assert.ok(!detailStrings.includes('scopeGlobal'), '右侧栏无全局 scope 按钮')
-})
 
 
-test('Browser half：getSessionConfig 失败时 pane 只显示一行错误摘要（不抛、不空白）', async () => {
-  const failure = {
-    ok: false,
-    error: { code: 'SESSION_GUI_SESSION_ROOT_UNKNOWN', message: '无法定位项目根' },
-  }
-  const { exports, registrations } = await loadClientHarness({ sessionValue: failure })
-  const pane = registrations.find((r) => r.options.name === 'sidebar.right.pane.tab')
-  const result = await pane.options.inject('sess-x').loadSession()
-  assert.equal(result.ok, false, 'loader 返回错误结果而不是 reject')
-  assert.equal(result.error.code, 'SESSION_GUI_SESSION_ROOT_UNKNOWN')
 
-  const t = (k) => k
-  const tree = exports.__test.renderPaneError(t, result.error)
-  const strings = []
-  collectStringsDeep(tree, strings)
-  assert.ok(strings.includes('paneTitle'), '标题仍在（不是空白）')
-  assert.ok(strings.includes('roleListNote'), '面板说明仍在')
-  assert.ok(
-    strings.join(' ').includes('[SESSION_GUI_SESSION_ROOT_UNKNOWN] 无法定位项目根'),
-    '错误码 + 摘要可见',
-  )
-  assert.ok(findNode(tree, (n) => n.props && n.props.role === 'alert'), '失败时是 alert')
-  assert.ok(
-    findNode(tree, (n) => n.props && n.props.style && n.props.style.whiteSpace === 'nowrap'),
-    '错误摘要保持一行（nowrap）',
-  )
-})
 
-test('Browser half：getSessionConfig 抛错时 loader 收口为 REMOTE_CALL_FAILED，不冒泡', async () => {
-  const { registrations } = await loadClientHarness({ sessionThrows: new Error('gateway boom') })
-  const pane = registrations.find((r) => r.options.name === 'sidebar.right.pane.tab')
-  const result = await pane.options.inject('sess-y').loadSession()
-  assert.equal(result.ok, false)
-  assert.equal(result.error.code, 'REMOTE_CALL_FAILED')
-  assert.match(result.error.message, /gateway boom/)
-})
+
+
+
+
+
 
 test('Browser half：list 失败（ok!==true）时 loader 抛错而非伪装', async () => {
   const { exports } = await loadClientHarness()
@@ -1293,10 +963,12 @@ test('client 源文件：无占位数据，且命名空间读取走 ctx.get 惰�
   assert.doesNotMatch(source, /ctx\.inject\(\[REMOTE_INJECT\]/, '不得把注册阻塞在 ctx.inject 回调')
   assert.match(source, /ctx\.get\(/, '命名空间服务应通过 ctx.get 惰性获取')
   assert.match(source, /service\.list\(\)/, '数据读取应发生在惰性解析出的服务上')
-  // P0-S0：带参会话 Remote 恢复，且必须使用真实 zod strict codec。
-  assert.match(source, /method: 'getSessionConfig'/)
-  assert.match(source, /method: 'setSessionOverride'/)
-  assert.match(source, /method: 'clearSessionOverride'/)
+  // B3：会话级 remote / 角色 slot 必须不存在；只保留配置方法。
+  assert.doesNotMatch(source, /method: '(getSessionConfig|setSessionOverride|clearSessionOverride)'/)
+  assert.doesNotMatch(source, /registerHeaderAction|registerSidebarTab|SidebarRolePane/)
+  assert.match(source, /method: 'updateGlobalRole'/)
+  assert.match(source, /method: 'createGlobalRole'/)
+  assert.match(source, /method: 'deleteGlobalRole'/)
   assert.match(source, /require\('zod'\)/, '浏览器侧必须复用宿主平台 seed 的 zod')
   assert.match(source, /mode: 'strict'/, '参数 codec 必须 strict')
   assert.doesNotMatch(source, /src-json[^\n]*parameters/, '不得用 src-json 伪造带参方法')
@@ -1310,14 +982,7 @@ test('client 源文件：无占位数据，且命名空间读取走 ctx.get 惰�
   assert.match(source, /function Tag\(/, '本地最小 Tag')
   assert.match(source, /function IconUsers\(/, '内联 SVG 图标')
   assert.match(source, /var\(--dsw-alias-/, '样式使用宿主 token')
-  assert.match(source, /priority: 'extension'/, 'priority 必须是官方档位字符串')
-  // U1a：侧栏只读接 strict getSessionConfig；失败不抛。
-  assert.match(source, /loadSession:/, '侧栏 seat 注入会话 loader')
-  assert.match(source, /service\.getSessionConfig\(sessionId\)/, '调用 strict getSessionConfig')
-  assert.match(source, /function makeSessionConfigLoader\(/, '独立的不抛 loader')
-  // 顶部文案「角色」+ SVG（无 Icon 依赖）。
-  assert.match(source, /headerTitle: '角色'/)
-  assert.match(source, /IconUsers, \{ size: 16 \}/)
+
   // 渲染期错误也走统一日志（module/phase/version/stack）。
   assert.match(source, /function safeRender\(/, '渲染期 guard')
   assert.match(source, /guiLog\('error', module, phase/, '渲染错误走统一日志')
@@ -1690,4 +1355,119 @@ test('Browser half：zod 不可用时只挂无参 list（不伪造 strict）', a
   assert.deepEqual(mounted[0].descriptors.map((d) => d.method), ['list'])
   const hasStrictLog = logs.some(([level, line]) => level === 'warn' && line.includes('ZOD_UNAVAILABLE'))
   assert.equal(hasStrictLog, true, 'zod 不可用时必须留下明确降级日志')
+})
+
+test('B3：只注册 settings.section，无 header/sidebar 角色 slot', async () => {
+  const { registrations } = await loadClientHarness()
+  assert.deepEqual(
+    registrations.map((r) => r.options.name),
+    ['settings.section'],
+    '对话页头入口与右侧栏角色面板已下线',
+  )
+})
+
+test('B3：Remote 契约只剩 list + 5 个配置方法（无会话覆盖 remote）', async () => {
+  const { mounted, exports } = await loadClientHarness()
+  const methods = mounted[0].descriptors.map((d) => d.method)
+  assert.deepEqual(methods, [
+    'list',
+    'setCliEnabled',
+    'refreshCli',
+    'updateGlobalRole',
+    'createGlobalRole',
+    'deleteGlobalRole',
+  ])
+  for (const forbidden of ['getSessionConfig', 'setSessionOverride', 'clearSessionOverride']) {
+    assert.equal(methods.includes(forbidden), false, '会话级 remote 必须不存在：' + forbidden)
+    assert.equal(
+      exports.__test.REMOTE_CONTRIBUTION.descriptors.some((d) => d.method === forbidden),
+      false,
+    )
+  }
+})
+
+test('B3：$mount 失败时仍注册 settings.section 并可解释错误', async () => {
+  const { registrations } = await loadClientHarness({ mountError: new Error('mount boom') })
+  assert.deepEqual(registrations.map((r) => r.options.name), ['settings.section'])
+  const snapshot = await registrations[0].options.inject().list()
+  assert.equal(snapshot.unavailable.code, 'REMOTE_MOUNT_FAILED')
+  assert.match(snapshot.unavailable.message, /mount boom/)
+})
+
+test('B3：slots 缺失时只记录 section 一条注册错误', async () => {
+  const { registrations, logs } = await loadClientHarness({ omitSlots: true })
+  assert.deepEqual(registrations, [])
+  const errors = logs.filter(([level]) => level === 'error').map(([, line]) => line)
+  assert.equal(errors.length, 1)
+  assert.match(errors[0], /module=section phase=register/)
+})
+
+test('B3：注册日志只含 remote/section（无 header/sidebar）', async () => {
+  const { logs } = await loadClientHarness()
+  const infos = logs.filter(([level]) => level === 'info').map(([, line]) => line)
+  for (const [module, phase] of [['remote', 'mount'], ['section', 'register']]) {
+    assert.ok(
+      infos.includes(
+        `[meetingstone] gui module=${module} phase=${phase} version=0.1.0-alpha status=ok`,
+      ),
+    )
+  }
+  assert.ok(infos.every((line) => !/module=(header|sidebar)/.test(line)))
+})
+
+test('B3：channels 声明合并进能力目录（config 优先于 static，不覆盖 discovered）', async () => {
+  const { exports } = await loadClientHarness()
+  const backend = [
+    {
+      id: 'codebuddy',
+      label: 'CodeBuddy',
+      provider: 'acp',
+      models: [
+        { id: 'old-static', label: 'old', provider: 'acp', source: 'static' },
+        { id: 'discovered-1', label: 'd1', provider: 'acp', source: 'discovered' },
+      ],
+      strengths: [],
+      sources: { models: 'static', strengths: 'unknown' },
+      refreshedAt: null,
+      errors: [],
+    },
+  ]
+  const view = {
+    capabilities: backend,
+    global: {
+      channels: [
+        { channelId: 'ch-acp-flash', kind: 'acp-cli', provider: 'acp', model: 'glm-5.3-flash', reasoning: 'high' },
+      ],
+    },
+  }
+  const capabilities = exports.__test.capabilitiesOf(view)
+  assert.deepEqual(capabilities.map((c) => c.id), ['dsh', 'claude', 'codex', 'codebuddy'])
+  const codebuddy = capabilities.find((c) => c.id === 'codebuddy')
+  const model = codebuddy.models.find((m) => m.id === 'glm-5.3-flash')
+  assert.equal(model.source, 'config', 'channels 声明以 config 来源并入')
+  assert.equal(model.provider, 'acp')
+  assert.equal(codebuddy.models.find((m) => m.id === 'old-static').source, 'static', '静态项保留原来源')
+  assert.equal(
+    codebuddy.models.find((m) => m.id === 'discovered-1').source,
+    'discovered',
+    '不覆盖动态发现项',
+  )
+  assert.equal(codebuddy.sources.models, 'config')
+  assert.equal(codebuddy.strengths.find((s) => s.id === 'high').source, 'config')
+  assert.equal(codebuddy.sources.strengths, 'config')
+  assert.equal(exports.__test.capabilitySourceKey('config'), 'sourceConfig')
+
+  // 保存映射：config 模型 + 匹配实例 → 写回内部 channel（channelId 保留）
+  const combo = exports.__test.channelForCombo(
+    (key) => key,
+    { cli: 'codebuddy', model: 'glm-5.3-flash', reasoning: 'high' },
+    capabilities,
+    view.global.channels.map((c) => ({ ...c })),
+  )
+  assert.equal(combo.error, null)
+  assert.equal(combo.channel.channelId, 'ch-acp-flash')
+  assert.equal(combo.channel.kind, 'acp-cli')
+  assert.equal(combo.channel.provider, 'acp')
+  assert.equal(combo.channel.model, 'glm-5.3-flash')
+  assert.equal(combo.channel.reasoning, 'high')
 })

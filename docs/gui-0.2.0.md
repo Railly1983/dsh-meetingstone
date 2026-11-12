@@ -803,3 +803,49 @@ Host 侧新增两个 handler（`src/gui/host.js`），参数 codec 与 client de
 - 真机设置页/编辑器/开关/刷新按钮的真实渲染与 `refreshCli` 网关往返；
 - Codex 动态模型发现的实机可用性（B2b 仅独立脚本验证；DSH host llm 在插件内未真机确认）；
 - 刷新失败的 UI 错误提示与来源标注在真实宿主下的可读性。
+
+## 14. B3：去掉会话级角色配置 + 移除角色入口 + 修复模型/强度 + 设置页返回（2026-11-12，task-17）
+
+> 用户 2026-11-12 决定：本插件**只保留全局角色设定**，取消项目级/会话级角色配置。
+> B3 与 B2b/A、B2c/B 的关系：本版删会话级路径；「模型/强度不出值」由 **客户端 B 合并**（channels 声明并入能力目录，source=`config`）兜底，后端 A（provider 行 → 能力目录 config 源）由 task-18 落地。
+
+### 14.1 四项对照
+
+| # | 任务项 | 实现 | 证据 |
+| --- | --- | --- | --- |
+| 1 | 下线会话级覆盖 | Host strict Remote 删除 `getSessionConfig` / `setSessionOverride` / `clearSessionOverride`（descriptors **9 → 6**：list + 5 配置方法）；删除 `src/gui/session.js` / `session-remote.js` / `session-root.js` / `src/session/store.js` 及 `src/index.js` 中 sessionStore/sessionApi/sessionRoots 接线；`resolveRegistry` 不再读取/合并会话配置（不再读 `.meetingstone/sessions/*.json`） | `src/gui/host.js`、`src/gui/typert-spec.js`、`src/index.js`；测试「B3：Remote 契约只剩 list + 5 个配置方法」 |
+| 2 | 移除右上角「角色」入口 | 删除对话页头 `conversation.session.header.actions` 注册、右侧栏 `sidebar.right.pane.tab` / `.title` 注册；删除 HeaderEntry / SidebarRolePane / renderRolePane / renderRoleList / registerHeaderAction / registerSidebarTab；**只注册 `settings.section`** | `src/client/index.js`；测试「B3：只注册 settings.section，无 header/sidebar 角色 slot」 |
+| 3 | 模型/强度有值 | 客户端 B：`capabilitiesOf()` 把 `global.channels` 的 `{kind,provider,model,reasoning}` 合并进 4 CLI 能力目录，source=`config`，优先级 `discovered > config > static > unknown`（不覆盖 discovered）；模型/强度下拉即有值；保存仍映射内部 channel（匹配实例时保留 channelId） | `src/client/index.js:capabilitiesOf`；测试「B3：channels 声明合并进能力目录」 |
+| 4 | 设置页返回按钮 | 设置 → 集合石 → 角色管理头部加「← 返回」，调用 `onBackToSettings` 收起管理面板回到设置主区（无新路由） | `renderGlobalRoleManager`；测试「B3：设置页角色区有返回按钮」 |
+
+### 14.2 能力合并取值样例（真实 profile channels + 后端默认目录，只读实测）
+
+| 角色 | CLI | 配置模型/强度 | 编辑器模型选项（来源） | 强度选项 | 保存映射 |
+| --- | --- | --- | --- | --- | --- |
+| 唐僧 | codebuddy | kimi-k3.1-pro / high | glm-5.3-flash@acp(config)、hy3@acp-hy4(config)、hy4free@acp-hy4free(config)、kimi-k3.1-pro@acp-kimi(config) | high(config) | ch-acp-kimi / acp-cli / acp-kimi / kimi-k3.1-pro / high |
+| 悟空 | codebuddy | hy4free / high | 同上 | high(config) | ch-acp-hy4free / acp-hy4free / hy4free / high |
+| 沙僧 | codebuddy | glm-5.3-flash / high | 同上 | high(config) | ch-acp-flash / acp / glm-5.3-flash / high |
+| 小白 | codebuddy | hy3 / high | 同上 | high(config) | ch-acp-hy4 / acp-hy4 / hy3 / high |
+| 八戒 | dsh | （未声明） | 空（unknown，置灰标「不支持」） | 空 | ch-inprocess / in-process / spawn |
+| 唐僧/悟空…（codex 角色） | codex | gpt-6-astra / gpt-6.1-sol | gpt-6-astra@codex(config)、gpt-6.1-sol@codex-sol(config) | 空（unknown；可「刷新能力」走 codex app-server 动态发现） | 对应 ch-codex-* |
+
+> 口径：值为**只读实测**（真实 profile `cordis.patch.yml` 的 channels + 客户端 `capabilitiesOf` 输出）；不是真机 GUI 截图。
+
+### 14.3 兼容与残留
+
+- 旧 `.meetingstone/sessions/*.json`：Lead 已归档到 `sessions-archive/`；B3 后**不再读取**该路径（文件保留、不迁移、不清理）。
+- `resolveEffectiveConfig` 仍保留可选的 `session` 入参（纯合并函数），但**生产无调用方传入**；如需彻底删除该参数需单独拆分模块（建议后续任务，不在 B3 内）。
+- 项目层 `.meetingstone.json` 角色仍参与合并（本轮未删除项目层；当前真实模型声明在该文件中，删除会丢失模型数据，需另立迁移任务）。
+- 用户可见文案无「通道」；能力来源新增 `config` 标注（「配置」）。
+
+### 14.4 测试
+
+- `npm test`：**537 tests / 536 pass / 0 fail / 1 skip**。
+- 新增回归：「无 header/sidebar 角色 slot（只注册 settings.section）」「无会话覆盖 remote（descriptors = list + 5 配置）」「$mount 失败仍注册设置页」「slots 缺失只记录 section」「channels→capabilities config 合并与保存映射」「设置页返回按钮」。
+- `npm run verify`：exit=0（host-schema/manifest/package 通过）。
+
+### 14.5 未验证（待 alpha.6 真机）
+
+- 真机设置页两区/全局角色开关/新增删除/编辑器模型强度/返回按钮的真实渲染；
+- `refreshCli` 网关往返与 codex 动态发现实机可用性；
+- DSH host `ctx.llm.listModels()` 在插件内的实机形态（dsh CLI 目前 unknown）。

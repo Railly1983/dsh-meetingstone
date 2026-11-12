@@ -34,7 +34,6 @@ import {
   inspectReadiness,
 } from '../src/gui/state-model.js'
 import { fieldSource, resolveEffectiveConfig } from '../src/session/config.js'
-import { createSessionOverrideStore } from '../src/session/store.js'
 
 const ROOT = 'D:/proj'
 
@@ -289,94 +288,7 @@ test('sources：规范化后的 enabled 默认值不得被当成显式偏好', (
   assert.equal(view.userPreference, USER_PREFERENCE.UNSET)
 })
 
-test('三级继承：每字段标注 global/project/session/default，恢复继承后回落', () => {
-  const globalRaw = {
-    roles: [
-      {
-        roleId: 'role-a',
-        name: 'A',
-        description: '全局描述',
-        enabled: true,
-        channel: { kind: 'acp-cli', provider: 'acp', model: 'm-global' },
-      },
-    ],
-  }
-  const global = normalizeConfig(globalRaw)
-  const project = {
-    version: 1,
-    roles: [],
-    roleOverrides: { 'role-a': { description: '项目描述', enabled: false } },
-  }
-  const session = {
-    version: 1,
-    roleOverrides: { 'role-a': { channel: { model: 'm-session' }, enabled: true } },
-  }
 
-  const globalBefore = JSON.stringify(globalRaw)
-  const resolved = resolveEffectiveConfig({ global, globalRaw: globalRaw, project, session })
-  const fields = resolved.sources.roles['role-a'].fields
-  assert.deepEqual(fields, {
-    name: 'global',
-    aliases: 'default',
-    setting: 'project',
-    fallbackRoleId: 'default',
-    timeoutMs: 'default',
-    enabled: 'session',
-    'channel.kind': 'global',
-    'channel.provider': 'global',
-    'channel.model': 'session',
-  })
-  const role = resolved.effective.roles.find((item) => item.roleId === 'role-a')
-  assert.equal(role.enabled, true, 'session 显式启用覆盖 project 的禁用')
-  assert.equal(deriveUserPreference(role, { sources: resolved.sources }), USER_PREFERENCE.ENABLED)
-
-  // 会话层撤回（恢复继承）后：enabled 回到 project，model 回到 global
-  const restored = resolveEffectiveConfig({ global, globalRaw: globalRaw, project })
-  const restoredRole = restored.effective.roles.find((item) => item.roleId === 'role-a')
-  assert.equal(fieldSource(restored.sources, 'role-a', 'enabled'), 'project')
-  assert.equal(fieldSource(restored.sources, 'role-a', 'channel.model'), 'global')
-  assert.equal(deriveUserPreference(restoredRole, { sources: restored.sources }), USER_PREFERENCE.DISABLED)
-
-  // 三层解析不得改写任何入参
-  assert.equal(JSON.stringify(globalRaw), globalBefore)
-  assert.deepEqual(project.roleOverrides['role-a'], { description: '项目描述', enabled: false })
-  assert.deepEqual(session.roleOverrides['role-a'], { channel: { model: 'm-session' }, enabled: true })
-})
-
-test('恢复继承（store.clearOverride）后会话文件不残留、来源回到继承层', async () => {
-  const fs = memoryFs()
-  const store = createSessionOverrideStore(fs.deps)
-  const globalRaw = { roles: [roleA({ enabled: true })] }
-  const global = normalizeConfig(globalRaw)
-  const inherited = resolveEffectiveConfig({ global, globalRaw }).effective.roles[0]
-
-  const written = await store.setOverride(ROOT, 'sess-a', {
-    roleId: 'role-a',
-    patch: { enabled: false },
-    inherited,
-  })
-  assert.equal(written.written, true)
-  assert.deepEqual(written.config.roleOverrides['role-a'], { enabled: false }, '会话层只存差异')
-
-  const withSession = resolveEffectiveConfig({ global, globalRaw, session: written.config })
-  assert.equal(fieldSource(withSession.sources, 'role-a', 'enabled'), 'session')
-  assert.equal(
-    deriveUserPreference(withSession.effective.roles[0], { sources: withSession.sources }),
-    USER_PREFERENCE.DISABLED,
-  )
-
-  const cleared = await store.clearOverride(ROOT, 'sess-a', { roleId: 'role-a', field: 'enabled' })
-  assert.deepEqual(cleared.config.roleOverrides, {}, '恢复继承后角色条目删除')
-
-  const after = resolveEffectiveConfig({ global, globalRaw, session: cleared.config })
-  assert.equal(fieldSource(after.sources, 'role-a', 'enabled'), 'global')
-  assert.equal(
-    deriveUserPreference(after.effective.roles[0], { sources: after.sources }),
-    USER_PREFERENCE.ENABLED,
-  )
-  // 全局配置对象没有被会话写入污染
-  assert.deepEqual(globalRaw.roles[0], roleA({ enabled: true }))
-})
 
 test('GUI 数据层：list 快照带三字段与颜色，旧 availability 保留', () => {
   const raw = { roles: [roleA()] }

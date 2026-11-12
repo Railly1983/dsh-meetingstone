@@ -8,7 +8,7 @@
  *
  * 继承顺序：全局（profile 的 `meetingstone` 行）→ 项目（`.meetingstone.json`）
  * → 当前会话（本文件处理的那一层）。会话层**只影响当前 Session**：
- * 存储按 sessionId 分文件（见 store.js），解析时只传入当前会话的覆盖。
+ * B3 已下线会话级文件存储与 GUI 读写路径；本模块只保留纯合并能力（无生产调用方传入 session）。
  *
  * 边界（勿破坏）：
  * - 纯函数：不读文件、不碰宿主 API；IO 全部在 store.js

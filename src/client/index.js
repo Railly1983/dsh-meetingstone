@@ -30,9 +30,8 @@
  *     → Host src/gui/host.js（TypertRemoteService + Remote("list")）
  *     → registry.list() / cfg.channels / cfg.limits / cfg 调度字段 / 本机 CLI 探测
  *
- * 范围：全局设置（CLI 连接、全局角色库、默认模型、额度/并发策略、
- * 全局调度规则、最近错误）只读；会话 Remote（get/set/clearSessionOverride）
- * 已恢复 strict codec，供后续会话面板写操作使用（本版不接 UI）。
+ * 范围（B3）：只保留设置页全局配置（CLI 连接、全局角色库、能力目录、最近错误）；
+ * 会话级角色配置/remote、对话页头入口、右侧栏角色面板均已下线。
  */
 
 window.__ModuleLoader__.load({
@@ -41,7 +40,6 @@ window.__ModuleLoader__.load({
     var module = { exports: {} }
     var exports = module.exports
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
-
 
     /** 顶层 require 失败也不能让入口激活失败（宿主按 entry 判死）。 */
     function safeRequire(name, fallback) {
@@ -91,14 +89,6 @@ window.__ModuleLoader__.load({
      */
     const PLUGIN_VERSION = '0.1.0-alpha'
 
-    /** 右侧栏 tab 的 kind（`sidebarRight.openTab(kind)` 用它打开）。 */
-    const TAB_KIND = 'meetingstone-roles'
-
-    /** 右侧栏 tab 的 id（keyed seat 的 key）。 */
-    const TAB_ID = 'meetingstone-roles'
-    /** 标题右侧入口（conversation.session.header.actions）的 id。 */
-    const HEADER_ACTION_ID = 'meetingstone-role'
-
     // Remote namespace / method 必须与 Host src/gui/host.js 的 GUI_REMOTE_SERVICE 对齐。
     const REMOTE_PACKAGE = 'dsh-meetingstone'
     const REMOTE_SERVICE = 'meetingstone'
@@ -137,64 +127,11 @@ window.__ModuleLoader__.load({
     const booleanCodec = () => strictCodec(SESSION_TYPES.booleanValue, () => z.boolean())
 
     /**
-     * 三个带参会话方法的 client descriptor。参数 codec 全部 strict（真实 zod），
-     * 与 Host 使用同一 typeSymbol；`result` 用 src-json 原样透传
-     * （Gateway 客户端只强制输入 codec，见 dsh-api-gateway/lib/client.browser.js:2101-2109）。
-     *
-     * 不能退回 `src-json` 参数：`ctx.remote.$mount` 的 `requireStrictInputs`
-     * 会直接拒绝并报 `has no strict codec`——0.2.0 的回退原因。
+     * 5 个配置方法的 client descriptor（B3：会话级 remote 已整体下线）。
+     * 参数 codec 全部 strict（真实 zod），与 Host 同一 typeSymbol；result 用 src-json 透传。
      */
-    const SESSION_DESCRIPTORS = z
+    const REMOTE_DESCRIPTORS = z
       ? [
-          {
-            id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/getSessionConfig`,
-            service: REMOTE_SERVICE,
-            namespace: REMOTE_SERVICE,
-            method: 'getSessionConfig',
-            parameters: [
-              {
-                name: 'sessionId',
-                wire: 'sessionId',
-                source: 'json',
-                codec: sessionIdCodec(),
-              },
-            ],
-            invocation: { kind: 'direct' },
-            result: { mode: 'src-json' },
-          },
-          {
-            id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/setSessionOverride`,
-            service: REMOTE_SERVICE,
-            namespace: REMOTE_SERVICE,
-            method: 'setSessionOverride',
-            parameters: [
-              { name: 'sessionId', wire: 'sessionId', source: 'json', codec: sessionIdCodec() },
-              { name: 'roleId', wire: 'roleId', source: 'json', codec: roleIdCodec() },
-              { name: 'field', wire: 'field', source: 'json', codec: fieldCodec() },
-              { name: 'value', wire: 'value', source: 'json', codec: jsonValueCodec() },
-            ],
-            invocation: { kind: 'direct' },
-            result: { mode: 'src-json' },
-          },
-          {
-            id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/clearSessionOverride`,
-            service: REMOTE_SERVICE,
-            namespace: REMOTE_SERVICE,
-            method: 'clearSessionOverride',
-            parameters: [
-              { name: 'sessionId', wire: 'sessionId', source: 'json', codec: sessionIdCodec() },
-              { name: 'roleId', wire: 'roleId', source: 'json', codec: roleIdCodec() },
-              {
-                name: 'field',
-                wire: 'field',
-                source: 'json',
-                acceptsUndefined: true,
-                codec: fieldCodec(),
-              },
-            ],
-            invocation: { kind: 'direct' },
-            result: { mode: 'src-json' },
-          },
           {
             id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/setCliEnabled`,
             service: REMOTE_SERVICE,
@@ -278,7 +215,7 @@ window.__ModuleLoader__.load({
           invocation: { kind: 'direct' },
           result: { mode: 'src-json' },
         },
-        ...SESSION_DESCRIPTORS,
+        ...REMOTE_DESCRIPTORS,
       ],
     }
 
@@ -423,11 +360,23 @@ window.__ModuleLoader__.load({
       'acp-cli': 'codebuddy',
     }
 
-    /** 能力来源 → i18n key（discovered/static/unknown，不猜）。 */
+    /** 能力来源 → i18n key（discovered/config/static/unknown，不猜）。 */
     function capabilitySourceKey(source) {
       if (source === 'discovered') return 'sourceDiscovered'
+      if (source === 'config') return 'sourceConfig'
       if (source === 'static') return 'sourceStatic'
       return 'sourceUnknown'
+    }
+
+    /** 来源优先级：discovered > config > static > unknown。 */
+    const CAPABILITY_SOURCE_RANK = { discovered: 3, config: 2, static: 1, unknown: 0 }
+
+    /** 取两个来源中更高的一个（空值忽略）。 */
+    function higherCapabilitySource(current, next) {
+      if (!next) return current
+      const left = CAPABILITY_SOURCE_RANK[current] ?? 0
+      const right = CAPABILITY_SOURCE_RANK[next] ?? 0
+      return right > left ? next : current
     }
 
     /**
@@ -644,157 +593,6 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 会话生效视图 `{ effective, overrides, sources, channels, roleStates }` → 只读投影。
-     *
-     * Remote 返回值是外部数据：逐字段收窄。`sources.roles[roleId].fields` 给出
-     * 每个字段的来源层；`roleStates` 给出三色（缺失时按灰/未知，不伪造 ready）。
-     * @param {unknown} value
-     */
-    function normalizeSessionConfigView(value) {
-      const source = asObject(value)
-      const effective = asObject(source.effective)
-      const overrides = asObject(source.overrides)
-      const sources = asObject(source.sources)
-      const roleSources = asObject(sources.roles)
-      const stateById = new Map()
-      for (const item of asArray(source.roleStates)) {
-        const state = normalizeRoleState(item)
-        const roleId = asString(asObject(item).roleId)
-        if (roleId) stateById.set(roleId, state)
-      }
-      const fieldKeys = ['name', 'aliases', 'setting', 'enabled']
-      const channelKeys = ['channelId', 'kind', 'provider', 'cli', 'model', 'reasoning']
-
-      /** @type {any[]} */
-      const roles = asArray(effective.roles)
-        .filter((role) => role && typeof role === 'object')
-        .map((role) => {
-          const roleId = asString(role.roleId)
-          const roleSource = asObject(roleSources[roleId])
-          const layer = SOURCE_LAYERS.has(asString(roleSource.layer))
-            ? asString(roleSource.layer)
-            : 'unknown'
-          const channel = asObject(role.channel)
-          const overridePatch = asObject(overrides[roleId])
-          const rawFields = asObject(roleSource.fields)
-          /** @type {Record<string, string>} */
-          const fieldSources = {}
-          for (const key of fieldKeys) {
-            const value = asString(rawFields[key])
-            fieldSources[key] = SOURCE_LAYERS.has(value) ? value : 'default'
-          }
-          for (const key of channelKeys) {
-            const value = asString(rawFields[`channel.${key}`])
-            fieldSources[`channel.${key}`] = SOURCE_LAYERS.has(value) ? value : 'default'
-          }
-          const fallback = normalizeRoleState({
-            userPreference: role.enabled === false ? 'disabled' : 'unset',
-            readiness: 'unknown',
-            quota: 'unknown',
-            color: 'gray',
-            availability: 'unknown',
-          })
-          return {
-            roleId,
-            name: asString(role.name),
-            aliases: asArray(role.aliases).map(String),
-            // B2：单一角色设定；旧字段作为兼容镜像
-            setting:
-              asString(role.setting) || asString(role.prompt) || asString(role.description),
-            description: asString(role.description),
-            prompt: asString(role.prompt),
-            enabled: role.enabled !== false,
-            channel: {
-              channelId: asString(channel.channelId),
-              kind: asString(channel.kind),
-              provider: asString(channel.provider),
-              cli: asString(channel.cli),
-              model: asString(channel.model),
-              reasoning: asString(channel.reasoning),
-            },
-            channelId: asString(channel.channelId),
-            provider: asString(channel.provider),
-            model: asString(channel.model),
-            reasoning: asString(channel.reasoning),
-            sourceLayer: layer,
-            fieldSources,
-            overrideFields: Object.keys(overridePatch).sort(),
-            state: stateById.get(roleId) ?? fallback,
-          }
-        })
-      return {
-        roles,
-        defaultRoleId: asString(effective.defaultRoleId),
-        defaultRoleSource: SOURCE_LAYERS.has(asString(sources.defaultRoleId))
-          ? asString(sources.defaultRoleId)
-          : 'default',
-        // 详情页下拉只列真实已配置组合；空数组表示「待配置」，不补造模型表。
-        channels: asArray(source.channels).map(normalizeChannelOption),
-        // B2：CLI→模型→强度 能力矩阵（Host 可选提供；缺失时从 channels 现场推导）
-        capabilities: normalizeCapabilities(source.capabilities),
-        warnings: asArray(source.warnings)
-          .filter((item) => item && typeof item === 'object')
-          .map((item) => ({
-            code: asString(item.code) || 'SESSION_CONFIG_WARNING',
-            message: asString(item.message),
-          })),
-      }
-    }
-
-    /**
-     * 侧栏只读 loader：调用 strict `getSessionConfig(sessionId)`。
-     * **不抛**：成功 `{ ok:true, view }`，失败 `{ ok:false, error:{ code, message } }`，
-     * 让面板能显示一行错误摘要而不是空白/崩溃。能力检测后才调用。
-     * @param {any | (() => any | null)} serviceOrGet
-     * @param {string | null} [mountFailure]
-     */
-    function makeSessionConfigLoader(serviceOrGet, mountFailure) {
-      return async (sessionId) => {
-        if (mountFailure) {
-          return { ok: false, error: { code: 'REMOTE_MOUNT_FAILED', message: mountFailure } }
-        }
-        if (typeof sessionId !== 'string' || sessionId.length === 0) {
-          return { ok: false, error: { code: 'SESSION_ID_MISSING', message: '缺少会话 id' } }
-        }
-        const service = typeof serviceOrGet === 'function' ? serviceOrGet() : serviceOrGet
-        if (!service || typeof service.getSessionConfig !== 'function') {
-          return {
-            ok: false,
-            error: {
-              code: 'REMOTE_UNAVAILABLE',
-              message: 'remote.meetingstone.getSessionConfig 尚未就绪',
-            },
-          }
-        }
-        try {
-          const result = await service.getSessionConfig(sessionId)
-          if (!result || result.ok !== true) {
-            const failure = asObject(result && result.error)
-            return {
-              ok: false,
-              error: {
-                code: asString(failure.code) || 'REMOTE_CALL_FAILED',
-                message: asString(failure.message),
-              },
-            }
-          }
-          return { ok: true, view: normalizeSessionConfigView(result.value) }
-        } catch (error) {
-          return {
-            ok: false,
-            error: {
-              code:
-                error && typeof error === 'object' && typeof error.code === 'string'
-                  ? error.code
-                  : 'REMOTE_CALL_FAILED',
-              message: error instanceof Error ? error.message : String(error),
-            },
-          }
-        }
-      }
-    }
-
-    /**
      * 统一 Remote 调用：能力检测 + `{ok,value}` 解包 + 不抛错。
      * 写操作失败必须原样返回错误（调用方不做乐观更新）。
      * @param {any | (() => any | null)} serviceOrGet
@@ -850,17 +648,6 @@ window.__ModuleLoader__.load({
             },
           }
         }
-      }
-    }
-
-    /** 会话写操作（只写当前会话覆盖；不碰全局/项目）。 */
-    function makeSessionActions(serviceOrGet, mountFailure) {
-      const call = makeRemoteCall(serviceOrGet, mountFailure)
-      return {
-        setOverride: (sessionId, roleId, field, value) =>
-          call('setSessionOverride', [sessionId, roleId, field, value]),
-        clearOverride: (sessionId, roleId, field) =>
-          call('clearSessionOverride', [sessionId, roleId, field]),
       }
     }
 
@@ -1177,8 +964,10 @@ window.__ModuleLoader__.load({
       sourceModels: '模型',
       sourceStrengths: '强度',
       sourceDiscovered: '动态',
+      sourceConfig: '配置',
       sourceStatic: '静态',
       sourceUnknown: '未知',
+      backToSettings: '返回',
       refreshCapabilities: '刷新能力',
       refreshing: '刷新中…',
       capabilityUnknown: '能力目录不可用（未知）',
@@ -1351,8 +1140,10 @@ window.__ModuleLoader__.load({
       sourceModels: 'Models',
       sourceStrengths: 'Strengths',
       sourceDiscovered: 'dynamic',
+      sourceConfig: 'config',
       sourceStatic: 'static',
       sourceUnknown: 'unknown',
+      backToSettings: 'Back',
       refreshCapabilities: 'Refresh capabilities',
       refreshing: 'Refreshing…',
       capabilityUnknown: 'Capability catalog unavailable (unknown)',
@@ -1804,6 +1595,8 @@ window.__ModuleLoader__.load({
         typeof opts.onConfirmDelete === 'function' ? opts.onConfirmDelete : () => {}
       const onCancelDelete =
         typeof opts.onCancelDelete === 'function' ? opts.onCancelDelete : () => {}
+      const onBackToSettings =
+        typeof opts.onBackToSettings === 'function' ? opts.onBackToSettings : onClose
       const pendingRoleIds = new Set(asArray(opts.pendingRoleIds).map(String))
       const onToggleRole = typeof opts.onToggleRole === 'function' ? opts.onToggleRole : () => {}
       const header = jsxs('div', {
@@ -1812,6 +1605,13 @@ window.__ModuleLoader__.load({
           jsx('h3', { style: { ...heading, fontSize: 13 }, children: t('globalRolesTitle') }),
           jsx('span', { style: grow }),
           jsx(Tag, { tone: 'info', children: t('globalRoleBadge') }),
+          // B3：设置页角色区「返回」——回到集合石设置主区（不引入新路由）。
+          jsx('button', {
+            type: 'button',
+            style: linkButton,
+            onClick: onBackToSettings,
+            children: `← ${t('backToSettings')}`,
+          }),
         ],
       })
       const note = jsx('p', { style: noteStyle, children: t('globalRolesNote') })
@@ -2416,6 +2216,7 @@ window.__ModuleLoader__.load({
                   onConfirmDelete: confirmDeleteManagerRole,
                   onCancelDelete: cancelDeleteManagerRole,
                   onToggleRole: toggleManagerRole,
+                  onBackToSettings: closeManager,
                   pendingRoleIds: managerPendingRoleIds,
                   onRefreshCapabilities: () => refreshManagerCapabilities(managerDraft?.cli),
                   refreshing: managerRefreshing,
@@ -2429,25 +2230,6 @@ window.__ModuleLoader__.load({
           }),
         () => renderFailureNote(t),
       )
-    }
-
-    /** 打开右侧栏角色面板：官方入口是 ctx.sidebarRight.openTab(kind, { params })。 */
-    function openRolePanelOf(slotCtx) {
-      try {
-        const right = typeof slotCtx.get === 'function' ? slotCtx.get('sidebarRight') : undefined
-        right?.openTab?.(TAB_KIND, { params: {} })
-      } catch {
-        /* 宿主未提供 openTab 时静默 */
-      }
-    }
-
-    /** Cordis 服务访问必须走 ctx.get（直接读属性会抛 without inject）。 */
-    function sidebarRightTabsOf(slotCtx) {
-      try {
-        return typeof slotCtx.get === 'function' ? slotCtx.get('sidebarRightTabs') : undefined
-      } catch {
-        return undefined
-      }
     }
 
     /** GUI 注册期错误：注册失败时页面上要能看见原因，而不是整块消失。 */
@@ -2664,100 +2446,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 单行 role switch（列表用）；颜色表达三色，状态仍是开/关。 */
-    function roleSwitchOf(t, role, pending, onToggle) {
-      const reason = roleReasonOf(t, role)
-      return jsx(Switch, {
-        checked: role.enabled === true,
-        label: `${t('roleSwitchLabel')}: ${role.name || role.roleId}`,
-        title: reason || (role.enabled === true ? t('roleEnabled') : t('roleDisabled')),
-        disabled: pending === true,
-        color: asObject(role.state).color,
-        onChange: (next) => onToggle(role.roleId, next),
-      })
-    }
-
-    /**
-     * 角色列表（右侧栏）：每行只有名称 + 三色二态 Switch；点击名称进详情。
-     * **不显示**模型/别名/通道细节；阻断/额度原因以 Tooltip + 一行说明给出。
-     * @param {(key: string) => string} t
-     * @param {any} view
-     * @param {{ onSelect?: Function, onToggleRole?: Function, pendingRoleIds?: string[], warning?: string }} [opts]
-     */
-    function renderRoleList(t, view, opts = {}) {
-      const roles = asArray(view?.roles)
-      const pending = new Set(asArray(opts.pendingRoleIds).map(String))
-      const onSelect = typeof opts.onSelect === 'function' ? opts.onSelect : () => {}
-      const onToggleRole = typeof opts.onToggleRole === 'function' ? opts.onToggleRole : () => {}
-      const note = asString(opts.warning)
-      return jsxs('div', {
-        style: { display: 'flex', flexDirection: 'column', gap: 6 },
-        children: [
-          note
-            ? jsx('p', {
-                role: 'status',
-                style: { ...noteStyle, color: 'var(--dsw-alias-state-error-primary)' },
-                children: note,
-              })
-            : null,
-          roles.length === 0
-            ? jsx('p', { style: noteStyle, children: t('noRoles') })
-            : jsx('div', {
-                style: list,
-                children: roles.map((role) => {
-                  const reason = roleReasonOf(t, role)
-                  return jsxs(
-                    'div',
-                    {
-                      style: {
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 10,
-                        padding: '6px 0',
-                        borderTop: '0.5px solid var(--dsw-alias-border-l4)',
-                      },
-                      children: [
-                        jsxs('div', {
-                          style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 },
-                          children: [
-                            jsx('button', {
-                              type: 'button',
-                              style: {
-                                background: 'none',
-                                border: 'none',
-                                padding: 0,
-                                textAlign: 'left',
-                                fontFamily: 'inherit',
-                                fontSize: 13,
-                                lineHeight: '20px',
-                                fontWeight: 600,
-                                color: C.primary,
-                                cursor: 'pointer',
-                                wordBreak: 'break-word',
-                              },
-                              'aria-label': `${t('roleOpenDetail')}: ${role.name || role.roleId}`,
-                              onClick: () => onSelect(role.roleId),
-                              children: role.name || role.roleId || t('unknown'),
-                            }),
-                            reason
-                              ? jsx('span', {
-                                  style: { ...meta, color: C.tertiary },
-                                  children: reason,
-                                })
-                              : null,
-                          ],
-                        }),
-                        roleSwitchOf(t, role, pending.has(role.roleId), onToggleRole),
-                      ],
-                    },
-                    role.roleId || role.name,
-                  )
-                }),
-              }),
-        ],
-      })
-    }
-
     /** 详情 draft：只包含可编辑字段；初始化自生效角色。
      *  B2（PDF 第 2 条）：单一「角色设定」+ CLI → 模型 → 思考强度；不再有「通道」。
      */
@@ -2873,41 +2561,10 @@ window.__ModuleLoader__.load({
       const list = direct.length > 0 ? direct : fromGlobal.length > 0 ? fromGlobal : []
       /** @type {Map<string, any>} */
       const byId = new Map(list.map((entry) => [entry.id, entry]))
-      if (byId.size === 0) {
-        // 旧快照兜底：从 channel 实例推导（仅兼容旧数据，不等于真实能力目录）。
-        const detailed = asArray(view?.global?.channels)
-        const channels = detailed.length > 0 ? detailed : asArray(view?.channels)
-        for (const channel of channels) {
-          const id = CLI_BY_CHANNEL_KIND[asString(channel?.kind)]
-          if (!id) continue
-          let entry = byId.get(id)
-          if (!entry) {
-            entry = {
-              id,
-              label: id,
-              provider: asString(channel?.provider),
-              models: [],
-              strengths: [],
-              sources: { models: 'unknown', strengths: 'unknown' },
-              refreshedAt: null,
-              errors: [],
-            }
-            byId.set(id, entry)
-          }
-          const model = asString(channel?.model)
-          if (model && !entry.models.some((item) => item.id === model)) {
-            entry.models.push({ id: model, label: model, provider: asString(channel?.provider), source: 'unknown' })
-          }
-          const reasoning = asString(channel?.reasoning)
-          if (reasoning && !entry.strengths.some((item) => item.id === reasoning)) {
-            entry.strengths.push({ id: reasoning, label: reasoning, source: 'unknown' })
-          }
-        }
-      }
-      // 固定 4 个 CLI：缺失项补空目录（source=unknown），保证下拉始终 4 项。
-      return CLI_IDS.map(
-        (id) =>
-          byId.get(id) ?? {
+      // 固定 4 个 CLI：缺失项先补空槽位（source=unknown）。
+      for (const id of CLI_IDS) {
+        if (!byId.has(id)) {
+          byId.set(id, {
             id,
             label: id,
             provider: '',
@@ -2916,8 +2573,39 @@ window.__ModuleLoader__.load({
             sources: { models: 'unknown', strengths: 'unknown' },
             refreshedAt: null,
             errors: [],
-          },
-      )
+          })
+        }
+      }
+      // B3（Lead 批准的 B 方案）：把 global.channels 的真实声明并入能力目录。
+      // 优先级 discovered > config > static > unknown —— config 是本机真实配置，高于静态表。
+      const detailed = asArray(view?.global?.channels)
+      const channels = detailed.length > 0 ? detailed : asArray(view?.channels)
+      for (const channel of channels) {
+        const id = CLI_BY_CHANNEL_KIND[asString(channel?.kind)]
+        if (!id) continue
+        const entry = byId.get(id)
+        const model = asString(channel?.model)
+        const reasoning = asString(channel?.reasoning)
+        const provider = asString(channel?.provider)
+        if (!entry.provider && provider) entry.provider = provider
+        if (model) {
+          const existing = entry.models.find((item) => item.id === model)
+          if (!existing) {
+            entry.models.push({ id: model, label: model, provider, source: 'config' })
+          } else if (existing.source !== 'discovered') {
+            existing.source = 'config'
+            if (provider) existing.provider = provider
+          }
+          entry.sources.models = higherCapabilitySource(entry.sources.models, 'config')
+        }
+        if (reasoning) {
+          const existing = entry.strengths.find((item) => item.id === reasoning)
+          if (!existing) entry.strengths.push({ id: reasoning, label: reasoning, source: 'config' })
+          else if (existing.source !== 'discovered') existing.source = 'config'
+          entry.sources.strengths = higherCapabilitySource(entry.sources.strengths, 'config')
+        }
+      }
+      return CLI_IDS.map((id) => byId.get(id))
     }
 
     /** 当前 CLI 条目（null = 未知 CLI）。 */
@@ -2989,48 +2677,6 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 会话 scope 的「只写差异」变更列表。
-     * - 名称/Prompt 不能写成空字符串：留空时改为「恢复继承」。
-     * - 切换通道实例时把 kind/provider/model/reasoning 一起对齐（避免派单 CHANNEL_MISMATCH）。
-     * @returns {{ changes: Array<{field: string, value?: any, restore?: true}>, error: string | null }}
-     */
-    function buildSessionChanges(t, role, draft, capabilities, channels) {
-      const changes = []
-      const current = asObject(role?.channel)
-      const name = asString(draft?.name).trim()
-      if (!name) return { changes, error: t('detailInvalidName') }
-      if (name !== asString(role?.name)) changes.push({ field: 'name', value: name })
-
-      const aliases = parseAliases(draft?.aliases)
-      const currentAliases = asArray(role?.aliases).map(String)
-      if (aliases.join('\u0000') !== currentAliases.join('\u0000')) {
-        changes.push({ field: 'aliases', value: aliases })
-      }
-
-      // B2：单一角色设定（旧 description/prompt 合并）
-      const setting = asString(draft?.setting)
-      const currentSetting =
-        asString(role?.setting) || asString(role?.prompt) || asString(role?.description)
-      if (setting !== currentSetting) {
-        if (!setting.trim()) changes.push({ field: 'setting', restore: true })
-        else changes.push({ field: 'setting', value: setting })
-      }
-
-      // B2c：CLI + 模型 + 强度 → 内部 channel（按能力目录映射，不伪造组合）。
-      const built = channelForCombo(t, draft, capabilities, channels)
-      if (built.error || !built.channel) return { changes, error: built.error ?? t('pendingConfig') }
-      const target = built.channel
-      for (const key of ['channelId', 'kind', 'provider', 'model', 'reasoning']) {
-        const next = asString(target[key])
-        const previous = asString(current[key])
-        if (next === previous) continue
-        if (!next) changes.push({ field: `channel.${key}`, restore: true })
-        else changes.push({ field: `channel.${key}`, value: next })
-      }
-      return { changes, error: null }
-    }
-
-    /**
      * 全局 scope 的 patch（一次写入，交给 S2 global writer）。空字符串不写入：
      * 全局层没有「删除字段」语义，Prompt/名称留空视为无效输入。
      * @returns {{ patch: Record<string, any>, error: string | null }}
@@ -3073,25 +2719,6 @@ window.__ModuleLoader__.load({
       return { patch, error: null }
     }
 
-    /** 会话保存：逐字段写覆盖（服务端只存差异），失败立即停止；不乐观更新。 */
-    async function saveSessionChanges({ roleId, changes, setOverride, clearOverride, reload }) {
-      let applied = 0
-      for (const change of changes) {
-        const result = change.restore
-          ? await clearOverride(roleId, change.field)
-          : await setOverride(roleId, change.field, change.value)
-        if (!result || result.ok !== true) {
-          return { ok: false, applied, error: result?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' } }
-        }
-        applied += 1
-      }
-      const loaded = await reload()
-      if (!loaded || loaded.ok !== true) {
-        return { ok: false, applied, error: loaded?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' } }
-      }
-      return { ok: true, applied, view: loaded.view }
-    }
-
     /** 全局保存：一次 patch 写入（调用方必须先做二次确认）。 */
     async function saveGlobalPatch({ roleId, patch, updateGlobalRole, reload }) {
       const result = await updateGlobalRole(roleId, patch)
@@ -3101,25 +2728,6 @@ window.__ModuleLoader__.load({
       const loaded = await reload()
       if (!loaded || loaded.ok !== true) {
         return { ok: false, error: loaded?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' } }
-      }
-      return { ok: true, view: loaded.view, value: result.value }
-    }
-
-    /**
-     * 角色开关：只写**当前会话**覆盖（`enabled`），成功后 reload。
-     * 失败原样返回，不做乐观假开启。
-     */
-    async function toggleSessionRole({ roleId, next, setOverride, reload }) {
-      if (typeof setOverride !== 'function') {
-        return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '会话写入未装配' } }
-      }
-      const result = await setOverride(roleId, 'enabled', next === true)
-      if (!result || result.ok !== true) {
-        return { ok: false, error: result?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' } }
-      }
-      const loaded = await reload()
-      if (!loaded || loaded.ok !== true) {
-        return { ok: false, error: loaded?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' }, value: result.value }
       }
       return { ok: true, view: loaded.view, value: result.value }
     }
@@ -3284,8 +2892,6 @@ window.__ModuleLoader__.load({
                 ),
               ],
             })
-
-
 
       const fields = [
         detailField(t, {
@@ -3469,61 +3075,6 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 右侧栏角色面板：列表 ↔ 详情（同栏切换，不新造弹窗体系）。
-     * 列表开关只写当前会话；详情只写会话覆盖（全局编辑见设置页内联管理器）。
-     */
-    function renderRolePane(t, view, opts = {}) {
-      const selectedRoleId = asString(opts.selectedRoleId)
-      return jsxs('div', {
-        style: root,
-        children: [
-          jsx('h3', { style: heading, children: t('paneTitle') }),
-          jsx('p', { style: noteStyle, children: t('roleListNote') }),
-          detailErrorLine(t, opts.error),
-          selectedRoleId
-            ? renderRoleDetail(t, view, selectedRoleId, opts)
-            : renderRoleList(t, view, opts),
-        ],
-      })
-    }
-
-    /** 面板加载中：标题 + 说明 + 加载提示（不空白）。 */
-    function renderPaneLoading(t) {
-      return jsxs('div', {
-        style: root,
-        children: [
-          jsx('h3', { style: heading, children: t('paneTitle') }),
-          jsx('p', { style: noteStyle, role: 'status', 'aria-live': 'polite', children: t('loading') }),
-        ],
-      })
-    }
-
-    /** 面板失败：标题 + 只读说明 + **一行**错误摘要（title 里保留全文）。 */
-    function renderPaneError(t, error) {
-      const code = asString(error?.code) || 'REMOTE_CALL_FAILED'
-      const message = asString(error?.message) || t('loadFailed')
-      return jsxs('div', {
-        style: root,
-        role: 'alert',
-        children: [
-          jsx('h3', { style: heading, children: t('paneTitle') }),
-          jsx('p', { style: noteStyle, children: t('roleListNote') }),
-          jsx('p', {
-            style: {
-              ...noteStyle,
-              color: 'var(--dsw-alias-state-error-primary)',
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-            },
-            title: `[${code}] ${message}`,
-            children: `[${code}] ${message}`,
-          }),
-        ],
-      })
-    }
-
-    /**
      * 顶部入口按钮样式：自绘（不 require primitives），token 与官方 sm toolbar
      * Button 一致（28px / 12px 字号 / radius-sm），但把原生 button 的默认粗边框
      * 换成 0.5px 宿主 border token。hover/focus 也用宿主 token 显式实现。
@@ -3545,447 +3096,6 @@ window.__ModuleLoader__.load({
       lineHeight: '18px',
       cursor: 'pointer',
       flexShrink: 0,
-    }
-
-    /**
-     * 标题右侧入口：内联 SVG + 文案「角色」；点击打开右侧栏 tab。
-     * `$mount` 失败时入口仍然存在：标题/点击提示「远程不可用」，不擅自消失。
-     * 可访问名在外层 button（aria-label/title）；SVG 自身 aria-hidden。
-     */
-    function HeaderEntry({ t, openRolePanel, remoteReady }) {
-      const [notice, setNotice] = react.useState(null)
-      const [hovered, setHovered] = react.useState(false)
-      const [focused, setFocused] = react.useState(false)
-      return safeRender(
-        'header',
-        'render',
-        () => {
-          const label = t('headerTitle')
-          const remoteOk = remoteReady !== false
-          const desc = remoteOk ? t('headerDesc') : t('remoteUnavailableHint')
-          const buttonStyle = {
-            ...HEADER_BUTTON_BASE,
-            background: hovered
-              ? 'var(--dsw-alias-button-tool-bar-hover)'
-              : 'var(--dsw-alias-button-tool-bar-fill)',
-            outline: focused
-              ? 'var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary))'
-              : 'none',
-            outlineOffset: 1,
-          }
-          return jsxs('span', {
-            style: { display: 'inline-flex', alignItems: 'center', gap: 6 },
-            children: [
-              jsxs('button', {
-                type: 'button',
-                className: 'dsh-meetingstone-header-entry',
-                'aria-label': label,
-                title: desc,
-                style: buttonStyle,
-                onMouseEnter: () => setHovered(true),
-                onMouseLeave: () => setHovered(false),
-                onFocus: () => setFocused(true),
-                onBlur: () => setFocused(false),
-                onClick: () => {
-                  if (!remoteOk) {
-                    // 入口保留，点击给出可读提示（不弹宿主 modal、不写凭证）。
-                    setNotice(t('remoteUnavailableHint'))
-                    return
-                  }
-                  try {
-                    if (openRolePanel) openRolePanel()
-                  } catch {
-                    /* 宿主未提供 sidebarRightTabs.open 时静默 */
-                  }
-                },
-                children: [jsx(IconUsers, { size: 16 }), jsx('span', { children: label })],
-              }),
-              notice
-                ? jsx('span', {
-                    role: 'status',
-                    style: {
-                      ...meta,
-                      color: 'var(--dsw-alias-state-error-primary)',
-                      whiteSpace: 'nowrap',
-                    },
-                    children: notice,
-                  })
-                : null,
-            ],
-          })
-        },
-        () => renderFailureNote(t),
-      )
-    }
-
-    /** 右侧栏 tab 标题。 */
-    function SidebarRoleTitle({ t }) {
-      return jsx('span', { children: t('tabTitle') })
-    }
-
-    /**
-     * 右侧栏角色面板：列表 ↔ 详情（同栏切换，不新造弹窗体系）。
-     *
-     * - 列表开关只写**当前会话**覆盖（`setSessionOverride(...,'enabled',…)`），
-     *   成功后 reload；失败不乐观更新。
-     * - 详情**只写会话覆盖**（逐字段差异）；全局角色编辑在设置页内联管理器（B1），
-     *   本面板不再提供「全局」scope，避免两个入口互相顶替。
-     * - Remote 失败只显示一行错误摘要，不抛、不空白。
-     */
-    function SidebarRolePane({
-      t,
-      loadSession,
-      loadCapabilities,
-      refreshCli,
-      setOverride,
-      clearOverride,
-    }) {
-      const [state, setState] = react.useState({ status: 'loading' })
-      const [selectedRoleId, setSelectedRoleId] = react.useState('')
-      const [draft, setDraft] = react.useState(null)
-      // B2c：侧栏也需要能力目录（4 CLI/模型/强度）；来自无参 list()，不影响会话覆盖数据源。
-      const [capabilities, setCapabilities] = react.useState([])
-      const [refreshing, setRefreshing] = react.useState(false)
-      const [pendingRoleIds, setPendingRoleIds] = react.useState([])
-      const [saving, setSaving] = react.useState(false)
-      const [confirming, setConfirming] = react.useState(false)
-      const [actionError, setActionError] = react.useState(null)
-
-      react.useEffect(() => {
-        let current = true
-        Promise.resolve()
-          .then(() =>
-            typeof loadSession === 'function'
-              ? loadSession()
-              : { ok: false, error: { code: 'CAPABILITY_MISSING', message: 'loadSession 不可用' } },
-          )
-          .then(
-            (result) => {
-              if (!current) return
-              if (result && result.ok === true) setState({ status: 'ready', view: result.view })
-              else {
-                setState({
-                  status: 'error',
-                  error: (result && result.error) || { code: 'REMOTE_CALL_FAILED', message: '' },
-                })
-              }
-            },
-            (error) => {
-              if (current) {
-                setState({
-                  status: 'error',
-                  error: {
-                    code: 'REMOTE_CALL_FAILED',
-                    message: error instanceof Error ? error.message : String(error),
-                  },
-                })
-              }
-            },
-          )
-        return () => {
-          current = false
-        }
-      }, [loadSession])
-
-      // B2c：能力目录（无参 list() 快照），用于编辑器 4 CLI / 模型 / 强度联动。
-      react.useEffect(() => {
-        let current = true
-        Promise.resolve()
-          .then(() => (typeof loadCapabilities === 'function' ? loadCapabilities() : []))
-          .then(
-            (list) => {
-              if (current) setCapabilities(asArray(list))
-            },
-            () => {
-              if (current) setCapabilities([])
-            },
-          )
-        return () => {
-          current = false
-        }
-      }, [loadCapabilities])
-
-      /** B2c：刷新当前 CLI 能力（refreshCli），只更新本地目录，不写角色配置。 */
-      async function refreshCapabilities() {
-        const cli = asString(draft?.cli)
-        if (typeof refreshCli !== 'function' || !cli) return
-        setRefreshing(true)
-        const result = await refreshCli(cli, true)
-        setRefreshing(false)
-        if (!result || result.ok !== true) {
-          setActionError(result?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' })
-          return
-        }
-        const payload = asObject(result.value)
-        const list = normalizeCapabilities(payload.capabilities)
-        if (list.length > 0) setCapabilities(list)
-        setActionError(null)
-      }
-
-      /** 重新读取会话视图（写操作后刷新；失败不覆盖当前列表）。 */
-      async function reload() {
-        const result = await loadSession()
-        if (result && result.ok === true) {
-          setState({ status: 'ready', view: result.view })
-        }
-        return result
-      }
-
-      /** 详情 draft 回到当前生效值。 */
-      function resetDraft(view, roleId) {
-        const role = asArray(view?.roles).find((item) => item.roleId === roleId)
-        setDraft(role ? draftOfRole(role) : null)
-      }
-
-      function selectRole(roleId) {
-        setSelectedRoleId(roleId)
-        setConfirming(false)
-        setActionError(null)
-        resetDraft(state.view, roleId)
-      }
-
-      function backToList() {
-        setSelectedRoleId('')
-        setDraft(null)
-        setConfirming(false)
-        setActionError(null)
-      }
-
-      /** 改 draft；切 CLI 时清空模型/强度，避免残留不属于该 CLI 的组合。 */
-      function updateDraft(field, value) {
-        setDraft((previous) => {
-          const next = { ...(previous ?? {}), [field]: value }
-          if (field === 'cli') {
-            next.model = ''
-            next.reasoning = ''
-          }
-          return next
-        })
-        setConfirming(false)
-        setActionError(null)
-      }
-
-      /** 开关角色：只写当前会话；失败不做乐观假开启。 */
-      async function toggleRole(roleId, next) {
-        setPendingRoleIds((previous) => [...previous, roleId])
-        setActionError(null)
-        const result = await toggleSessionRole({
-          roleId,
-          next,
-          setOverride,
-          reload,
-        })
-        setPendingRoleIds((previous) => previous.filter((id) => id !== roleId))
-        if (result.ok !== true) {
-          setActionError(result.error)
-          return
-        }
-        if (selectedRoleId === roleId) resetDraft(result.view, roleId)
-      }
-
-      /** 恢复单字段继承（仅会话 scope 有意义）。 */
-      async function restoreField(field) {
-        if (!selectedRoleId || typeof clearOverride !== 'function') return
-        setSaving(true)
-        setActionError(null)
-        const result = await clearOverride(selectedRoleId, field)
-        if (result && result.ok === true) {
-          const loaded = await reload()
-          if (loaded && loaded.ok === true) resetDraft(loaded.view, selectedRoleId)
-        } else {
-          setActionError((result && result.error) || { code: 'REMOTE_CALL_FAILED', message: '' })
-        }
-        setSaving(false)
-      }
-
-      /**
-       * 保存（B1 起：**只写会话覆盖**；全局角色编辑移到设置页内联管理器）。
-       * 会话=逐字段差异；失败立即停止，不乐观更新。
-       */
-      async function saveDetail() {
-        const role = asArray(state.view?.roles).find((item) => item.roleId === selectedRoleId)
-        if (!role || !draft) return
-
-        const built = buildSessionChanges(t, role, draft, capabilitiesOf({ capabilities }), state.view?.channels)
-        if (built.error) {
-          setActionError({ code: 'DETAIL_INVALID', message: built.error })
-          return
-        }
-        if (built.changes.length === 0) {
-          setActionError({ code: 'DETAIL_NO_CHANGES', message: t('detailNoChanges') })
-          return
-        }
-        setSaving(true)
-        const result = await saveSessionChanges({
-          roleId: selectedRoleId,
-          changes: built.changes,
-          setOverride,
-          clearOverride,
-          reload,
-        })
-        setSaving(false)
-        if (result.ok !== true) {
-          setActionError(result.error)
-          return
-        }
-        resetDraft(result.view, selectedRoleId)
-      }
-
-      if (state.status === 'loading') return renderPaneLoading(t)
-      if (state.status === 'error') return renderPaneError(t, state.error)
-      const warnings = asArray(state.view?.warnings).map((item) => asString(item.message)).filter(Boolean)
-      // B2c：把能力目录并入视图（renderRoleDetail / 保存映射都读它）。
-      const capabilityView =
-        Array.isArray(capabilities) && capabilities.length > 0
-          ? { ...state.view, capabilities }
-          : state.view
-      return safeRender(
-        'sidebar',
-        'render',
-        () =>
-          renderRolePane(t, capabilityView, {
-            selectedRoleId,
-            draft,
-            saving,
-            confirming,
-            error: actionError,
-            pendingRoleIds,
-            warning: warnings.length > 0 ? `${t('warningPrefix')}: ${warnings.join(' | ')}` : '',
-            // B1：右侧栏只做会话覆盖；全局角色只在设置页内联管理器里编辑。
-            scope: 'session',
-            showScope: false,
-            onSelect: selectRole,
-            onBack: backToList,
-            onDraft: updateDraft,
-            onSave: saveDetail,
-            onRestore: restoreField,
-            onCancelConfirm: () => setConfirming(false),
-            onToggleRole: toggleRole,
-            refreshing,
-            onRefreshCapabilities: refreshCapabilities,
-          }),
-        () => renderPaneError(t, { code: 'RENDER_FAILED', message: t('renderFailed') }),
-      )
-    }
-
-    /**
-     * 注册 title 右侧入口 `conversation.session.header.actions`（kind:list, scope:session）。
-     * 注册形状对齐官方：{ name, id, order, locale, inject(sessionId) }。
-     *
-     * 入口注册**独立于** Remote 是否可挂载：`$mount` 失败时仍然注册，只是把
-     * `remoteReady:false` 传进组件，点击显示「远程不可用」。
-     * @param {any} slotCtx
-     * @param {{ getService: () => any | null, mountError: string | null }} deps
-     * @param {(key: string) => string} t
-     */
-    function registerHeaderAction(slotCtx, deps, t) {
-      if (
-        !slotCtx?.slots ||
-        typeof slotCtx.slots.inject !== 'function' ||
-        typeof slotCtx.slots.register !== 'function'
-      ) {
-        throw new Error('CAPABILITY_MISSING: slots.inject/register')
-      }
-      const openPanel = () => {
-        try {
-          openRolePanelOf(slotCtx)
-        } catch {
-          /* 宿主未提供 open 时静默 */
-        }
-      }
-      slotCtx.slots.inject('conversation.session.header.actions', () =>
-        slotCtx.slots.register(
-          {
-            name: 'conversation.session.header.actions',
-            id: HEADER_ACTION_ID,
-            order: 60,
-            locale: NS,
-            inject: (/** @type {string} */ sessionId) => ({
-              sessionId,
-              openRolePanel: openPanel,
-              // 只有 $mount 明确失败才提示不可用；命名空间可能稍后就绪，
-              // 面板 loader 自己会回退到 unavailable 快照。
-              remoteReady: !deps.mountError,
-              t,
-            }),
-          },
-          HeaderEntry,
-        ),
-      )
-    }
-
-    /**
-     * 两步式注册右侧栏 tab：先 `sidebarRightTabs.register` 注册 tab，再注册两个
-     * keyed seat（内容 + 标题，scope session）。面板只读，数据来自 strict
-     * `getSessionConfig(sessionId)`（不是无参 list：来源/覆盖必须按会话解析）。
-     * `priority` 是官方档位字符串 `extension|builtin|fallback`，不是数字。
-     * @param {any} slotCtx
-     * @param {{ getService: () => any | null, mountError: string | null }} deps
-     * @param {(key: string) => string} t
-     */
-    function registerSidebarTab(slotCtx, deps, t) {
-      if (
-        !slotCtx?.slots ||
-        typeof slotCtx.slots.inject !== 'function' ||
-        typeof slotCtx.slots.register !== 'function'
-      ) {
-        throw new Error('CAPABILITY_MISSING: slots.inject/register')
-      }
-      // 1) tab 本体（能力检测后调用；没有该服务时仍注册 seat，不拖垮其他模块）
-      const tabs = sidebarRightTabsOf(slotCtx)
-      if (tabs && typeof tabs.register === 'function') {
-        // 重复注册（热重载/双实例）不能让 seats 一起失败：只记录并继续。
-        try {
-          tabs.register({
-            id: TAB_ID,
-            kind: TAB_KIND,
-            priority: 'extension',
-            title: () => t('tabTitle'),
-          })
-        } catch (error) {
-          try {
-            console.warn('[meetingstone] sidebar tab type registration skipped:', error)
-          } catch {}
-        }
-      }
-      const loadSession = makeSessionConfigLoader(deps.getService, deps.mountError)
-      const sessionActions =
-        deps.sessionActions ?? makeSessionActions(deps.getService, deps.mountError)
-      const configActions = deps.configActions ?? makeConfigActions(deps.getService, deps.mountError)
-      const loadSnapshot = makeLoader(deps.getService, deps.mountError)
-      // 2) keyed seats（scope session；B1 起右侧栏不再承载全局编辑）
-      slotCtx.slots.inject('sidebar.right.pane.tab', () =>
-        slotCtx.slots.register(
-          {
-            name: 'sidebar.right.pane.tab',
-            key: TAB_ID,
-            locale: NS,
-            inject: (/** @type {string} */ sessionId) => ({
-              sessionId,
-              loadSession: () => loadSession(sessionId),
-              setOverride: (roleId, field, value) =>
-                sessionActions.setOverride(sessionId, roleId, field, value),
-              clearOverride: (roleId, field) => sessionActions.clearOverride(sessionId, roleId, field),
-              // B2c：能力目录来自无参 list()（不消费会话角色数据），刷新复用 refreshCli。
-              loadCapabilities: async () => asArray((await loadSnapshot())?.global?.capabilities),
-              refreshCli: (cli, force) => configActions.refreshCli(cli, force),
-              t,
-            }),
-          },
-          SidebarRolePane,
-        ),
-      )
-      slotCtx.slots.inject('sidebar.right.pane.tab.title', () =>
-        slotCtx.slots.register(
-          {
-            name: 'sidebar.right.pane.tab.title',
-            key: TAB_ID,
-            locale: NS,
-            inject: () => ({ t }),
-          },
-          SidebarRoleTitle,
-        ),
-      )
     }
 
     /**
@@ -4085,17 +3195,14 @@ window.__ModuleLoader__.load({
       const deps = {
         getService,
         mountError,
-        sessionActions: makeSessionActions(getService, mountError),
         configActions: makeConfigActions(getService, mountError),
       }
       const mountFailure = mountError ? { code: 'REMOTE_MOUNT_FAILED', message: mountError } : undefined
 
-      // 2) 注册顺序：header → section → sidebar。header 永不因 mount 失败而缺失。
-      guard('header', 'register', () => registerHeaderAction(ctx, deps, t))
+      // B3：只注册设置页；对话页头「角色」入口与右侧栏「本对话角色」面板已下线。
       guard('section', 'register', () =>
         registerSection(ctx, makeLoader(getService, mountFailure), t, deps.configActions),
       )
-      guard('sidebar', 'register', () => registerSidebarTab(ctx, deps, t))
     }
 
     exports.apply = apply
@@ -4107,14 +3214,9 @@ window.__ModuleLoader__.load({
       normalizeCli,
       normalizeCliState,
       unavailableSnapshot,
-      normalizeSessionConfigView,
       renderSection,
       renderGlobalRoleManager,
-      renderRolePane,
-      renderRoleList,
       renderRoleDetail,
-      renderPaneError,
-      renderPaneLoading,
       draftOfRole,
       emptyRoleDraft,
       capabilitiesOf,
@@ -4128,11 +3230,8 @@ window.__ModuleLoader__.load({
       saveCreateGlobalRole,
       saveDeleteGlobalRole,
       detailOptionsOf,
-      buildSessionChanges,
       buildGlobalPatch,
-      saveSessionChanges,
       saveGlobalPatch,
-      toggleSessionRole,
       fieldSourceOf,
       roleReasonOf,
       cliRowsOf,
@@ -4142,18 +3241,12 @@ window.__ModuleLoader__.load({
       IconUsers,
       safeRender,
       makeRemoteCall,
-      makeSessionActions,
       makeConfigActions,
       REMOTE_CONTRIBUTION,
-      SESSION_DESCRIPTORS,
       SESSION_TYPES,
       REMOTE_INJECT,
-      TAB_ID,
-      TAB_KIND,
-      HEADER_ACTION_ID,
       PLUGIN_VERSION,
       makeLoader,
-      makeSessionConfigLoader,
     }
     return module.exports
   },

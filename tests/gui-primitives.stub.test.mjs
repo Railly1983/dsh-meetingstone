@@ -14,7 +14,7 @@
  *    Tooltip 单子元素、Toast text/onDone、Icon size/className）；
  * 3. `src/client/index.js` **不再 require primitives**：用“require 即抛错”的 loader
  *    执行浏览器 half，header/section/sidebar 仍完成注册；header 用内联 SVG，
- *    Tag 是本地实现；侧栏只读调 strict `getSessionConfig`；
+ *    Tag 是本地实现；B3 后只有 settings.section 注册（会话级 remote 已下线）；
  * 4. 源码审计：无 `require('@deepseek-ai/dsh-client-ui-primitives')`、无
  *    `primitives.*`、priority 是字符串档位。
  *
@@ -310,56 +310,32 @@ function findSvg(node) {
   return null
 }
 
-test('Browser half：不 require primitives 也能完成注册，header 用内联 SVG', async () => {
-  const { registrations, mounted, logs, sessionCalls } = await loadClientWithoutPrimitives()
+test('Browser half：不 require primitives 也能完成设置页注册', async () => {
+  const { registrations, mounted, logs } = await loadClientWithoutPrimitives()
   assert.equal(mounted.length, 1, 'Remote contribution 仍应挂载')
-  assert.equal(mounted[0].descriptors.length, 9, 'list + 三个 strict 会话方法 + 五个 strict 配置方法')
-
-  const names = registrations.map((entry) => entry.options.name)
-  assert.deepEqual(names, [
-    'conversation.session.header.actions',
-    'settings.section',
-    'sidebar.right.pane.tab',
-    'sidebar.right.pane.tab.title',
-  ])
-
-  const header = registrations[0]
-  const props = header.options.inject('sess-1')
-  assert.equal(props.sessionId, 'sess-1')
-  const tree = header.Component(props)
-  const button = tree.props.children.find((child) => child && child.type === 'button')
-  assert.ok(button, 'HeaderEntry 仍渲染 button')
-  assert.equal(button.props.type, 'button')
-  assert.equal(button.props['aria-label'], 'headerTitle')
-  assert.equal(button.props.title, 'headerDesc')
-  const svg = findSvg(button)
-  assert.ok(svg, 'header 必须使用内联 SVG')
-  assert.equal(svg.props['aria-hidden'], 'true')
-  assert.equal(svg.props.focusable, 'false')
-
-  // 侧栏 seat 只读调 strict getSessionConfig（不是无参 list）。
-  const pane = registrations.find((entry) => entry.options.name === 'sidebar.right.pane.tab')
-  const result = await pane.options.inject('sess-2').loadSession()
-  assert.deepEqual(sessionCalls, ['sess-2'])
-  assert.equal(result.ok, true)
-  assert.equal(result.view.roles[0].sourceLayer, 'global')
-
+  assert.equal(mounted[0].descriptors.length, 6, 'list + 5 个配置方法（B3 已下线会话级 remote）')
+  assert.deepEqual(
+    registrations.map((entry) => entry.options.name),
+    ['settings.section'],
+    'B3：只注册设置页，无 header/sidebar 角色 slot',
+  )
   assert.ok(logs.some(([level]) => level === 'info'), '注册成功应有 info 日志')
 })
 
-test('源码审计：无 primitives 依赖，priority 字符串，侧栏接 strict getSessionConfig', async () => {
+test('源码审计：无 primitives 依赖、无会话级 remote/slot', async () => {
   const source = await readFile(join(ROOT, 'src/client/index.js'), 'utf8')
   assert.doesNotMatch(source, /require\('@deepseek-ai\/dsh-client-ui-primitives'\)/, '不得 require primitives')
   assert.doesNotMatch(source, /\bprimitives\./, '不得使用 primitives.* 导出面')
   assert.match(source, /function Tag\(/, '本地最小 Tag')
   assert.match(source, /function IconUsers\(/, '内联 SVG')
-  assert.match(source, /priority: 'extension'/, 'priority 必须是官方档位字符串')
-  assert.doesNotMatch(source, /priority:\s*\d/, 'priority 不能是数字')
-  assert.match(source, /service\.getSessionConfig\(sessionId\)/, '侧栏调用 strict getSessionConfig')
-  assert.match(source, /headerTitle: '角色'/, '顶部入口文案「角色」')
+  assert.doesNotMatch(
+    source,
+    /getSessionConfig|setSessionOverride|clearSessionOverride|registerHeaderAction|registerSidebarTab|SidebarRolePane/,
+    'B3：会话级 remote 与角色 slot 必须已下线',
+  )
 })
 
-test('slots 契约：settings.section/header/sidebar 的 scope 与 sessionId/params 形状', () => {
+test('slots 契约：只使用 settings.section（root/list）', () => {
   const slots = contract.slots
   assert.deepEqual(
     { kind: slots['settings.section'].kind, scope: slots['settings.section'].scope },
@@ -368,16 +344,4 @@ test('slots 契约：settings.section/header/sidebar 的 scope 与 sessionId/par
   assert.equal(slots['settings.section'].sessionId, false)
   assert.equal(slots['settings.section'].injectArgs, 0)
   assert.deepEqual(slots['settings.section'].ownerProps, ['close'])
-
-  const header = slots['conversation.session.header.actions']
-  assert.equal(header.scope, 'session')
-  assert.equal(header.standardPropsIncludeSessionId, true)
-  assert.equal(header.params, false)
-
-  const pane = slots['sidebar.right.pane.tab']
-  assert.equal(pane.kind, 'keyed')
-  assert.equal(pane.scope, 'session')
-  assert.equal(pane.standardPropsIncludeSessionId, true)
-  assert.equal(pane.paramsVia, 'useTabInfo().tab.navigation.params')
-  assert.equal(pane.key, 'tab type definition.id')
 })

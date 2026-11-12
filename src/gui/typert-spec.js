@@ -39,13 +39,6 @@ export const SESSION_REMOTE_TYPES = Object.freeze({
   jsonResult: 'dsh-meetingstone/types#JsonResult',
 })
 
-/** 三个会话方法名（Client contribution 与 Host spec 共用）。 */
-export const SESSION_REMOTE_METHODS = Object.freeze([
-  'getSessionConfig',
-  'setSessionOverride',
-  'clearSessionOverride',
-])
-
 /** 配置方法名（U2：CLI 开关 + 重新检测 + 全局角色写；B1b：新增/删除全局角色）。 */
 export const CONFIG_REMOTE_METHODS = Object.freeze([
   'setCliEnabled',
@@ -55,11 +48,8 @@ export const CONFIG_REMOTE_METHODS = Object.freeze([
   'deleteGlobalRole',
 ])
 
-/** Host 注册的全部 strict 方法（会话 + 配置；`list` 仍走无参 SRC）。 */
-export const GUI_STRICT_METHODS = Object.freeze([
-  ...SESSION_REMOTE_METHODS,
-  ...CONFIG_REMOTE_METHODS,
-])
+/** Host 注册的全部 strict 方法（B3：只剩配置方法；`list` 仍走无参 SRC）。 */
+export const GUI_STRICT_METHODS = Object.freeze([...CONFIG_REMOTE_METHODS])
 
 /**
  * 构造一个 strict codec。`build` 必须是返回 zod schema 的工厂。
@@ -157,68 +147,6 @@ export function createSessionRemoteSpec(zod) {
   return {
     package: TYPERT_PACKAGE,
     methods: {
-      'meetingstone/getSessionConfig': {
-        service: 'meetingstone',
-        invocation: { kind: 'direct' },
-        parameters: [
-          parameter({
-            name: 'sessionId',
-            typeSymbol: SESSION_REMOTE_TYPES.sessionId,
-            build: sessionId,
-          }),
-        ],
-        result: result(SESSION_REMOTE_TYPES.sessionConfigView, sessionConfigView),
-      },
-      'meetingstone/setSessionOverride': {
-        service: 'meetingstone',
-        invocation: { kind: 'direct' },
-        parameters: [
-          parameter({
-            name: 'sessionId',
-            typeSymbol: SESSION_REMOTE_TYPES.sessionId,
-            build: sessionId,
-          }),
-          parameter({
-            name: 'roleId',
-            typeSymbol: SESSION_REMOTE_TYPES.roleId,
-            build: roleId,
-          }),
-          parameter({
-            name: 'field',
-            typeSymbol: SESSION_REMOTE_TYPES.field,
-            build: field,
-          }),
-          parameter({
-            name: 'value',
-            typeSymbol: SESSION_REMOTE_TYPES.value,
-            build: value,
-          }),
-        ],
-        result: result(SESSION_REMOTE_TYPES.overrideResult, overrideResult),
-      },
-      'meetingstone/clearSessionOverride': {
-        service: 'meetingstone',
-        invocation: { kind: 'direct' },
-        parameters: [
-          parameter({
-            name: 'sessionId',
-            typeSymbol: SESSION_REMOTE_TYPES.sessionId,
-            build: sessionId,
-          }),
-          parameter({
-            name: 'roleId',
-            typeSymbol: SESSION_REMOTE_TYPES.roleId,
-            build: roleId,
-          }),
-          parameter({
-            name: 'field',
-            typeSymbol: SESSION_REMOTE_TYPES.field,
-            build: field,
-            acceptsUndefined: true,
-          }),
-        ],
-        result: result(SESSION_REMOTE_TYPES.overrideResult, overrideResult),
-      },
       'meetingstone/setCliEnabled': {
         service: 'meetingstone',
         invocation: { kind: 'direct' },

@@ -8,10 +8,10 @@
  *     → 本文件创建的 `TypertRemoteService`（namespace `meetingstone`, method `list`）
  *     → `createGuiState().fullSnapshot()`（同步快照 + 全局配置 + CLI 探测）
  *
- *   browser `ctx.remote.meetingstone.getSessionConfig()` 等
+ *   browser `ctx.remote.meetingstone.list()` 等（B3：会话级 remote 已下线）
  *     → Typert Gateway `/api`（优先 Host strict 定义）
  *     → 同一 service 的会话方法
- *     → `createSessionRemoteHandlers` → `src/gui/session.js`（继承/白名单/落盘）
+ *     → `src/gui/session.js`（已随 B3 删除）
  *
  * 数据**不另建源**：
  *   - 角色：`registry.list()`（与 `meetingstone_list_roles` 同一份注册表）
@@ -33,7 +33,6 @@ import { deriveRoleView } from './state-model.js'
 import { createCliCapabilityCatalog, createDefaultProbes } from '../cli/capabilities.js'
 import { CLI_SPECS } from '../cli/probe.js'
 import { deriveCliState } from '../cli/preferences.js'
-import { createSessionRemoteHandlers } from './session-remote.js'
 import { registerSessionStrictRemotes } from './typert.js'
 
 const require = createRequire(import.meta.url)
@@ -68,9 +67,6 @@ const ROLE_SOURCE_FIELDS = Object.freeze([
  */
 export const GUI_REMOTE_METHODS = Object.freeze([
   'list',
-  'getSessionConfig',
-  'setSessionOverride',
-  'clearSessionOverride',
   'setCliEnabled',
   'refreshCli',
   'updateGlobalRole',
@@ -559,7 +555,7 @@ export function markRemoteMethod(prototype, method, Remote) {
  * strict codec 决定），不会拖垮 `list`、工具或派单。
  *
  * @param {any} ctx Host 插件 ctx
- * @param {{ snapshot: () => any, sessionApi?: any, configApi?: any }} deps
+ * @param {{ snapshot: () => any, configApi?: any }} deps
  */
 export function registerGuiRemote(ctx, deps) {
   if (!ctx || typeof deps?.snapshot !== 'function') {
@@ -572,9 +568,6 @@ export function registerGuiRemote(ctx, deps) {
 
   try {
     const { TypertRemoteService, Remote, RemoteError } = protocol
-    const handlers = deps.sessionApi
-      ? createSessionRemoteHandlers(deps.sessionApi, { RemoteError })
-      : null
     const configApi = deps.configApi && typeof deps.configApi === 'object' ? deps.configApi : null
 
     /**
@@ -604,23 +597,8 @@ export function registerGuiRemote(ctx, deps) {
         return deps.snapshot()
       }
 
-      /** 读取当前会话的角色配置视图（strict：sessionId）。 */
-      async getSessionConfig(sessionId) {
-        if (!handlers) throw new RemoteError('MEETINGSTONE_GUI_REMOTE_UNAVAILABLE', '会话远程未装配')
-        return handlers.getSessionConfig(sessionId)
-      }
 
-      /** 写一个字段级会话覆盖（strict：sessionId/roleId/field/value）。 */
-      async setSessionOverride(sessionId, roleId, field, value) {
-        if (!handlers) throw new RemoteError('MEETINGSTONE_GUI_REMOTE_UNAVAILABLE', '会话远程未装配')
-        return handlers.setSessionOverride(sessionId, roleId, field, value)
-      }
 
-      /** 恢复一个字段/整角色的继承（strict：sessionId/roleId/可省略 field）。 */
-      async clearSessionOverride(sessionId, roleId, field) {
-        if (!handlers) throw new RemoteError('MEETINGSTONE_GUI_REMOTE_UNAVAILABLE', '会话远程未装配')
-        return handlers.clearSessionOverride(sessionId, roleId, field)
-      }
 
       /**
        * 开关外部 CLI（strict：cli/enabled）。
@@ -695,16 +673,14 @@ export function registerGuiRemote(ctx, deps) {
     const instance = new MeetingStoneGuiRemote(ctx)
 
     // 真实 zod strict 契约（Host 定义）。失败只记日志，不影响上面的 SRC 服务。
-    const strict = handlers
-      ? registerSessionStrictRemotes(ctx, {
-          log: (level, line) => {
-            const logger = ctx.logger
-            if (logger && typeof logger[level] === 'function') logger[level](line)
-            else if (level === 'error') console.error(line)
-            else console.log(line)
-          },
-        })
-      : { registered: false, reason: 'SESSION_API_UNAVAILABLE' }
+    const strict = registerSessionStrictRemotes(ctx, {
+      log: (level, line) => {
+        const logger = ctx.logger
+        if (logger && typeof logger[level] === 'function') logger[level](line)
+        else if (level === 'error') console.error(line)
+        else console.log(line)
+      },
+    })
 
     return { registered: true, instance, strict }
   } catch (error) {

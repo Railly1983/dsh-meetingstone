@@ -34,9 +34,9 @@ function buildDescriptors() {
   return createTypertRemoteInfo(createSessionRemoteSpec(z), z).descriptors
 }
 
-test('strict 契约：八个方法都存在，参数/结果全部 strict + 非空 typeSymbol + 真实 zod', () => {
+test('strict 契约：五个配置方法都存在，参数/结果全部 strict + 非空 typeSymbol + 真实 zod', () => {
   const descriptors = buildDescriptors()
-  assert.equal(descriptors.length, 8)
+  assert.equal(descriptors.length, 5)
   assert.deepEqual(descriptors.map((d) => d.method), GUI_STRICT_METHODS)
   assert.doesNotThrow(() => assertStrictDescriptors(descriptors))
 
@@ -51,65 +51,29 @@ test('strict 契约：八个方法都存在，参数/结果全部 strict + 非�
   }
 
   const byMethod = Object.fromEntries(descriptors.map((d) => [d.method, d]))
-  assert.deepEqual(
-    byMethod.getSessionConfig.parameters.map((p) => p.wire),
-    ['sessionId'],
-  )
-  assert.deepEqual(
-    byMethod.setSessionOverride.parameters.map((p) => p.wire),
-    ['sessionId', 'roleId', 'field', 'value'],
-  )
-  assert.deepEqual(
-    byMethod.clearSessionOverride.parameters.map((p) => p.wire),
-    ['sessionId', 'roleId', 'field'],
-  )
-  assert.equal(byMethod.clearSessionOverride.parameters[2].acceptsUndefined, true)
-
-  assert.equal(byMethod.getSessionConfig.parameters[0].codec.typeSymbol, SESSION_REMOTE_TYPES.sessionId)
-  assert.equal(byMethod.setSessionOverride.parameters[1].codec.typeSymbol, SESSION_REMOTE_TYPES.roleId)
-  assert.equal(byMethod.setSessionOverride.parameters[2].codec.typeSymbol, SESSION_REMOTE_TYPES.field)
-  assert.equal(byMethod.setSessionOverride.parameters[3].codec.typeSymbol, SESSION_REMOTE_TYPES.value)
+  assert.deepEqual(byMethod.setCliEnabled.parameters.map((p) => p.wire), ['cli', 'enabled'])
+  assert.deepEqual(byMethod.refreshCli.parameters.map((p) => p.wire), ['cli', 'force'])
+  assert.deepEqual(byMethod.updateGlobalRole.parameters.map((p) => p.wire), ['roleId', 'patch'])
+  assert.deepEqual(byMethod.createGlobalRole.parameters.map((p) => p.wire), ['role'])
+  assert.deepEqual(byMethod.deleteGlobalRole.parameters.map((p) => p.wire), ['roleId'])
+  assert.equal(byMethod.updateGlobalRole.parameters[0].codec.typeSymbol, SESSION_REMOTE_TYPES.roleId)
 })
 
 test('参数校验：zod 在边界拒绝空串/错误类型，接受合法值', () => {
   const byMethod = Object.fromEntries(buildDescriptors().map((d) => [d.method, d]))
-  const sessionCodec = byMethod.getSessionConfig.parameters[0].codec
-  assert.equal(sessionCodec.create().parse('sess-1'), 'sess-1')
-  assert.throws(() => sessionCodec.create().parse(''), /too small/i)
-  assert.throws(() => sessionCodec.create().parse(42))
-  assert.throws(() => sessionCodec.create().parse(null))
-
-  const setParams = byMethod.setSessionOverride.parameters
-  assert.throws(() => setParams[1].codec.create().parse(''))
-  assert.throws(() => setParams[2].codec.create().parse(123))
-  assert.deepEqual(setParams[3].codec.create().parse({ channel: { model: 'm-1' } }), {
+  const cliCodec = byMethod.setCliEnabled.parameters[0].codec
+  assert.equal(cliCodec.create().parse('codex'), 'codex')
+  assert.throws(() => cliCodec.create().parse('nope'))
+  const enabledCodec = byMethod.setCliEnabled.parameters[1].codec
+  assert.equal(enabledCodec.create().parse(true), true)
+  assert.throws(() => enabledCodec.create().parse('true'))
+  const roleIdCodec = byMethod.updateGlobalRole.parameters[0].codec
+  assert.equal(roleIdCodec.create().parse('role-sashi'), 'role-sashi')
+  assert.throws(() => roleIdCodec.create().parse(''))
+  const patchCodec = byMethod.updateGlobalRole.parameters[1].codec
+  assert.deepEqual(patchCodec.create().parse({ channel: { model: 'm-1' } }), {
     channel: { model: 'm-1' },
   })
-  assert.equal(setParams[3].codec.create().parse('任意 JSON'), '任意 JSON')
-
-  // 结果 schema 能解析真实返回形状（strict codec 不是空壳）。
-  const view = byMethod.getSessionConfig.result.create()
-  assert.doesNotThrow(() =>
-    view.parse({ effective: { roles: [] }, overrides: {}, sources: { roles: {} } }),
-  )
-  // P0-S2：warnings 必须能穿过 strict result codec（zod 默认会剥未知键）。
-  assert.deepEqual(
-    view.parse({
-      effective: { roles: [] },
-      overrides: {},
-      sources: { roles: {} },
-      warnings: [{ code: 'SESSION_CONFIG_INVALID_JSON', message: 'bad' }],
-    }).warnings,
-    [{ code: 'SESSION_CONFIG_INVALID_JSON', message: 'bad' }],
-  )
-
-  const override = byMethod.setSessionOverride.result.create()
-  assert.doesNotThrow(() => override.parse({ ok: true, written: true, patch: {} }))
-  // P0-S2：scope/idempotent/code 也必须能穿过 strict result codec。
-  assert.deepEqual(
-    override.parse({ ok: true, written: false, idempotent: true, scope: 'field', code: null }),
-    { ok: true, written: false, idempotent: true, scope: 'field', code: null },
-  )
 })
 
 test('非 strict / 空壳 create 被拒绝（不允许退回 src-json 绕过）', () => {
@@ -150,7 +114,7 @@ test('Host manifest：经真实 createTypertRemoteInfo 生成，可交给 ctx.ty
   assert.equal(built.manifest.package, TYPERT_PACKAGE)
   assert.equal(built.manifest.face, 'host')
   assert.deepEqual(built.manifest.schemas, [])
-  assert.equal(built.manifest.invocations.length, 8)
+  assert.equal(built.manifest.invocations.length, 5)
   assert.doesNotThrow(() => assertStrictDescriptors(built.manifest.invocations))
   assert.deepEqual(built.manifest.model, { services: [], events: [], objects: [] })
 })
@@ -175,7 +139,7 @@ test('registerSessionStrictRemotes：typert 就绪后注册；重复/失败只�
   })
   assert.equal(result.registered, true)
   assert.equal(registered.length, 1)
-  assert.equal(registered[0].invocations.length, 8)
+  assert.equal(registered[0].invocations.length, 5)
   assert.ok(logs.some(([level, line]) => level === 'info' && line.includes('phase=strict') && line.includes('status=ok')))
 
   // 注册抛错（例如 HMR 重复注册）：捕获并记录，调用方不需要 try/catch。
@@ -219,22 +183,16 @@ test('真实 TypertRegistry：接受 manifest、端点可查、dispose 后注销
   assert.equal(built.ok, true)
 
   const dispose = registry.register(built.manifest)
-  const descriptor = ctx.typert.local.get('meetingstone/getSessionConfig')
+  const descriptor = ctx.typert.local.get('meetingstone/refreshCli')
   assert.ok(descriptor, 'Host strict 端点应可查')
-  assert.equal(descriptor.id, 'dsh-meetingstone#meetingstone/getSessionConfig')
+  assert.equal(descriptor.id, 'dsh-meetingstone#meetingstone/refreshCli')
   assert.equal(descriptor.parameters[0].codec.mode, 'strict')
-  assert.equal(descriptor.parameters[0].codec.typeSymbol, SESSION_REMOTE_TYPES.sessionId)
-  assert.equal(typeof descriptor.parameters[0].codec.create().parse, 'function')
-
-  // 三个端点都在
-  assert.ok(ctx.typert.local.get('meetingstone/setSessionOverride'))
-  assert.ok(ctx.typert.local.get('meetingstone/clearSessionOverride'))
 
   // 重复注册同一个 package-face 必须被 registry 拒绝（HMR 场景由调用方捕获）。
   assert.throws(() => registry.register(built.manifest), /already registered/)
 
   await dispose()
-  assert.equal(ctx.typert.local.get('meetingstone/getSessionConfig'), undefined, 'dispose 后端点应注销')
+  assert.equal(ctx.typert.local.get('meetingstone/refreshCli'), undefined, 'dispose 后端点应注销')
 })
 
 test('真实 TypertRegistry：空 typeSymbol / 空壳 create 被拒；src-json 仅作 SRC 回退', () => {
@@ -316,7 +274,7 @@ test('真实 TypertRegistry：空 typeSymbol / 空壳 create 被拒；src-json �
   )
 })
 
-test('真实 Cordis + registry：deferred 的 ctx.inject 最终注册 8 个 strict 端点', async () => {
+test('真实 Cordis + registry：deferred 的 ctx.inject 最终注册 5 个 strict 端点', async () => {
   const ctx = new Context()
   new TypertRegistry(ctx)
   const logs = []
@@ -333,13 +291,10 @@ test('真实 Cordis + registry：deferred 的 ctx.inject 最终注册 8 个 stri
   }
   const endpoints = ctx.typert.local.list().map((d) => d.id).sort()
   assert.deepEqual(endpoints, [
-    'dsh-meetingstone#meetingstone/clearSessionOverride',
     'dsh-meetingstone#meetingstone/createGlobalRole',
     'dsh-meetingstone#meetingstone/deleteGlobalRole',
-    'dsh-meetingstone#meetingstone/getSessionConfig',
     'dsh-meetingstone#meetingstone/refreshCli',
     'dsh-meetingstone#meetingstone/setCliEnabled',
-    'dsh-meetingstone#meetingstone/setSessionOverride',
     'dsh-meetingstone#meetingstone/updateGlobalRole',
   ])
   assert.ok(logs.some(([level, line]) => level === 'info' && line.includes('phase=strict') && line.includes('status=ok')))
@@ -365,7 +320,7 @@ test('真实 Cordis 生命周期：生产 effect 路径注册，插件 dispose �
     }
   }
   await waitFor(() => root.typert.local.list().length > 0)
-  assert.equal(root.typert.local.list().length, 8, '插件存活时八个 strict 端点都在')
+  assert.equal(root.typert.local.list().length, 5, '插件存活时五个 strict 端点都在')
 
   await fiber.dispose()
   await waitFor(() => root.typert.local.list().length === 0)
