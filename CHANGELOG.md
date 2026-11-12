@@ -2,6 +2,42 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.26] - 2026-11-12
+
+### Fixed
+
+- **「刷新能力」红字报错**（用户真机报告）：`gateway/internal capabilityCatalog is not defined`。
+  根因是**跨作用域引用** —— `capabilityCatalog` 定义在 `createGuiState`（到 512 行结束），
+  而 `refreshCli` 在 `registerGuiRemote`（574 行起）里用它。宿主 `rpcFailure()`
+  把 ReferenceError 原样包成 `gateway/internal <message>`，所以红字看着像宿主的错。
+  修复：`createGuiState` 暴露 `capabilities`，`registerGuiRemote` 从 deps 取，
+  缺失时抛可识别的 RemoteError 而不是崩溃。
+
+- **错误码直接甩给用户**：`detailErrorLine` 原样拼 `${code} ${message}`，
+  用户看不懂。新增 `explainRemoteError()` 翻成「发生了什么 + 怎么办」，
+  未知码原样透出（不编造）。
+
+### Changed
+
+- **模型来源如实标注**（用户真机报告「下拉只有我之前用的选项」）。
+  实查结论：`dsh`（`ctx.llm.listModels`）与 `codex`（app-server `model/list`）有实时接口；
+  `codebuddy` 无命令行入口（`--help` 需后端环境，`settings.json` 只有 trustedDirectories）；
+  `claude` 只有 `--model <alias>`（fable/opus/sonnet），不可枚举。
+  DSH 的 ACP provider 里 `getModelsInfo`/`availableModels`/`listModels` **各 0 处**。
+  所以「配置/静态」就是它们的真实上限 —— UI 新增 `capabilitySourceNote` 讲清楚，
+  **不把静态配置伪装成实时数据**。
+
+### Added（测试）
+
+- `tests/host-remote-impl.test.mjs`（7 条）：桩掉 Typert 协议，让 `refreshCli`
+  **真正执行**。已验证能抓到原 bug（注入后 6 条全红，修复后全绿）。
+  上一版的 `host-remote-scope.test.mjs` 里 `if (registered !== true) return`
+  在本机 **100% 跳过**（Typert 只在 app.asar 里），等于没测。
+- `tests/capability-source-truth.test.mjs`（8 条）：没有 probe 的 CLI，
+  来源绝不能是 `discovered` —— 防止静态配置伪装成实时数据。
+
+671 tests / 670 pass，门禁 10 PASS。
+
 ## [0.1.0-alpha.25] - 2026-11-12
 
 ### Fixed
