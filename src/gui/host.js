@@ -501,7 +501,14 @@ export function createGuiState({
     return { ...snapshot(), global: globalView(cli, cliError, states) }
   }
 
-  return { snapshot, fullSnapshot, recordError, recordDispatch }
+  // `capabilities`：把能力目录也暴露出去（2026-11-12 真机缺陷修复）。
+  //
+  // **为什么必须暴露**：`registerGuiRemote` 里的 `refreshCli` 需要它，但那个函数
+  // 与本闭包是两个作用域 —— 之前直接引用 `capabilityCatalog` 会抛
+  // `capabilityCatalog is not defined`，被宿主包成
+  // `gateway/internal capabilityCatalog is not defined` 显示成红字。
+  // 用户真机反馈「刷新能力一点就红字报错」就是这个。
+  return { snapshot, fullSnapshot, recordError, recordDispatch, capabilities: capabilityCatalog }
 }
 
 /**
@@ -576,6 +583,17 @@ export function registerGuiRemote(ctx, deps) {
   try {
     const { TypertRemoteService, Remote, RemoteError } = protocol
     const configApi = deps.configApi && typeof deps.configApi === 'object' ? deps.configApi : null
+    // 能力目录（2026-11-12 真机缺陷修复）：
+    // 之前 `refreshCli` 直接引用 `capabilityCatalog`，而它定义在
+    // `createGuiState` 的闭包里 —— 本函数看不到，于是抛
+    // `capabilityCatalog is not defined`，被宿主包成
+    // `gateway/internal capabilityCatalog is not defined` 显示成红字。
+    // 现在从 deps 取；未装配时退化为 null，`refreshCli` 会如实报 UNAVAILABLE
+    // 而不是抛 ReferenceError。
+    const capabilityCatalog =
+      deps.capabilities && typeof deps.capabilities.refresh === 'function'
+        ? deps.capabilities
+        : null
 
     /**
      * 把 `deriveCliState` 的结果转成 Remote 可透传的视图。
@@ -637,6 +655,15 @@ export function registerGuiRemote(ctx, deps) {
       async refreshCli(cli, force) {
         if (!configApi || typeof configApi.preflightCli !== 'function') {
           throw new RemoteError('MEETINGSTONE_GUI_REMOTE_UNAVAILABLE', '配置远程未装配')
+        }
+        // 能力目录未装配时**如实报错**，不要抛 ReferenceError。
+        // （2026-11-12：之前这里直接引用未定义的 `capabilityCatalog`，
+        //  宿主把 ReferenceError 包成 `gateway/internal ... is not defined` 显示成红字。）
+        if (!capabilityCatalog) {
+          throw new RemoteError(
+            'MEETINGSTONE_GUI_CAPABILITIES_UNAVAILABLE',
+            '能力目录未装配（插件初始化未传入 capabilities）',
+          )
         }
         const capabilityRefresh = await capabilityCatalog.refresh(cli, { force: true })
         // dsh：宿主内置通道，无外部 CLI 可 preflight；只回能力目录。

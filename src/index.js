@@ -437,6 +437,11 @@ export function apply(ctx, config = {}) {
     const guiRemote = registerGuiRemote(ctx, {
       snapshot: () => gui.fullSnapshot(),
       configApi,
+      // 能力目录（2026-11-12 真机缺陷修复）：
+      // `refreshCli` 需要它来刷新模型/强度。「刷新能力」按钮红字报错
+      // （`gateway/internal capabilityCatalog is not defined`）的根因就是
+      // 这里没传 —— `registerGuiRemote` 与 `createGuiState` 是两个作用域。
+      capabilities: gui.capabilities,
     })
     const remoteStatus =
       guiRemote.registered === true

@@ -930,6 +930,16 @@ window.__ModuleLoader__.load({
       sourceConfig: '配置',
       sourceStatic: '静态',
       sourceUnknown: '未知',
+      // 2026-11-12 用户真机反馈「模型下拉只有我之前用的选项，没有实时获取的」。
+      // 事实：codebuddy / claude **没有**可程序化枚举模型的接口
+      //（codebuddy --help 需后端环境、settings.json 无模型表；
+      //  claude 只有 --model <alias>，别名不可枚举）。
+      // 「配置/静态」就是它们的真实上限，不是 bug。这里把话说清楚，
+      // 避免用户以为「刷新一下就能出实时列表」。
+      capabilitySourceNote:
+        '「动态」= 从 CLI/宿主实时探测；「配置」= 来自本机 profile 的声明；' +
+        '「静态」= 插件内置的已知清单。CodeBuddy 与 Claude Code 目前没有可枚举模型的接口，' +
+        '它们的模型只能来自配置或内置清单。',
       backToSettings: '返回',
       refreshCapabilities: '刷新能力',
       refreshing: '刷新中…',
@@ -2664,6 +2674,14 @@ window.__ModuleLoader__.load({
       const capabilityNote = options.entry
         ? `${t('capabilitySource')}: ${t('sourceModels')}=${sourceText(options.sources.models)} · ${t('sourceStrengths')}=${sourceText(options.sources.strengths)}`
         : t('capabilityUnknown')
+      // 来源说明（2026-11-12 用户真机反馈）。
+      // 用户以为「刷新能力」能拉出实时模型列表；但 codebuddy / claude
+      // 没有可枚举模型的接口，它们的模型只能来自配置或内置清单。
+      // 这行说明直接写在来源标记下面，避免误解。
+      const capabilitySourceHint = jsx('span', {
+        style: { ...noteStyle, fontSize: 11 },
+        children: t('capabilitySourceNote'),
+      })
       const cliControl =
         options.clis.length === 0
           ? jsx('span', { style: noteStyle, children: t('pendingConfig') })
@@ -2813,6 +2831,11 @@ window.__ModuleLoader__.load({
           disabled,
           control: reasoningControl,
         }),
+        // 来源说明（2026-11-12 用户真机反馈）。
+        // 用户以为「刷新能力」应该拉出实时模型列表，但 codebuddy / claude
+        // 没有可枚举模型的接口，模型只能来自配置或内置清单。
+        // 把它写在这三个字段下面，用户一眼能看懂「为什么只有这些」。
+        jsx('p', { style: { ...noteStyle, fontSize: 11, gridColumn: '1 / -1' }, children: t('capabilitySourceNote') }),
       ]
 
       return jsxs('div', {
