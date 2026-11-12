@@ -22,6 +22,7 @@ import { createNodeProjectConfigWriter } from './project/write.js'
 import { createConfigGuiApi } from './gui/config-api.js'
 import { createDshAdapter } from './dsh/adapter.js'
 import { inject as toolsInject, registerTools } from './dsh/register.js'
+import { registerTeamRoleTool } from './dsh/team-tool.js'
 import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import { createNodeProjectConfigStore } from './project/load.js'
@@ -428,6 +429,46 @@ export function apply(ctx, config = {}) {
       ...(typeof hostDefineTool === 'function' ? { defineTool: hostDefineTool } : {}),
     })
     registered = true
+
+    // Agent Teams 角色化（可选能力）：注册 `spawn_teammate_as`。
+    // 宿主没装 Agent Teams 时 registerTeamRoleTool 返回 null，静默跳过 ——
+    // 所以这里**不把 agentTeams 加进 inject**，否则未启用 Team 的 profile 会启动失败。
+    // 代价：ctx.get()/ctx.agentTeams 在未声明 inject 时会被 Cordis 的注入守卫拒绝
+    // （`cannot get property "get" without inject`），因此必须 try/catch 兜住，
+    // 拿不到就等于「宿主没启用 Team」，跳过即可，不能让它拖垮整个插件。
+    let teamRegistered = null
+    try {
+      const teamAgents =
+        typeof ctx.agentTeams === 'object' && ctx.agentTeams
+          ? ctx.agentTeams
+          : typeof ctx.get === 'function'
+            ? ctx.get('agentTeams')
+            : undefined
+      if (teamAgents) {
+        teamRegistered = registerTeamRoleTool(
+          Object.assign(Object.create(ctx), { agentTeams: teamAgents }),
+          {
+            registry: globalRegistry,
+            // 通道实例查找：与派单路径同源（profile 里的 channels 行）
+            findChannel: (role) => {
+              const channelId = role?.channel?.channelId
+              if (!channelId) return undefined
+              const list = Array.isArray(cfg?.channels) ? cfg.channels : []
+              return list.find((item) => item && item.channelId === channelId)
+            },
+            ...(typeof hostDefineTool === 'function' ? { defineTool: hostDefineTool } : {}),
+          },
+        )
+      }
+    } catch {
+      // 宿主未启用 Agent Teams（或注入守卫拒绝）→ 没有这个可选能力，不是错误。
+      teamRegistered = null
+    }
+    if (teamRegistered) {
+      const teamLine = `[${name}] team tool=spawn_teammate_as phase=register version=${PLUGIN_VERSION} status=ok`
+      if (typeof ctx.logger?.info === 'function') ctx.logger.info(teamLine)
+      else console.log(teamLine)
+    }
 
     // GUI Remote：宿主注册 `meetingstone/list`（SRC marker）与三个会话方法的
     // strict 定义（真实 zod + ctx.typert.register）。宿主缺少 Typert/zod 时静默
