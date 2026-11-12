@@ -2,6 +2,41 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.14] - 2026-11-12
+
+本轮质量收敛（Codex 交叉评审整改）的汇总版本。
+
+### Added
+
+- `meetingstone_stats`：诊断并发槽位占用（重启后泄漏时靠它定位）
+- 两档并发上限：全局 8 / 单会话 4（`limits.maxParallelWritesPerSession`）
+- run 记录新增生效路由字段：`effectiveProvider` / `effectiveModel` / `reasoningEffort`
+
+### Fixed
+
+- **模型列表刷新不正常**：外部 CLI 通道被整个跳过 + 角色绑定模型没进目录
+- **外部 CLI 的 restart-with-output 完全不工作**（三处 bug，详见下）
+- **重放块边界可被伪造逃逸**（安全，中危）
+- **项目/会话角色覆盖**从「靠纪律不传」改为「代码层剥掉」
+- 并发槽位泄漏：上限放宽 + 可诊断（根因未修）
+
+### Changed
+
+- **角色状态收敛为两色**（唐僧裁决）：撤回「黄色 = 确认无额度」的承诺。
+  宿主没有额度查询 API，用失败记录推断会把「历史某次失败」伪装成「当前无额度」。
+- `list_runs` 默认紧凑（verbose:true 才返回排障字段），省约 65% 返回体
+- 删除 59 个死翻译键（字典 148 → 89）
+
+### 外部 CLI restart-with-output 的三个 bug
+
+1. `childId` 恒为 null —— 重开时缺 `context.agent` / `projectKey` / `sessionId` / `isolation`
+2. `stopConfirmed` 取值错误 —— 用 `.ok` 但 dispatcher 返回的是 `stopConfirmed`
+3. **原任务没停也照样重开** —— 会两个任务同时写同一工作区（已加门禁）
+
+### 测试
+
+- 600 → 624 tests
+
 ## [0.1.0-alpha.13] - 2026-11-12
 
 汇总 alpha.12 + 两档并发上限，一次安装。
