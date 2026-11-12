@@ -101,6 +101,44 @@ export function steerCapability(record) {
 }
 
 /**
+ * 事前披露：对这条任务「插话」下去，实际会发生什么。
+ *
+ * 为什么需要（2026-11-13 真机踩到）：界面上的「插话」入口是宿主的
+ * `input.send.steer`（「插话发送」），我们改不了；而 `meetingstone_steer_task`
+ * 对外部 CLI 通道实际是「停掉原任务 + 带已有产出重开」。真相原本只写在
+ * **事后回执**的 note 里，用户/主 Agent 在决定插话之前看不到，于是误以为
+ * 是 bug。把后果摆到 list_runs / get_task 的返回里，让调用方在决定
+ * 「要不要插话」之前就看到，而不是事后才知道。
+ *
+ * 只看**通道能力**，不受任务当前状态影响：终态任务同样走
+ * restart-with-output（见 register.js 路径 B），所以标注仍然成立。
+ *
+ * @param {any} record run 记录（来自 run-store / dispatcher.getTask）
+ * @returns {{ steerMode: 'steer' | 'restart-with-output' | 'unknown', steerNote: string }}
+ */
+export function steerPreview(record) {
+  const provider = resolveRecordProvider(record)
+  if (!provider) {
+    return {
+      steerMode: 'unknown',
+      steerNote: '该记录没有标注通道类型，无法确认能否真插话；按不支持处理（不要假定能插话）。',
+    }
+  }
+  if (provider === STEER_CAPABLE_PROVIDER) {
+    return {
+      steerMode: 'steer',
+      steerNote: '进程内 spawn 通道：支持真插话，消息投进收件箱，下个 step 边界处理，上下文完整保留。',
+    }
+  }
+  return {
+    steerMode: 'restart-with-output',
+    steerNote:
+      `${provider} 通道不支持真插话：对它用 steer 会「停掉原任务 + 带上已有产出另开新会话」，` +
+      '原任务的模型内部状态会丢失，新任务要重新读一遍上下文。',
+  }
+}
+
+/**
  * 把宿主/适配器的错误翻译成用户能看懂的说明。
  *
  * 为什么需要：宿主抛的是内部错误码（`INPUT_CLOSED` / `NOT_RESUMABLE` 等），

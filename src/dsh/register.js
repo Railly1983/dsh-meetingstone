@@ -62,6 +62,7 @@ import {
   extractPartialOutput,
   steerCapability,
   steerInProcess,
+  steerPreview,
 } from './steer.js'
 import { DISPATCH_ERRORS, normalizeProjectKey } from '../dispatch/dispatcher.js'
 import { routeTask } from '../dispatch/routing.js'
@@ -837,7 +838,9 @@ export function registerTools(ctx, deps) {
         '工作树路径/分支、改动文件、overlapWarnings、原生 Job id 这些排障字段需要 verbose:true 才返回 —— ' +
         '它们占返回体的大部分字节，但对「下一步该做什么」没有决策价值。' +
         '数据来自 `.meetingstone/runs/`，DSH 重启后仍可查；上一个进程遗留的 running 会显示为 interrupted。' +
-        '带工作树的记录不会被 100 条/30 天自动清理，用于保护未合并成果的元数据。',
+        '带工作树的记录不会被 100 条/30 天自动清理，用于保护未合并成果的元数据。' +
+        '每条记录都带 `steerMode`/`steerNote`，事前标明「对它插话」是真插话还是「停掉重开（非插话）」，' +
+        '供决定要不要用 meetingstone_steer_task 之前核对。',
       parameters: {
         limit: { type: 'number', description: '最多返回多少条（默认 20，上限 200）' },
         verbose: {
@@ -854,7 +857,25 @@ export function registerTools(ctx, deps) {
         }
         const limit = typeof args?.limit === 'number' ? args.limit : undefined
         const result = await listPersistedRuns(exec, { limit })
-        if (args?.verbose === true) return result
+        // 事前披露：给每条记录标上「对它插话会发生什么」，让调用方在决定
+        // 要不要用 steer 之前就看到，而不是事后才从回执的 note 里知道。
+        // 纯附加字段，不改动记录的其它内容；缺通道信息时标 unknown（诚实）。
+        const annotate = (raw, view) => {
+          const preview = steerPreview(raw)
+          const next = { ...view, steerMode: preview.steerMode }
+          if (preview.steerMode !== 'steer') next.steerNote = preview.steerNote
+          return next
+        }
+        if (args?.verbose === true) {
+          return {
+            ...result,
+            runs: Array.isArray(result?.runs)
+              ? result.runs.map((raw) =>
+                  raw && typeof raw === 'object' ? annotate(raw, { ...raw }) : raw,
+                )
+              : result?.runs,
+          }
+        }
         // 默认紧凑：剥掉**纯排障**元数据，但保留有决策价值的字段。
         //
         // 依据（2026-11-12 实测）：单条 running 记录 1.7KB，其中
@@ -913,7 +934,7 @@ export function registerTools(ctx, deps) {
               if (Array.isArray(item.changedFiles)) {
                 slim.changedFiles = item.changedFiles
               }
-              return slim
+              return annotate(item, slim)
             })
           : []
         // 布尔字段单独处理：false 也是有意义的值（明确「没被中断」），不能按空值过滤掉。
@@ -941,7 +962,8 @@ export function registerTools(ctx, deps) {
         '工作树/改动文件/overlapWarnings。若结果带结构化 summary，默认只回 summary/resultStatus/openIssues/handoff 等字段（resultOmitted:true）；' +
         '否则回结果首 1KiB + 末 512B。需要原始全文时传 full:true，或用 meetingstone_get_run_artifact 按范围读取。' +
         '先查本进程内存（最近 20 条），终态再读项目内 `.meetingstone/runs/<childId>.json` 补隔离元数据；' +
-        '上一个进程留下的 running 会投影为 interrupted。',
+        '上一个进程留下的 running 会投影为 interrupted。' +
+        '返回带 `steerMode`/`steerNote`，事前标明「对它插话」是真插话还是「停掉重开（非插话）」。',
       parameters: {
         childId: { type: 'string', required: true, description: 'meetingstone_dispatch 返回的 taskRef.childId' },
         full: {
@@ -961,12 +983,24 @@ export function registerTools(ctx, deps) {
           return { status: 'unknown', reason: '当前派单器不支持结果查询' }
         }
         const live = await dispatcher.getTask(id)
+        // 事前披露：给结果标上「对它插话会发生什么」。纯附加字段，不改状态判定。
+        // **只读当前这条分支已经拿到的记录，绝不为了标注额外读盘**：
+        // running 必须以内存实时状态为准（磁盘快照可能过时），为此专门有一条
+        // 「running 时不该读磁盘」的回归测试。运行中的内存视图不含通道信息，
+        // 于是标 unknown +「无法确认，按不支持处理」（诚实、失败关闭）。
+        // 想拿权威的通道标注请用 list_runs（它读完整落盘记录）。
+        const annotate = (view, source) => {
+          const preview = steerPreview(source)
+          const next = { ...view, steerMode: preview.steerMode }
+          if (preview.steerMode !== 'steer') next.steerNote = preview.steerNote
+          return next
+        }
         // 只在内存确实不知道（unknown）时才查磁盘：running 必须以内存实时状态为准，
         // 否则会把磁盘里"派单瞬间写的 running"当成当前状态（字段形状也不一致）。
         if (live?.status === 'unknown') {
           const persisted = await loadPersistedRun?.(exec, id)
           if (persisted) {
-            return taskResultView(withRecordPath(persisted, exec, id), full)
+            return annotate(taskResultView(withRecordPath(persisted, exec, id), full), persisted)
           }
         }
         // 终态：内存结果没有 worktree/changedFiles/overlapWarnings，用磁盘记录补齐。
@@ -1004,10 +1038,10 @@ export function registerTools(ctx, deps) {
                     ? live.stopConfirmed
                     : null,
             }
-            return taskResultView(withRecordPath(merged, exec, id), full)
+            return annotate(taskResultView(withRecordPath(merged, exec, id), full), merged)
           }
         }
-        return taskResultView(withRecordPath(live, exec, id), full)
+        return annotate(taskResultView(withRecordPath(live, exec, id), full), live)
       },
     },
     {
@@ -1270,23 +1304,28 @@ export function registerTools(ctx, deps) {
     {
       name: TOOL_NAMES.STEER_TASK,
       description:
-        '给**还在跑**的任务追加一条指示（中途插话），或给已结束的任务续聊。' +
-        '进程内通道（DSH 原生子 Agent）是真插话/真续聊：消息投进它的收件箱，' +
-        '它在下一个 step 边界处理，完整上下文保留。' +
-        '外部 CLI（CodeBuddy / Codex / Claude）不支持续接会话，只能「杀掉重来并带上已有产出」，' +
-        '回执里的 mode 会明确区分，不要混为一谈。' +
-        '只能给自己派出的任务插话。任务已终态时无法插话。',
+        '⚠️ 调用前必读：对外部 CLI 任务（CodeBuddy / Codex / Claude，即绝大多数派单任务）' +
+        '这个工具**不是插话**，而是「停掉当前正在跑的任务 + 带上已有产出另开一个新会话」。' +
+        '调用它会**立即 cancel 仍在跑的原任务**；原任务的模型内部状态会丢失，新任务要重新读一遍上下文，' +
+        '这不是「中途插话」。只有进程内 spawn 通道（DSH 原生子 Agent）才支持真插话：' +
+        '消息投进收件箱，下个 step 边界处理，上下文完整保留。' +
+        '因此，如果不希望打断正在写同一工作区的任务，就**不要**对外部 CLI 任务调用本工具；' +
+        '改用它之前先用 list_runs / get_task 看每条记录的 steerMode 事前确认能不能真插话。' +
+        '只能给自己派出的任务用。',
       parameters: {
         childId: { type: 'string', required: true, description: '目标任务 id（派单回执里的 childId）' },
         instruction: {
           type: 'string',
           required: true,
-          description: '追加的指示，例如「停，不要动 A 文件，只改 B」。不是新任务，是给当前任务的补充。',
+          description:
+            '要交给任务的新指示，例如「停，不要动 A 文件，只改 B」。对进程内任务它是「追加指示」；' +
+            '对外部 CLI 任务它会成为重开后新任务的指令（原任务已被中止），请把必要背景写全。',
         },
         role: {
           type: 'string',
           description:
-            '外部 CLI 走「杀掉重来」时投给哪个角色。省略则沿用原任务的角色。仅在下述情况下必填：记录里没有角色信息。',
+            '外部 CLI 走「停掉原任务 + 带产出重开（非插话）」时投给哪个角色。' +
+            '省略则沿用原任务的角色。仅在记录里没有角色信息时必填。',
         },
       },
       output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
