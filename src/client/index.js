@@ -1459,7 +1459,16 @@ window.__ModuleLoader__.load({
           }),
         ],
       })
-      const note = jsx('p', { style: noteStyle, children: t('globalRolesNote') })
+      const note = jsxs('div', {
+        style: { display: 'flex', flexDirection: 'column', gap: 2 },
+        children: [
+          jsx('p', { style: noteStyle, children: t('globalRolesNote') }),
+          // 两色语义的说明（2026-11-12 裁决）。
+          // **注意**：这个字典项早就加了，但一直没渲染出来 —— 2026-11-12 的
+          // 交互层核对脚本发现「只有字典、无调用点」。现在补上真正的渲染。
+          jsx('p', { style: noteStyle, children: t('roleColorNote') }),
+        ],
+      })
 
       // 详情：新建（虚拟角色 + 空 draft，不落盘）或编辑现有角色。
       if (creating || selectedRoleId) {

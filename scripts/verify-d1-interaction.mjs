@@ -26,15 +26,26 @@ const require = createRequire(import.meta.url)
 
 // ── React / 宿主模块 stub ────────────────────────────────
 //
-// **关键细节（踩过的坑）**：client 的 `jsxs(type, { children: [...] })`
-// 把 children 放在 **props 里**，而不是第三个参数。
-// 第一版的 stub 写成 `props.children = children`（无条件覆盖），
-// 于是传入的 props.children 全被空数组盖掉 → 渲染树永远为空。
-// 正确做法：只有真的传了额外 children 参数时才覆盖。
+// **三个踩过的坑，都在这里**：
+//
+// 1. client 的 `jsxs(type, { children: [...] })` 把 children 放在 **props 里**，
+//    不是第三个参数。无条件覆盖 `props.children` 会让渲染树永远为空。
+//
+// 2. `jsxs('div', {…}, key)` 的**第三个参数是 React 的 `key`**，不是 children！
+//    把它当 children 会把 `role.roleId` 之类混进渲染文本 —— 表现为
+//    「角色名显示成 role-bajie」。所以有 props.children 时，第三参数只当 key 忽略。
+//
+// 3. `react/jsx-runtime` 也要 stub（jsx/jsxs/Fragment），否则走 safeRequire 失败路径。
 const fakeReact = {
-  createElement(type, props, ...children) {
+  createElement(type, props, ...rest) {
     const p = { ...(props ?? {}) }
-    if (children.length > 0) p.children = children.length === 1 ? children[0] : children
+    if (rest.length > 0) {
+      if (p.children !== undefined) {
+        // props 里已有 children → 第三参数是 React key，忽略（见坑 2）
+      } else {
+        p.children = rest.length === 1 ? rest[0] : rest
+      }
+    }
     return { type, props: p }
   },
   useState(initial) {
@@ -188,14 +199,16 @@ const cliStates = snapshot.global.cli
 
 // **关键**：渲染函数消费的是 normalize 后的快照（生产链路是
 // host fullSnapshot → makeLoader 里 normalizeSnapshot + normalizeGlobal）。
-// 不 normalize 直接喂原始数据会丢字段（第一版就是因此渲染出 roleId 而非 name）。
+//
+// 两个坑（都踩过）：
+// 1. 不 normalize 直接喂原始数据会丢字段（角色名渲染成 roleId）
+// 2. `normalizeGlobal(value)` 读的是 `source.limits` / `source.defaultRoleId`，
+//    **它期望传的是 snapshot.global，不是整个 snapshot**。
+//    传错会让 global 全空、连 channels 都没有。
 const normalized = {
   ...T.normalizeSnapshot(snapshot),
-  global: T.normalizeGlobal(snapshot),
+  global: T.normalizeGlobal(snapshot.global),
 }
-// normalizeSnapshot 会把 state 重置为「无证据」态（防伪造），
-// 所以要验证「颜色只有绿灰」时用 normalize 后的真实结果。
-void normalized
 
 // ── 渲染并检查 ──────────────────────────────────────────
 const checks = []
@@ -206,6 +219,20 @@ function collect(node, out = []) {
   if (!node || typeof node !== 'object') return out
   if (Array.isArray(node)) {
     for (const n of node) collect(n, out)
+    return out
+  }
+  // **函数组件要执行**：client 的 `jsx(Switch, {...})` 在 raw stub 下
+  // 只会得到 {type: <函数>, props}，不展开就永远看不到它渲染出的
+  // button[role=switch]。这里递归调用它，把返回值继续收集。
+  if (typeof node.type === 'function') {
+    let rendered
+    try {
+      rendered = node.type(node.props ?? {})
+    } catch {
+      rendered = null
+    }
+    if (rendered) return collect(rendered, out)
+    out.push(node)
     return out
   }
   out.push(node)
@@ -277,13 +304,22 @@ try {
     managerOpen: true,
     onToggleManager: () => {},
     manager: {
+      // 选中一个角色 → 渲染详情视图（删除按钮只在详情里）
+      selectedRoleId: 'role-bajie',
       onBack: () => {},
+      onBackToSettings: () => {},
       onToggleRole: () => {},
       onEditRole: () => {},
+      onSelect: () => {},
       onCreateRole: () => {},
+      onCreate: () => {},
       onDeleteRole: () => {},
+      onRequestDelete: () => {},
+      onConfirmDelete: () => {},
+      onCancelDelete: () => {},
       onRefreshCapabilities: () => {},
       onSaveDetail: () => {},
+      onClose: () => {},
     },
   })
   record('renderGlobalRoleManager 能渲染', true, '不抛错')
@@ -296,39 +332,65 @@ if (manager) {
   const texts = textOf(manager)
   const allText = texts.join(' ')
   const buttons = nodes.filter((n) => n.type === 'button')
-  const switches = nodes.filter((n) => n.type === 'Switch' || n.props?.role === 'switch')
+  // client 用的是**本地定义**的 Switch（文件头注：不 require primitives），
+  // 它渲染成 button[role=switch]，所以按 role 找。
+  const switches = nodes.filter(
+    (n) => n.type === 'Switch' || n.props?.role === 'switch' || n.props?.['aria-checked'] !== undefined,
+  )
 
   record(
     'U2 管理器有「返回」按钮',
     buttons.some((b) => textOf(b).join('').includes('backToSettings')),
     `按钮标签：${buttons.map((b) => textOf(b).join('')).slice(0, 10).join(' | ')}`,
   )
+  // 管理器当前渲染的是**详情视图**（传了 selectedRoleId），
+  // 新增入口只在列表视图。所以单独渲染一次列表视图来验证 U4。
+  let listView = null
+  try {
+    listView = T.renderSection(t, normalized, {
+      cliStates,
+      managerOpen: true,
+      onToggleManager: () => {},
+      manager: {
+        onClose: () => {},
+        onBackToSettings: () => {},
+        onToggleRole: () => {},
+        onSelect: () => {},
+        onCreate: () => {},
+        onCreateRole: () => {},
+        onRefreshCapabilities: () => {},
+      },
+    })
+  } catch {
+    listView = null
+  }
+  const listText = listView ? textOf(listView).join(' ') : ''
   record(
-    'U4 管理器有「新增角色」按钮',
-    buttons.some((b) => textOf(b).join('').includes('addRole')),
-    buttons.some((b) => textOf(b).join('').includes('新增角色')) ? '存在' : '缺失',
+    'U4 列表视图有「新增角色」入口',
+    listText.includes('addRole'),
+    listText.includes('addRole') ? '找到了 addRole' : `列表文本：${listText.slice(0, 150)}`,
   )
   record(
-    '[需人眼] 每行有开关',
-    true,
-    `stub 渲染出 ${switches.length} 个 Switch（行渲染路径未完全复现）—— 请目视确认`,
+    'U8 每行有开关',
+    switches.length >= 2,
+    `找到 ${switches.length} 个 Switch（2 个角色应有 2 个）`,
   )
-  // 角色名：脚本里渲染出的是 roleId 而非 name（渲染链路依赖 host 投影细节，
-  // 当前 stub 无法完整复现）。如实标记「需人眼」，不假装通过。
+  const hasRoleNames = allText.includes('八戒') || allText.includes('Claude')
   record(
-    '[需人眼] 角色名显示为中文而非 roleId',
-    true,
-    'stub 渲染出 roleId；真实宿主下应显示 name —— 请目视确认',
+    '角色名显示为 name 而非 roleId',
+    hasRoleNames && !allText.includes('role-bajie'),
+    hasRoleNames ? `渲染出：${['八戒','Claude'].filter(n=>allText.includes(n)).join(' + ')}` : `未找到 name，实际：${allText.slice(0,150)}`,
   )
   record(
     'U8 开关颜色只有 green/gray',
     switches.every((s) => ['green', 'gray'].includes(s.props?.color ?? 'green')),
     `颜色集合：${[...new Set(switches.map((s) => s.props?.color ?? 'green'))].join(', ')}`,
   )
+  const noteText = manager ? textOf(manager).join(' ') : ''
   record(
-    '[需人眼] 角色区有「颜色不表示实时额度」说明',
-    true,
-    'roleColorNote 字典项已由静态脚本验证存在；渲染位置请目视确认',
+    '角色区有「颜色不表示实时额度」说明',
+    noteText.includes('roleColorNote'),
+    noteText.includes('roleColorNote') ? 'roleColorNote 已渲染' : `管理器文本：${noteText.slice(0,160)}`,
   )
   record(
     '管理器中无「本对话角色」「右侧栏」',
@@ -359,19 +421,19 @@ if (detail) {
   const selects = nodes.filter((n) => n.type === 'select')
 
   record(
-    '[需人眼] U6 详情有 CLI 下拉',
-    true,
-    `stub 渲染出 ${selects.length} 个 select（下拉用的是自定义组件不是原生 select）—— 请目视确认`,
+    'U6 详情有 4 个 CLI 选项',
+    ['dsh','claude','codex','codebuddy'].every((k) => allText.includes(k)),
+    ['dsh','claude','codex','codebuddy'].filter((k) => !allText.includes(k)).join(',') || '全部存在',
   )
   record(
     'U6 详情有模型相关字段',
-    allText.includes('detailModel') || allText.includes('model'),
-    allText.includes('模型') ? '有「模型」' : '缺失',
+    allText.includes('fieldModel'),
+    allText.includes('fieldModel') ? '有 fieldModel' : '缺失',
   )
   record(
     'U6 详情有思考强度字段',
-    allText.includes('detailReasoning') || allText.includes('reasoning'),
-    allText.includes('思考强度') ? '有「思考强度」' : '缺失',
+    allText.includes('fieldReasoning'),
+    allText.includes('fieldReasoning') ? '有 fieldReasoning' : '缺失',
   )
   record(
     'U6 详情有「刷新能力」',
@@ -384,10 +446,12 @@ if (detail) {
       buttons.some((b) => /detailBack|backToSettings/.test(textOf(b).join(''))),
     `按钮：${buttons.map((b) => textOf(b).join('')).join(' | ')}`,
   )
+  const managerText = manager ? textOf(manager).join(' ') : ''
+  const hasDelete = allText.includes('deleteRole') || managerText.includes('deleteRole')
   record(
-    '[需人眼] U5 有「删除角色」入口',
-    true,
-    'deleteRole 字典项已由静态脚本验证存在；具体位置请目视确认',
+    'U5 有「删除角色」入口',
+    hasDelete,
+    hasDelete ? '存在' : `详情与列表均未找到 deleteRole`,
   )
   record(
     '详情无「通道」用户可见文案',
