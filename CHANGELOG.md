@@ -2,6 +2,33 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.13] - 2026-11-12
+
+汇总 alpha.12 + 两档并发上限，一次安装。
+
+### Added
+
+- 并发上限改为两档：**全局 8 / 单会话 4**（`limits.maxParallelWritesTotal` /
+  `maxParallelWritesPerSession`），新增错误码 `WRITE_LIMIT_SESSION` 与全局满区分。
+  拿不到 sessionId 时只受全局约束，不被单会话限制误伤。
+
+### Fixed
+
+- 「模型列表刷新不正常」：外部 CLI 通道被整个跳过 + 角色绑定模型没进目录
+  （详见 0.1.0-alpha.12 条目）。
+
+### Known Issue（未修）
+
+- **槽位泄漏**：`active` 是纯内存 Map，槽位只在 `onFinish`（完成/失败/取消）时释放。
+  DSH 重启时任务被强杀，`onFinish` 永不触发 → 每次重启必然泄漏槽位，
+  重启后可能直接「已达上限」无法派单。
+  本版只是把上限放宽到 8 缓解，**根因未修**。
+  详见 `docs/plan/2026-11-12-slot-leak-critical.md`。
+
+### 测试
+
+- 584 → 590（+6 条两档上限测试）
+
 ## [0.1.0-alpha.12] - 2026-11-12
 
 ### Fixed
