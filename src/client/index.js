@@ -2999,12 +2999,19 @@ window.__ModuleLoader__.load({
       // 1) tab 本体（能力检测后调用；没有该服务时仍注册 seat，不拖垮其他模块）
       const tabs = sidebarRightTabsOf(slotCtx)
       if (tabs && typeof tabs.register === 'function') {
-        tabs.register({
-          id: TAB_ID,
-          kind: TAB_KIND,
-          priority: 'extension',
-          title: () => t('tabTitle'),
-        })
+        // 重复注册（热重载/双实例）不能让 seats 一起失败：只记录并继续。
+        try {
+          tabs.register({
+            id: TAB_ID,
+            kind: TAB_KIND,
+            priority: 'extension',
+            title: () => t('tabTitle'),
+          })
+        } catch (error) {
+          try {
+            console.warn('[meetingstone] sidebar tab type registration skipped:', error)
+          } catch {}
+        }
       }
       const loadSession = makeSessionConfigLoader(deps.getService, deps.mountError)
       const sessionActions =

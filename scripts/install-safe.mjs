@@ -13,6 +13,7 @@
  *   watcher 通过 WMI 的 Win32_Process.Create 启动，脱离 DSH 进程树。
  */
 import { spawnSync } from 'node:child_process'
+import { snapshotConfig, restoreIfLost } from './patch-config.mjs'
 import { readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -75,14 +76,26 @@ if (canary.status !== 0) {
   process.exit(1)
 }
 
-// 2) 安装
+// 2) 安装（先快照 profile patch 的 meetingstone 配置，安装器可能清空它）
 console.log('[2/3] install into desktop …')
+const configSnapshot = join(tmpdir(), `ms-patch-config-${Date.now()}.json`)
+try {
+  const saved = snapshotConfig(configSnapshot)
+  console.log(`[2/3] config snapshot: ${Object.keys(saved).length} keys`)
+} catch (error) {
+  console.error('install-safe: config snapshot warning:', error.message)
+}
 const startedAt = Date.now()
 const result = install(tgz)
 if (result.add.status !== 0) {
   console.error('install-safe: install failed')
   console.error((result.add.stderr || result.add.stdout).split('\n').slice(-8).join('\n'))
   process.exit(3)
+}
+try {
+  if (restoreIfLost(configSnapshot)) console.log('[2/3] profile config restored after install')
+} catch (error) {
+  console.error('install-safe: config restore warning:', error.message)
 }
 console.log('installed.')
 
