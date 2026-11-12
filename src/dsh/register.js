@@ -769,6 +769,9 @@ export function registerTools(ctx, deps) {
           ...(normalizeProjectKey(projectRoot) ? { projectKey: normalizeProjectKey(projectRoot) } : {}),
           // 原始项目根：建工作树需要真实路径（projectKey 是归一化后的计数键，不能拿来建树）
           ...(typeof projectRoot === 'string' && projectRoot ? { projectRoot } : {}),
+          // 归属会话：dispatcher 用它统计「单会话并发上限」（默认 4，全局默认 8）。
+          // 取 exec.agent.id（即宿主 SessionId）；拿不到就不传，该次派单只受全局上限约束。
+          ...(typeof agent?.id === 'string' && agent.id ? { sessionId: agent.id } : {}),
           registry: effective.registry,
           ...(agent || projectRoot
             ? { context: { ...(agent ? { agent } : {}), ...(projectRoot ? { projectRoot } : {}) } }

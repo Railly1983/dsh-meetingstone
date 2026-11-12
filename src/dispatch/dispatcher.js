@@ -49,6 +49,7 @@ export const DISPATCH_ERRORS = Object.freeze({
   PROVIDER_UNAVAILABLE: 'PROVIDER_UNAVAILABLE',
   WRITE_CONFLICT: 'WRITE_CONFLICT',
   WRITE_LIMIT_TOTAL: 'WRITE_LIMIT_TOTAL',
+  WRITE_LIMIT_SESSION: 'WRITE_LIMIT_SESSION',
   // 宿主子 Agent 容量耗尽（共享池，默认 8）：原样透传，不包成 ADAPTER_FAILED。
   // 出处：宿主 @deepseek-ai/dsh-subagent 的 ActivationPool.reserve() 抛
   // SubagentError(msg, 'ACTIVATION_LIMIT_REACHED')，且**没有等待/排队机制**。
@@ -429,7 +430,16 @@ function positiveInteger(value, fallback) {
  */
 export function createDispatcher({ registry, adapter, limits = {}, worktrees = null, now = () => Date.now(), versionFingerprint = defaultVersionFingerprint }) {
   const serializeWrites = limits.serializeWrites !== false
-  const maxParallelWritesTotal = positiveInteger(limits.maxParallelWritesTotal, 4)
+  // 两档并发上限（用户 2026-11-12 定）：
+  // - maxParallelWritesTotal：全局上限，默认 8（跨会话累计）
+  // - maxParallelWritesPerSession：单会话上限，默认 4
+  // 取两者的较严者。只给 total 时行为与旧版一致（perSession 默认不低于 total，
+  // 即等于只受 total 约束），避免旧配置突然变紧。
+  const maxParallelWritesTotal = positiveInteger(limits.maxParallelWritesTotal, 8)
+  const maxParallelWritesPerSession = positiveInteger(
+    limits.maxParallelWritesPerSession,
+    Math.min(4, maxParallelWritesTotal),
+  )
   // 注意：这里缺省为 none（纯 dispatcher 单测/旧装配的兼容默认）；用户可见默认由
   // src/config.js 的 limits.defaultIsolation='worktree' 提供，index.js 会原样传入。
   const defaultIsolation = limits.defaultIsolation === 'worktree' ? 'worktree' : 'none'
@@ -513,17 +523,19 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
   /**
    * 在**任何 await 之前**做完整准入检查。返回 null 表示可以占槽。
    *
-   * 只有两类拒绝：
-   * - 同项目的隔离/未隔离互斥（正确性保护，与并发额度无关）
-   * - 本插件全局并行写任务上限（只统计本插件派发的任务；宿主容量不在这里）
+   * 拒绝分三类：
+   * 1. 同项目的隔离/未隔离互斥（正确性保护，与并发额度无关）
+   * 2. 本插件全局并行写任务上限（`maxParallelWritesTotal`，默认 8）
+   * 3. 单一会话的并行写任务上限（`maxParallelWritesPerSession`，默认 4）
    *
    * **本项目不排队**：超限立即拒绝，由调用方稍后重试。
    *
    * @param {string} projectKey
    * @param {'none' | 'worktree'} isolation
+   * @param {string | null} [sessionKey] 发起派单的会话标识（拿不到时传 null，只受全局限制）
    * @returns {{ code: string, message: string } | null}
    */
-  function admissionFailure(projectKey, isolation) {
+  function admissionFailure(projectKey, isolation, sessionKey = null) {
     const entries = entriesFor(projectKey)
     const hasWorktree = entries.some((entry) => entry.isolation === 'worktree')
     const hasNone = entries.some((entry) => entry.isolation === 'none')
@@ -554,8 +566,26 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       return {
         code: DISPATCH_ERRORS.WRITE_LIMIT_TOTAL,
         message:
-          `本插件派发的并行写任务已达上限 ${maxParallelWritesTotal}（不含宿主的子 Agent 容量）；` +
-          '请等待现有任务完成或调大 limits.maxParallelWritesTotal 后重试（本项目不排队）',
+          `本插件派发的并行写任务已达全局上限 ${maxParallelWritesTotal}（不含宿主的子 Agent 容量）；` +
+          '请等待现有任务完成，或调大 limits.maxParallelWritesTotal 后重试（本项目不排队）',
+      }
+    }
+
+    // 单会话上限：只统计同一 sessionKey 的任务。拿不到 sessionKey 时跳过
+    // （调用方无法证明身份，不该因此被永久拒绝；全局上限仍然生效）。
+    if (sessionKey) {
+      let sameSession = 0
+      for (const entry of active.values()) {
+        if (entry.sessionKey === sessionKey) sameSession += 1
+      }
+      if (sameSession >= maxParallelWritesPerSession) {
+        return {
+          code: DISPATCH_ERRORS.WRITE_LIMIT_SESSION,
+          message:
+            `本会话派发的并行写任务已达上限 ${maxParallelWritesPerSession}；` +
+            `全局还可再派 ${Math.max(0, maxParallelWritesTotal - active.size)} 个，` +
+            '但请等本会话现有任务完成，或调大 limits.maxParallelWritesPerSession（本项目不排队）',
+        }
       }
     }
     return null
@@ -728,7 +758,11 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       }
     }
 
-    const blocked = admissionFailure(projectKey, isolation)
+    // 会话标识：用于「单会话并发上限」。req.sessionId 由适配器/工具层透传；
+    // 拿不到时传 null，该次派单只受全局上限约束（不让身份缺失变成永久拒绝）。
+    const sessionKey =
+      typeof req.sessionId === 'string' && req.sessionId.trim() ? req.sessionId.trim() : null
+    const blocked = admissionFailure(projectKey, isolation, sessionKey)
     if (blocked) return fail(blocked.code, blocked.message)
 
     /** @type {object} */
@@ -746,6 +780,8 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       phase: 'reserved',
       fingerprint,
       reservation: null,
+      // 归属会话：单会话并发上限靠它统计。null 表示调用方没提供身份。
+      sessionKey,
     }
     // 同步占位：active（额度）与 inProgress（去重索引）之间没有任何 await，
     // 两个并发相同请求不可能都通过判定（先占位再启动）。

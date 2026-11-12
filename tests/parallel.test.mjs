@@ -1238,3 +1238,101 @@ test('listRuns 保留 worktree/changedFiles/operationId（悟空指出的丢失�
     await removeRepo(root)
   }
 })
+
+// ── 两档并发上限（用户 2026-11-12 定：全局 8 / 单会话 4）────────────────
+// 这些用例只验证**额度**，因此关闭隔离与同项目串行，避免被其它保护先拦下。
+
+function limitDispatcher(limits) {
+  /** @type {Map<string, any>} */
+  const live = new Map()
+  const adapter = {
+    async start(input) {
+      const childId = `c-${Math.random().toString(36).slice(2, 8)}`
+      live.set(childId, input)
+      return { taskRef: { childId } }
+    },
+    async cancel(ref) {
+      const childId = typeof ref === 'string' ? ref : ref?.childId
+      const input = live.get(childId)
+      // 模拟适配器终态回调：真实适配器 cancel 后会调 onFinish
+      input?.onFinish?.()
+      live.delete(childId)
+    },
+  }
+  return createDispatcher({
+    registry: { list: () => [], resolve: () => ({ roleId: 'r', enabled: true }) },
+    adapter,
+    limits: { defaultIsolation: 'none', serializeWrites: false, ...limits },
+  })
+}
+
+const LIMIT_REQ = (n, sessionId) => ({
+  role: 'r',
+  task: `t${n}`,
+  projectKey: 'proj',
+  projectRoot: '/tmp/proj',
+  isolation: 'none',
+  ...(sessionId ? { sessionId } : {}),
+})
+
+test('单会话上限默认 4：同会话第 5 个报 WRITE_LIMIT_SESSION', async () => {
+  const d = limitDispatcher({})
+  for (let i = 0; i < 4; i += 1) {
+    const r = await d.dispatch(LIMIT_REQ(i, 'session-a'))
+    assert.equal(r.ok, true, `第 ${i + 1} 个应成功：${r.message ?? ''}`)
+  }
+  const fifth = await d.dispatch(LIMIT_REQ(4, 'session-a'))
+  assert.equal(fifth.ok, false)
+  assert.equal(fifth.code, DISPATCH_ERRORS.WRITE_LIMIT_SESSION)
+  assert.match(fifth.message, /本会话/)
+})
+
+test('不同会话各自独立计数：A 满 4 个后 B 仍可派', async () => {
+  const d = limitDispatcher({})
+  for (let i = 0; i < 4; i += 1) {
+    assert.equal((await d.dispatch(LIMIT_REQ(i, 'session-a'))).ok, true)
+  }
+  const b1 = await d.dispatch(LIMIT_REQ(10, 'session-b'))
+  assert.equal(b1.ok, true, 'B 会话不该受 A 会话影响')
+})
+
+test('全局上限默认 8：A4 + B4 之后第 9 个报 WRITE_LIMIT_TOTAL', async () => {
+  const d = limitDispatcher({})
+  for (let i = 0; i < 4; i += 1) assert.equal((await d.dispatch(LIMIT_REQ(i, 'session-a'))).ok, true)
+  for (let i = 0; i < 4; i += 1) assert.equal((await d.dispatch(LIMIT_REQ(i, 'session-b'))).ok, true)
+  const ninth = await d.dispatch(LIMIT_REQ(99, 'session-c'))
+  assert.equal(ninth.ok, false)
+  assert.equal(ninth.code, DISPATCH_ERRORS.WRITE_LIMIT_TOTAL)
+  assert.match(ninth.message, /全局上限/)
+})
+
+test('拿不到 sessionId 时只受全局上限约束，不被单会话限制误伤', async () => {
+  const d = limitDispatcher({})
+  // 无 sessionId 的请求连派 5 个（超过 perSession=4）仍应成功
+  for (let i = 0; i < 5; i += 1) {
+    const r = await d.dispatch(LIMIT_REQ(i))
+    assert.equal(r.ok, true, `无 sessionId 的第 ${i + 1} 个应成功：${r.message ?? ''}`)
+  }
+})
+
+test('自定义两档上限：全局 2 / 单会话 1', async () => {
+  const d = limitDispatcher({ maxParallelWritesTotal: 2, maxParallelWritesPerSession: 1 })
+  assert.equal((await d.dispatch(LIMIT_REQ(1, 'sa'))).ok, true)
+  const second = await d.dispatch(LIMIT_REQ(2, 'sa'))
+  assert.equal(second.code, DISPATCH_ERRORS.WRITE_LIMIT_SESSION)
+  assert.equal((await d.dispatch(LIMIT_REQ(3, 'sb'))).ok, true)
+  const third = await d.dispatch(LIMIT_REQ(4, 'sc'))
+  assert.equal(third.code, DISPATCH_ERRORS.WRITE_LIMIT_TOTAL)
+})
+
+test('取消后槽位释放：同会话可继续派', async () => {
+  const d = limitDispatcher({ maxParallelWritesPerSession: 2 })
+  const a = await d.dispatch(LIMIT_REQ(1, 's'))
+  const b = await d.dispatch(LIMIT_REQ(2, 's'))
+  assert.equal(a.ok, true)
+  assert.equal(b.ok, true)
+  assert.equal((await d.dispatch(LIMIT_REQ(3, 's'))).code, DISPATCH_ERRORS.WRITE_LIMIT_SESSION)
+  await d.cancel(a.taskRef)
+  const c = await d.dispatch(LIMIT_REQ(4, 's'))
+  assert.equal(c.ok, true, '取消后应释放槽位')
+})

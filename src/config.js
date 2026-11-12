@@ -148,16 +148,22 @@ export const Config = compile(
           'defaultIsolation=none 时同项目任务串行；这是同一工作区的正确性保护，不是并发额度',
         ),
       maxParallelWritesTotal: S.number()
+        .default(8)
+        .description(
+          '本插件派发的并行写任务**全局**上限（默认 8；跨会话累计；不含宿主自身的子 Agent）',
+        ),
+      maxParallelWritesPerSession: S.number()
         .default(4)
         .description(
-          '本插件派发的并行写任务总上限（默认 4；不含宿主自身的子 Agent，宿主容量由宿主管理）',
+          '单一会话派发的并行写任务上限（默认 4；与全局上限取较严者）',
         ),
       defaultIsolation: S.union(['none', 'worktree'])
         .default('worktree')
         .description('默认隔离方式：worktree=每任务独立工作树；none=主工作区串行'),
     }).default({
       serializeWrites: true,
-      maxParallelWritesTotal: 4,
+      maxParallelWritesTotal: 8,
+      maxParallelWritesPerSession: 4,
       defaultIsolation: 'worktree',
     }),
   }),
