@@ -2,6 +2,37 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.21] - 2026-11-12
+
+质量收敛收尾版。汇总 Codex 交叉评审整改的全部成果。
+
+### Verified（本轮真机验证通过）
+
+- **Worktree 真实并行写入**：A/B 同批并发派出，各落独立工作树，
+  `changedFiles` 各 1 条、`overlapWarnings` 全程为空；双向交叉核验成立；
+  用户未提交文件在任务后 SHA256 逐字节不变。
+- **进程清理**：取消后 CLI 进程被彻底清理，进程数回到基线（超出 0 个）。
+  清理由宿主 `dsh-win32-process` 的 Job Object 负责。
+- **Token 精简三项**：`get_task` 省 88%、`list_runs` 省 89%、`list_roles` 245 B。
+
+### Fixed
+
+- 「默认角色配置」标题名实不符 → 改为「全局角色库」（`defaultRoleId` 有数据无 UI 入口）
+- `confirmDeleteRole` 文案仍提「会话覆盖记录」→ 与 B3 语义对齐
+- `SOURCE_LAYERS` 去掉不存在的 `project` / `session`，只留 `global` / `default`
+- `templateDesc` 去掉硬编码角色名
+
+### Added
+
+- `tests/adapter-timeout.test.mjs`（5 条）：补齐超时行为的测试盲区
+  —— 此前所有 adapter 测试都用 `timeoutMs: 0`，超时路径零覆盖
+
+### Docs
+
+- 删除 3 个过期 verify 日志（466.5 KB，未跟踪）与 2 个测试残留（已跟踪）
+- README / README.zh-CN 状态行修正：工具数 8→10、UI 描述与实际一致、
+  角色配置层数说明与 B3 对齐
+
 ## [0.1.0-alpha.20] - 2026-11-12
 
 ### Fixed
