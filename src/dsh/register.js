@@ -1361,12 +1361,55 @@ export function registerTools(ctx, deps) {
           }
         }
 
-        // 先停掉当前任务（它可能还在跑）。停不掉就**不重开** ——
-        // 否则会出现两个任务同时写同一工作区（安全与正确性风险）。
-        const cancelOutcome = await dispatcher
-          .cancel({ childId })
-          .catch((error) => ({ stopConfirmed: false, reason: error?.message ?? String(error) }))
-        const stopConfirmed = cancelOutcome?.stopConfirmed === true
+        // 先停掉当前任务（它可能还在跑）。
+        //
+        // 关键坑（2026-11-12 真机测试）：adapter.cancelActivation 在**没有存活句柄**时
+        // 返回 `{ stopConfirmed: false, reason: '没有该任务的存活句柄' }` —— 这是正确的
+        // 谨慎行为（不猜），但对 steer 场景是误判：
+        // 任务可能**已经自己结束了**，此时「没有句柄」恰恰说明它停了。
+        //
+        // 所以分两步：
+        // 1. 先看记录是否已终态（completed/failed/cancelled）→ 直接认定已停，不必 cancel
+        // 2. 只有还在 running 才真去 cancel
+        const terminal = ['completed', 'failed', 'cancelled', 'interrupted']
+        const alreadyTerminal =
+          terminal.includes(String(record.liveStatus ?? record.status ?? '')) ||
+          record.stopConfirmed === true
+
+        let stopConfirmed = false
+        let stopReason = ''
+        if (alreadyTerminal) {
+          stopConfirmed = true
+          stopReason = `记录已是终态（${record.liveStatus ?? record.status}）`
+        } else {
+          const cancelOutcome = await dispatcher
+            .cancel({ childId })
+            .catch((error) => ({ stopConfirmed: false, reason: error?.message ?? String(error) }))
+          stopConfirmed = cancelOutcome?.stopConfirmed === true
+          stopReason = typeof cancelOutcome?.reason === 'string' ? cancelOutcome.reason : ''
+          // cancel 报「没有存活句柄」时，回查记录状态再判一次 ——
+          // 它可能在我们查完记录之后自己结束了。
+          //
+          // **关键：回查必须同时看磁盘记录与内存视图**（2026-11-12 真机测试暴露）。
+          // 只读磁盘会把「内存说还在跑、磁盘是旧快照」的情况误判成已结束。
+          // 两者矛盾时以**内存**为准（它反映当前进程的真实状态）。
+          if (!stopConfirmed && /没有该任务的存活句柄|存活句柄/.test(stopReason)) {
+            const afterDisk = loadPersistedRun
+              ? await loadPersistedRun(exec, childId).catch(() => null)
+              : null
+            const afterLive = await resolveRun(exec, childId).catch(() => null)
+            const liveStatus = String(afterLive?.status ?? '')
+            const diskStatus = String(afterDisk?.status ?? '')
+            // 内存明确说还在跑 → 不能重开（磁盘的终态是过时快照）
+            const liveStillRunning = liveStatus === 'running'
+            const diskTerminal =
+              terminal.includes(diskStatus) || afterDisk?.stopConfirmed === true
+            if (!liveStillRunning && diskTerminal) {
+              stopConfirmed = true
+              stopReason = `任务已自行结束（${diskStatus}）`
+            }
+          }
+        }
 
         // 关键门禁（2026-11-12 真机测试发现缺失）：
         // 原任务没停干净就绝不能启动第二个写入任务。
@@ -1375,7 +1418,7 @@ export function registerTools(ctx, deps) {
             error: 'STOP_UNCONFIRMED',
             message:
               `原任务 ${childId} 未能确认停止` +
-              (cancelOutcome?.reason ? `（${cancelOutcome.reason}）` : '') +
+              (stopReason ? `（${stopReason}）` : '') +
               '；为避免两个任务同时写同一工作区，已拒绝重开。',
             hint: '稍后用 meetingstone_get_task 确认它已终止，再重试 steer；或直接 cancel_task。',
             previousChildId: childId,

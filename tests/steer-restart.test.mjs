@@ -191,3 +191,78 @@ test('进程内任务：走 steer 而不是 restart', async () => {
   assert.notEqual(out.mode, 'restart-with-output', '进程内任务不该走 restart')
   assert.ok(out.error, '应该如实报错（缺 subagents）')
 })
+
+// ── 2026-11-12 真机测试暴露的第四个问题 ──────────────────────────────
+// adapter.cancelActivation 在「没有存活句柄」时返回 stopConfirmed:false
+// （正确的谨慎行为，但对 steer 是误判：任务可能已自行结束）。
+// 修法：先看记录是否已终态；cancel 报没有句柄时再回查一次记录。
+
+test('任务已自行结束（记录是 cancelled）→ 视为已停，允许重开', async () => {
+  const ended = { ...ACP_RECORD, status: 'cancelled', stopConfirmed: true }
+  const { tool, dispatches } = harness({
+    record: ended,
+    // cancel 会说不确定（因为没有存活句柄），但记录说已终态
+    cancelOutcome: { stopConfirmed: false, reason: '没有该任务的存活句柄，无法确认停止状态' },
+  })
+  const out = await tool.execute({ childId: 'old-child', instruction: 'x' }, EXEC)
+  assert.equal(out.ok, true, '已终态的任务不该被 STOP_UNCONFIRMED 拦住')
+  assert.equal(out.mode, 'restart-with-output')
+  assert.equal(out.stopConfirmed, true)
+  assert.equal(dispatches.length, 1)
+})
+
+test('任务已 completed 时同理（不必 cancel 也能重开）', async () => {
+  const done = { ...ACP_RECORD, status: 'completed' }
+  const { tool, dispatches } = harness({
+    record: done,
+    cancelOutcome: { stopConfirmed: false, reason: '没有该任务的存活句柄' },
+  })
+  const out = await tool.execute({ childId: 'old-child', instruction: 'x' }, EXEC)
+  assert.equal(out.ok, true)
+  assert.equal(dispatches.length, 1)
+})
+
+test('cancel 报没有句柄，但记录仍是 running → 仍拒绝（保守）', async () => {
+  const stillRunning = { ...ACP_RECORD, status: 'running' }
+  const { tool, dispatches } = harness({
+    record: stillRunning,
+    cancelOutcome: { stopConfirmed: false, reason: '没有该任务的存活句柄' },
+  })
+  const out = await tool.execute({ childId: 'old-child', instruction: 'x' }, EXEC)
+  assert.equal(out.error, 'STOP_UNCONFIRMED', '拿不到证据就不能重开')
+  assert.equal(dispatches.length, 0)
+})
+
+test('liveStatus 优先于落盘 status：内存说还在跑就拒绝', async () => {
+  // 真实分层：loadPersistedRun 返回**磁盘**记录（无 liveStatus），
+  // resolveRun/dispatcher.getTask 返回**内存**视图（有 liveStatus）。
+  // 这里显式模拟这个分层，而不是把 liveStatus 塞进磁盘记录。
+  const diskRecord = { ...ACP_RECORD, status: 'cancelled' }
+  const registered = []
+  const dispatches = []
+  const ctx = { tools: { register: (d) => registered.push(d) } }
+  registerTools(ctx, {
+    registry: { list: () => [], resolve: () => null },
+    probe: { probe: async () => ({}), probeAll: async () => [] },
+    // 磁盘：已 cancelled
+    loadPersistedRun: async () => diskRecord,
+    listPersistedRuns: async () => ({ runs: [] }),
+    // 内存视图：还在跑（通过 resolveRun 的 dispatcher.getTask）
+    dispatcher: {
+      getTask: async () => ({ status: 'running' }),
+      dispatch: async (i) => {
+        dispatches.push(i)
+        return { ok: true, taskRef: { childId: 'new' } }
+      },
+      cancel: async () => ({ stopConfirmed: false, reason: '没有该任务的存活句柄' }),
+    },
+  })
+  const tool = registered.find((t) => t.name === TOOL_NAMES.STEER_TASK)
+  const out = await tool.execute({ childId: 'old-child', instruction: 'x' }, EXEC)
+  assert.equal(
+    out.error,
+    'STOP_UNCONFIRMED',
+    '内存说还在跑时，磁盘的 cancelled 是过时快照，不该据此重开',
+  )
+  assert.equal(dispatches.length, 0)
+})

@@ -2,6 +2,26 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.15] - 2026-11-12
+
+### Fixed
+
+- **`steer` 对外部 CLI 的「任务已自行结束」判断错误**（alpha.14 真机测试暴露）。
+  真机场景：任务被 cancel 后记录是 `cancelled`/`stopConfirmed:true`，但 steer 回执仍说
+  `stopConfirmed:false` 并拒绝重开（`STOP_UNCONFIRMED`）。
+
+  两个成因：
+
+  1. 没有先看记录是否已终态就调 `cancel` —— 而 `adapter.cancelActivation` 在
+     「没有存活句柄」时返回 `stopConfirmed:false`（正确的谨慎行为，但对已结束的任务是误判）。
+     现在：先看记录（含 `liveStatus`）是否终态，是就直接认定已停。
+  2. 回查逻辑只看磁盘记录 —— 磁盘 `cancelled` 可能是**过时快照**，而内存视图仍是 `running`。
+     现在：回查同时看磁盘与内存，两者矛盾时**以内存为准**。
+
+### 测试
+
+- 624 → 628 tests，新增 4 条覆盖「已终态 / 已完成 / 仍在跑 / 内存与磁盘矛盾」
+
 ## [0.1.0-alpha.14] - 2026-11-12
 
 本轮质量收敛（Codex 交叉评审整改）的汇总版本。
