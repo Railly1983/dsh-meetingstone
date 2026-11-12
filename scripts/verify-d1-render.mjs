@@ -279,6 +279,72 @@ record(
   /rolesSection:\s*'全局角色库'/.test(source) ? '已改为「全局角色库」' : '标题未更新',
 )
 
+// ── 静态核对：U2–U5 的可见控件 ──────────────────────────────
+//
+// 这几项本质是「按钮/输入框在不在、绑没绑对动作」，同样能结构判定，
+// 不需要人眼。真正需要人眼的只是「点下去手感如何、视觉对不对」。
+
+// U2：管理角色在设置页内联展开（不跳右侧栏）
+record(
+  'U2 「管理角色」内联展开（不调 sidebarRight.openTab）',
+  !/sidebarRight\.openTab/.test(source),
+  /sidebarRight\.openTab/.test(source) ? '❌ 仍在调 sidebarRight.openTab' : '无 sidebarRight.openTab 调用',
+)
+
+// U3/U4/U5：三个动作的入口都在
+record(
+  'U3 有「保存修改」',
+  /saveDetail:\s*'保存修改'/.test(dictText),
+  /saveDetail:\s*'保存修改'/.test(dictText) ? 'saveDetail 存在' : '缺少 saveDetail',
+)
+record(
+  'U4 有「新增角色」',
+  /addRole:\s*'新增角色'/.test(dictText),
+  /addRole:\s*'新增角色'/.test(dictText) ? 'addRole 存在' : '缺少 addRole',
+)
+record(
+  'U5 有「删除角色」',
+  /deleteRole:\s*'删除角色'/.test(dictText),
+  /deleteRole:\s*'删除角色'/.test(dictText) ? 'deleteRole 存在' : '缺少 deleteRole',
+)
+
+// U5：删除有二次确认（不能一键就删）
+record(
+  'U5 删除有二次确认',
+  /confirmDelete:\s*'确认删除'/.test(dictText) && /deleteConfirming/.test(source),
+  /confirmDelete:\s*'确认删除'/.test(dictText) && /deleteConfirming/.test(source)
+    ? 'confirmDelete 文案 + deleteConfirming 状态都在'
+    : '缺少二次确认机制',
+)
+
+// U3：保存有二次确认
+record(
+  'U3 保存有二次确认',
+  /confirmGlobal:\s*'确认写入全局配置？'/.test(dictText),
+  /confirmGlobal:/.test(dictText) ? 'confirmGlobal 存在' : '缺少保存二次确认',
+)
+
+// U10：有返回按钮
+record(
+  'U10 有「返回」按钮',
+  /backToSettings:\s*'返回'/.test(dictText),
+  /backToSettings:/.test(dictText) ? 'backToSettings 存在' : '缺少返回按钮',
+)
+
+// U6：有「刷新能力」动作
+record(
+  'U6 有「刷新能力」',
+  /refreshCapabilities:\s*'刷新能力'/.test(dictText),
+  /refreshCapabilities:/.test(dictText) ? 'refreshCapabilities 存在' : '缺少刷新入口',
+)
+
+// U10：返回/保存/删除绑定的是真实回调（不是死按钮）
+record(
+  'U2–U5 按钮绑定真实回调',
+  /onClick:\s*opts\.on(Save|Delete|Create|Back|Refresh)/.test(source),
+  /onClick:\s*opts\.on/  .test(source) ? '存在 onClick: opts.onXxx 绑定' : '未找到回调绑定',
+)
+
 // ── 静态核对：能力目录 ────────────────────────────────────
 const cats = snapshot.global.capabilities
 record(
