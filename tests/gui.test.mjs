@@ -778,6 +778,8 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
   ])
   assert.deepEqual(snapshot.channels, [{ channelId: 'ch-acp-flash', kind: 'acp-cli' }])
   assert.equal(snapshot.lastError.code, 'ROLE_NOT_FOUND')
+  // 该用例的 remote 是 mock（不带 global）→ 客户端 normalizeGlobal 回退空能力目录。
+  // 真实 Host 的 4 CLI 能力目录在 tests/cli-capabilities.test.mjs 里对 createGuiState 验证。
   assert.deepEqual(snapshot.global, {
     defaultRoleId: '',
     dispatchNotes: '',

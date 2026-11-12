@@ -30,7 +30,7 @@
 import { createRequire } from 'node:module'
 import { roleAvailability } from '../dsh/register.js'
 import { deriveRoleView } from './state-model.js'
-import { buildCliCapabilities } from '../roles/capabilities.js'
+import { createCliCapabilityCatalog, createDefaultProbes } from '../cli/capabilities.js'
 import { CLI_SPECS } from '../cli/probe.js'
 import { deriveCliState } from '../cli/preferences.js'
 import { createSessionRemoteHandlers } from './session-remote.js'
@@ -351,6 +351,8 @@ function withTimeout(promise, ms) {
  * @param {{ probeAll?: (opts?: any) => Promise<any[]> }} [options.probe] CLI 探测器
  * @param {() => Promise<any[]>} [options.cliStates] P0-S2：返回已合并偏好 + preflight 的
  *   CLI 状态（由 `src/gui/config-api.js` 提供）。提供时优先于 `probe.probeAll()`。
+ * @param {import('../cli/capabilities.js').CapabilityCatalog} [options.capabilities]
+ *   CLI 能力目录（B2b）。未提供时按默认探测（codex app-server / DSH host llm）创建。
  */
 export function createGuiState({
   ctx = null,
@@ -360,9 +362,29 @@ export function createGuiState({
   sources = null,
   probe = null,
   cliStates = null,
+  capabilities = null,
 } = {}) {
   /** @type {ReturnType<typeof normalizeError> | null} */
   let lastError = initialLastError(registry)
+
+  // B2b：CLI 能力目录（4 CLI × 模型 × 强度）——GUI 的唯一能力事实源。
+  // 默认探测：codex app-server model/list；DSH host ctx.llm.listModels；不可得则静态/unknown。
+  const capabilityCatalog =
+    capabilities ??
+    createCliCapabilityCatalog({
+      probes: createDefaultProbes({
+        ctx,
+        resolveExecutable: async (/** @type {string} */ cli) => {
+          try {
+            if (!probe || typeof probe.probe !== 'function') return null
+            const result = await probe.probe(cli)
+            return result && typeof result.path === 'string' && result.path ? result.path : null
+          } catch {
+            return null
+          }
+        },
+      }),
+    })
 
   /**
    * 记一条错误。后到的覆盖先到的；空错误忽略。
@@ -413,6 +435,8 @@ export function createGuiState({
   function globalView(cli, cliError, states = null) {
     const source = config && typeof config === 'object' ? config : {}
     const usingStates = Array.isArray(states)
+    // B2b：4 CLI 能力目录（动态发现 > 静态已知表 > unknown），GUI 的唯一能力来源。
+    const capabilitySnapshot = capabilityCatalog.snapshot()
     return {
       defaultRoleId: typeof source.defaultRoleId === 'string' ? source.defaultRoleId : '',
       dispatchNotes: typeof source.dispatchNotes === 'string' ? source.dispatchNotes : '',
@@ -422,8 +446,9 @@ export function createGuiState({
           : '.meetingstone.json',
       limits: limitsView(source.limits),
       channels: Array.isArray(channels) ? channels.map(channelDetailView) : [],
-      // B2：角色编辑器只需「CLI → 模型 → 强度」；能力只来自已配置组合（不伪造）
-      capabilities: buildCliCapabilities(Array.isArray(channels) ? channels : []),
+      capabilities: capabilitySnapshot.capabilities,
+      capabilitiesRefreshedAt: capabilitySnapshot.refreshedAt,
+      capabilitiesErrors: capabilitySnapshot.errors,
       cli: usingStates ? states.map(cliStateView) : Array.isArray(cli) ? cli.map(cliView) : null,
       // 只有新路径才追加，旧快照的 deepEqual 契约保持不变。
       ...(usingStates
@@ -614,6 +639,7 @@ export function registerGuiRemote(ctx, deps) {
       /**
        * 重新检测一个外部 CLI（strict：cli/force）。
        * 只读取证据，不写配置；force=true 绕过 probe 缓存。
+       * B2b：同时刷新该 CLI 的能力缓存（模型/强度），并把能力目录回传（可观测）。
        */
       async refreshCli(cli, force) {
         if (!configApi || typeof configApi.preflightCli !== 'function') {
@@ -621,7 +647,13 @@ export function registerGuiRemote(ctx, deps) {
         }
         const checked = await configApi.preflightCli(cli, { force: force === true })
         if (!checked || checked.ok !== true) return checked
-        return { ok: true, cli: cliStateOf(cli, checked.preflight) }
+        const capabilityRefresh = await capabilityCatalog.refresh(cli, { force: true })
+        return {
+          ok: true,
+          cli: cliStateOf(cli, checked.preflight),
+          capabilities: capabilityCatalog.snapshot().capabilities,
+          capabilityRefresh,
+        }
       }
 
       /**

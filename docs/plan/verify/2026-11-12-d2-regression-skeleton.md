@@ -1,8 +1,7 @@
 # D2 回归验收骨架（指针文件）
 
-> 状态：**骨架待执行（D2 未解锁）**｜负责人：沙僧
-> **正文在 [`2026-11-13-d2-skeleton.md`](./2026-11-13-d2-skeleton.md)**（Lead 指定路径；本文件仅为兼容八戒派单里给的日期名而保留的入口）。
+> 状态：**已执行（2026-11-12 14:00–14:25，alpha.4）**，结论 **PASS with known issues（P0 无）**｜负责人：沙僧
+> **正文与执行记录在 [`2026-11-13-d2-skeleton.md`](./2026-11-13-d2-skeleton.md)**（Lead 指定路径；本文件仅为兼容八戒派单里给的日期名而保留的入口）。
 >
-> 内容覆盖：前置条件与 BLOCKED 规则、四 CLI 口径（codex / codebuddy-acp / claude / in-process）、`npm run verify` 留档、Jobs 取消与槽位释放、Worktree 隔离/overlap、三原生面板、缺陷分级 P0/P1/P2、执行顺序与时间盒、结果汇总表。
->
-> 解锁条件：C2（task-9）+ B1b（task-14）完成 + Lead `install:safe` 打包并重启加载新包。
+> 摘要：`npm run verify` exit=0 / 577 tests 576 pass；四 CLI：codebuddy PASS、in-process PASS、claude 停用拒绝 PASS、codex BLOCKED（quota）；C3 字段 taskId/artifactPolicy/upstreamChildId/durationMs 实机落盘；Jobs 取消终态 cancelled+stopConfirmed+槽位释放（P1：回执竞态 + dispose 超时）；Worktree 隔离与双向 overlap PASS；三面板数据层 OK、**UI 目视待 Lead/用户截图**。
+> 日志：`docs/plan/verify/2026-11-13-d2-verify.log`；安装包 `dsh-meetingstone-0.1.0-alpha.4.tgz`。
