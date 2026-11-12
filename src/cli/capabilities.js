@@ -1395,6 +1395,126 @@ export async function probeCodebuddyModels({
 }
 
 /**
+ * 从 WorkBuddy 本地桥读取**完整**模型目录。
+ *
+ * ## 为什么需要（2026-11-13 用户反馈）
+ *
+ * 用户说「deepseek harness 我现在接的起码有 20 个模型」，而我们的 dsh probe
+ * 只报 1 个。实测真相：桥上有 **59 个**。
+ *
+ * ## 为什么不能只靠 ctx.llm.listModels()
+ *
+ * `listModels(provider)` 走的是 DSH 的适配层，返回的模型经过了适配器的
+ * filter（`modelAllow` / 面板显示偏好），**不是**桥的完整目录。
+ *
+ * ## 关键：必须带 `?all=1`
+ *
+ * 实测：
+ * - `GET /v1/models`        → **3 个**（被过滤）
+ * - `GET /v1/models?all=1`  → **59 个**（完整，含 context_window 等全部字段）
+ *
+ * 鉴权：本地回环令牌，文件在 `<user>/.workbuddy-bridge/bridge-token`。
+ *
+ * @param {{ host?: string, port?: number, token?: string, timeoutMs?: number }} [opts]
+ * @returns {Promise<Array<{ id: string, label?: string, contextWindow?: number, maxOutputTokens?: number, strengths?: string[] }>>}
+ */
+export async function probeWorkbuddyBridgeModels(opts = {}) {
+  const host = opts.host || process.env.WORKBUDDY_BRIDGE_HOST || '127.0.0.1'
+  const port = Number(opts.port || process.env.WORKBUDDY_BRIDGE_PORT || 8790)
+  const timeoutMs = Number(opts.timeoutMs) || 15_000
+
+  const token =
+    (typeof opts.token === 'string' && opts.token) ||
+    process.env.WORKBUDDY_BRIDGE_TOKEN ||
+    (() => {
+      // 令牌文件：实测在 ~/.workbuddy-bridge/bridge-token
+      const home = (() => {
+        try {
+          return homedir()
+        } catch {
+          return ''
+        }
+      })()
+      if (!home) return ''
+      const candidates = [
+        process.env.WORKBUDDY_DATA_DIR ? join(process.env.WORKBUDDY_DATA_DIR, 'bridge-token') : '',
+        join(home, '.workbuddy-bridge', 'bridge-token'),
+        join(home, '.workbuddy', 'bridge-token'),
+      ].filter(Boolean)
+      for (const p of candidates) {
+        try {
+          const t = readFileSync(p, 'utf8').trim()
+          if (t) return t
+        } catch {
+          /* 读不到继续 */
+        }
+      }
+      return ''
+    })()
+
+  const url = `http://${host}:${port}/v1/models?all=1`
+  /** @type {Record<string, string>} */
+  const headers = { accept: 'application/json' }
+  if (token) headers.authorization = `Bearer ${token}`
+
+  /** @type {Response} */
+  let res
+  try {
+    res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) })
+  } catch (error) {
+    throw new Error(
+      `WORKBUDDY_BRIDGE_UNREACHABLE: ${url} — ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  if (res.status === 401) {
+    throw new Error(
+      token
+        ? 'WORKBUDDY_BRIDGE_UNAUTHORIZED: 令牌无效（桥可能重启后生成了新令牌）'
+        : 'WORKBUDDY_BRIDGE_NO_TOKEN: 没找到 bridge-token（通常在 ~/.workbuddy-bridge/）',
+    )
+  }
+  if (!res.ok) throw new Error(`WORKBUDDY_BRIDGE_HTTP_${res.status}: ${url}`)
+
+  /** @type {any} */
+  let parsed
+  try {
+    parsed = await res.json()
+  } catch (error) {
+    throw new Error(`WORKBUDDY_BRIDGE_BAD_JSON: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  const list = Array.isArray(parsed) ? parsed : parsed?.data ?? parsed?.models ?? []
+  if (!Array.isArray(list) || list.length === 0) {
+    throw new Error('WORKBUDDY_BRIDGE_EMPTY: 桥返回的模型列表为空')
+  }
+
+  return list
+    .filter((/** @type {any} */ m) => m && typeof m === 'object')
+    .map((/** @type {any} */ m) => {
+      const id = asString(m.id) || asString(m.model)
+      if (!id) return null
+      // 上下文：优先 context_window（当前档），其次 max_input_tokens / context_length
+      const ctxRaw =
+        Number(m.context_window) ||
+        Number(m.max_input_tokens) ||
+        Number(m.context_length) ||
+        Number(m.contextWindow) ||
+        0
+      const outRaw = Number(m.max_output_tokens) || Number(m.maxOutputTokens) || 0
+      const efforts = Array.isArray(m.reasoning_efforts)
+        ? m.reasoning_efforts.map(String).filter(Boolean)
+        : []
+      return {
+        id,
+        label: asString(m.name) || asString(m.displayName) || id,
+        ...(ctxRaw > 0 ? { contextWindow: ctxRaw, contextWindowSource: 'workbuddy-bridge' } : {}),
+        ...(outRaw > 0 ? { maxOutputTokens: outRaw } : {}),
+        ...(efforts.length > 0 ? { strengths: efforts } : {}),
+      }
+    })
+    .filter((/** @type {any} */ m) => Boolean(m))
+}
+
+/**
  * 从 CodeBuddy 安装包的 `product.json` 读取模型的上下文窗口。
  *
  * ## 为什么用这个文件
@@ -1493,8 +1613,27 @@ export function createDefaultProbes(deps = {}) {
       return fillContextWindows(withProduct, { cli: 'codebuddy' })
     },
     dsh: async () => {
+      // **首选：WorkBuddy 桥的完整目录**（2026-11-13 更正）。
+      //
+      // 实测：桥上有 59 个模型且每个都带 context_window / max_output / reasoning_efforts；
+      // 而 `ctx.llm.listModels(provider)` 只返回适配层过滤后的子集（本机实测 1~3 个）。
+      // 用户反馈「我接的起码有 20 个模型」——桥才是真相源。
+      //
+      // 桥不可用（没装 WorkBuddy / 桥没起 / 无令牌）时，回退到宿主 ctx.llm。
+      let bridgeModels = null
+      let bridgeError = ''
+      try {
+        bridgeModels = await probeWorkbuddyBridgeModels({ timeoutMs: 8000 })
+      } catch (error) {
+        bridgeError = error instanceof Error ? error.message : String(error)
+      }
+      if (Array.isArray(bridgeModels) && bridgeModels.length > 0) {
+        return fillContextWindows(bridgeModels, { cli: 'dsh' })
+      }
+
+      // 回退：宿主 llm 服务
       const ctx = deps.ctx
-      if (!ctx) throw new Error('宿主 ctx 不可用')
+      if (!ctx) throw new Error(bridgeError ? `桥不可用（${bridgeError}），且宿主 ctx 不可用` : '宿主 ctx 不可用')
       let llm = null
       try {
         llm = ctx.llm ?? (typeof ctx.get === 'function' ? ctx.get('llm') : null)
@@ -1502,7 +1641,7 @@ export function createDefaultProbes(deps = {}) {
         llm = null
       }
       if (!llm || typeof llm.listModels !== 'function') {
-        throw new Error('宿主 llm.listModels 不可用')
+        throw new Error(bridgeError ? `桥不可用（${bridgeError}），且宿主 llm.listModels 不可用` : '宿主 llm.listModels 不可用')
       }
 
       // **关键修复（2026-11-13）**：宿主 `llm.listModels(provider)` **需要 provider 参数**。
