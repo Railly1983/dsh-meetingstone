@@ -41,6 +41,15 @@ export const ChannelInstanceSchema = compile(
     provider: S.string().description('对应的 provider 名（acp / codex / claude-code / spawn ...）'),
     model: S.string().description('该 provider 行实际配置的模型（用于与角色声明比对）'),
     reasoning: S.string().description('该 provider 行实际配置的思考强度'),
+    // P0 计费事故（2026-11-12）：进程内（in-process）子 Agent 跑在宿主进程里，
+    // 模型必须由**宿主 LLM provider** 显式钉死，否则宿主会让子会话静默继承父会话当时的
+    // 模型（`resolveChildAgentOptions` 的 `{...parent, ...requested}`），
+    // 造成「角色配了便宜通道、实际按父会话的按量计费 provider 扣钱」。
+    // 这两个字段只对 kind=in-process 有意义；外部 CLI 的模型仍由 provider 行的 --model 承载。
+    llmProvider: S.string().description(
+      '进程内通道的宿主 LLM provider（如 workbuddy）；仅 kind=in-process 生效',
+    ),
+    llmModel: S.string().description('进程内通道的宿主 LLM 模型 ID；仅 kind=in-process 生效'),
   }),
 )
 

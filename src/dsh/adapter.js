@@ -342,6 +342,45 @@ function buildRunBase({ input, role, provider, childId, startedAt }) {
 }
 
 /**
+ * 构造子 Agent 的显式模型路由（`request.agentOptions`）。
+ *
+ * **为什么必须有这个函数（2026-11-12 计费事故）**：宿主
+ * `@deepseek-ai/dsh-subagent` 的 `resolveChildAgentOptions(parent, requested, depth)`
+ * 实现是 `{ ...父会话路由, ...requested }`。`requested` 为空时子会话**静默继承父会话
+ * 当时的 provider/model**。于是出现最坏情况：
+ * - 角色配置里写的是 A / 便宜通道，实际按父会话的 B / 按量计费通道扣钱；
+ * - 父会话切了模型，已派出的子会话仍钉在旧 provider 上（本次事故：3 个 70 万上下文的
+ *   子会话持续打 deepseek-account，30 分钟烧掉 ≈¥15）。
+ *
+ * 处理原则：
+ * - **进程内（in-process）**：子 Agent 在宿主进程里跑真实 LLM，必须显式钉死路由，
+ *   由 `channel.llmProvider` / `channel.llmModel` 声明（宿主 LLM provider 名，
+ *   不是 subagent provider 名）。未声明则返回空对象，保持宿主默认继承语义。
+ * - **外部 CLI（acp-cli / codex / claude-code）**：模型由 provider 行的 `--model` 承载，
+ *   子进程根本不用宿主的 LLM；传 agentOptions 反而会撞
+ *   `does not support child agentOptions` 的能力校验，因此一律不传。
+ *
+ * @param {any} role 已解析出执行组合的角色
+ * @param {any} instance 命中的通道实例（可空）
+ * @returns {{ agentOptions?: { provider?: string, model?: string, reasoningEffort?: string } }}
+ */
+export function buildChildAgentOptions(role, instance) {
+  const channel = instance && typeof instance === 'object' ? instance : role?.channel
+  if (!channel || typeof channel !== 'object') return {}
+  if (channel.kind !== 'in-process') return {}
+  const provider = typeof channel.llmProvider === 'string' ? channel.llmProvider.trim() : ''
+  const model = typeof channel.llmModel === 'string' ? channel.llmModel.trim() : ''
+  if (!provider && !model) return {}
+  /** @type {{ provider?: string, model?: string, reasoningEffort?: string }} */
+  const agentOptions = {}
+  if (provider) agentOptions.provider = provider
+  if (model) agentOptions.model = model
+  const reasoning = typeof channel.reasoning === 'string' ? channel.reasoning.trim() : ''
+  if (reasoning) agentOptions.reasoningEffort = reasoning
+  return { agentOptions }
+}
+
+/**
  * 把角色身份、可选的 TaskSpec 简报、可选的"上次结果重放块"、任务和输出契约拼成提示词。
  *
  * 为什么要拼：子 Agent 默认不知道"自己是谁"。CLIWorker 时代靠 persona 的 prompt 注入，
@@ -1041,6 +1080,12 @@ export function createDshAdapter(ctx, options = {}) {
     //    delivery:'caller' —— 「caller delivery only returns the result」（subagent.md）；
     //    TODO(P2-runtime): 该取值尚未在真实会话里验证，若宿主要求 parent delivery 需改这里。
     const controller = new AbortController()
+    // 3.0 **P0 计费事故修复**：子会话的模型必须显式钉死，不能依赖父会话继承。
+    //     宿主实现（resolveChildAgentOptions）用 `{...parent, ...requested}`，
+    //     requested 为空就继承父路由 —— 于是角色配置的模型/强度完全不生效，
+    //     实际按父会话当时的（可能是按量计费的）provider 计费。
+    //     agentOptions 是宿主 AgentOptions 的公开字段（provider/model/reasoningEffort）。
+    const childAgentOptions = buildChildAgentOptions(effectiveRole, route.instance)
     const operationId =
       typeof input?.operationId === 'string' && input.operationId
         ? input.operationId
@@ -1072,6 +1117,14 @@ export function createDshAdapter(ctx, options = {}) {
         ...(typeof cwd === 'string' && cwd ? { cwd } : {}),
         // 不传 maxDepth：实现里 `resolveChildDepth(parent, undefined)` 自带默认上限；
         // 传了反而要求 provider 具备 depthLimit 能力。
+        //
+        // **P0 计费事故修复（2026-11-12）**：必须显式传 agentOptions。
+        // 宿主的 `resolveChildAgentOptions(parent, requested, depth)` 是
+        // `{...父路由, ...requested}`：不传 requested 时子会话**静默继承父会话当时的模型**。
+        // 父会话若用按量计费的 provider（如 deepseek-account），每个派单都在为父会话的模型付钱，
+        // 而配置里写的 ACP/Codex 角色完全没有被使用（表现为「改了角色模型还在扣 DeepSeek」）。
+        // 这里把解析出的执行组合钉死到子会话，既修正路由，也避免「配置写一套、实际跑另一套」。
+        ...childAgentOptions,
       },
     }
 

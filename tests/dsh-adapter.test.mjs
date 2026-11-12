@@ -11,7 +11,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createDshAdapter, providerNameFor, PROVIDER_BY_KIND } from '../src/dsh/adapter.js'
+import {
+  buildChildAgentOptions,
+  createDshAdapter,
+  providerNameFor,
+  PROVIDER_BY_KIND,
+} from '../src/dsh/adapter.js'
 import { registerTools, TOOL_NAMES, CLI_STATUS_CLIS } from '../src/dsh/register.js'
 
 /** 一个永挂起的 result Promise：让内部句柄在测试期间不被自动清理。 */
@@ -826,4 +831,67 @@ test('refusal+空输出：补 429/限流 诊断提示（不伪造成功）', asy
   assert.equal(finished.length, 1)
   assert.equal(finished[0].stopReason, 'refusal')
   assert.match(finished[0].diagnostic, /429|限流|频率/, '必须提示可能是限流，而不是空结果')
+})
+
+test('P0 计费事故回归：in-process 子会话必须显式钉死宿主 LLM 路由', async () => {
+  // 宿主 resolveChildAgentOptions = {...父会话路由, ...requested}：
+  // requested 为空时子会话静默继承父会话模型，造成「角色配了便宜通道、实际按父会话扣费」。
+  const role = {
+    roleId: 'role-bajie',
+    name: '八戒',
+    channel: {
+      kind: 'in-process',
+      channelId: 'ch-inprocess',
+      provider: 'spawn',
+      llmProvider: 'workbuddy',
+      llmModel: 'deepseek-v4.1-flash',
+    },
+  }
+  const built = buildChildAgentOptions(role, null)
+  assert.deepEqual(built, {
+    agentOptions: { provider: 'workbuddy', model: 'deepseek-v4.1-flash' },
+  })
+})
+
+test('P0 计费事故回归：in-process 未声明宿主路由时不伪造 agentOptions', async () => {
+  const role = { roleId: 'r', name: 'r', channel: { kind: 'in-process', provider: 'spawn' } }
+  assert.deepEqual(buildChildAgentOptions(role, null), {})
+})
+
+test('P0 计费事故回归：外部 CLI 不传 agentOptions（模型由 provider 行承载）', async () => {
+  for (const kind of ['acp-cli', 'codex', 'claude-code']) {
+    const role = {
+      roleId: 'r',
+      name: 'r',
+      channel: { kind, provider: 'x', llmProvider: 'workbuddy', llmModel: 'm' },
+    }
+    assert.deepEqual(buildChildAgentOptions(role, null), {}, kind + ' 不应携带 agentOptions')
+  }
+})
+
+test('P0 计费事故回归：startActivation 的 request 必须带显式模型路由', async () => {
+  const subagents = fakeSubagents({ providers: { spawn: { name: 'spawn' } } })
+  const { adapter } = makeAdapter(subagents)
+  await adapter.start({
+    role: {
+      roleId: 'role-x',
+      name: 'X',
+      channel: {
+        kind: 'in-process',
+        channelId: 'ch-inprocess',
+        provider: 'spawn',
+        llmProvider: 'workbuddy',
+        llmModel: 'deepseek-v4.1-flash',
+      },
+    },
+    task: 'ping',
+    context: { agent: { id: 'agent-parent', session: { header: { cwd: 'D:/MeetingStone' } } } },
+  })
+  const call = subagents.calls.find((c) => c.method === 'startActivation')
+  assert.ok(call, '必须调用 startActivation')
+  assert.deepEqual(
+    call.spec.request.agentOptions,
+    { provider: 'workbuddy', model: 'deepseek-v4.1-flash' },
+    '子会话模型必须显式传给宿主，不能依赖父会话继承',
+  )
 })
