@@ -266,10 +266,20 @@ function findSvg(node) {
   await fiber
   await settle()
   assert.equal(registrations.length, 4, 'header + section + 两个 keyed seat')
-  assert.equal(client.__test.REMOTE_CONTRIBUTION.descriptors.length, 4, 'list + 三个 strict 会话方法')
+  assert.equal(client.__test.REMOTE_CONTRIBUTION.descriptors.length, 9, 'list + 8 个 strict 方法（会话3+配置5）')
   assert.deepEqual(
     client.__test.REMOTE_CONTRIBUTION.descriptors.map((d) => d.method),
-    ['list', 'getSessionConfig', 'setSessionOverride', 'clearSessionOverride'],
+    [
+      'list',
+      'getSessionConfig',
+      'setSessionOverride',
+      'clearSessionOverride',
+      'setCliEnabled',
+      'refreshCli',
+      'updateGlobalRole',
+      'createGlobalRole',
+      'deleteGlobalRole',
+    ],
   )
   assert.deepEqual(
     registrations.map((r) => r.options.name),

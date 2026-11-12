@@ -280,6 +280,35 @@ export function createConfigGuiApi({ cfg, globalWriter, projectWriter, preflight
   }
 
   /**
+   * 新增一个全局角色（B1b；同一 global writer / configEditor.edit 路径）。
+   * @param {Record<string, any>} role
+   */
+  async function createGlobalRole(role) {
+    if (!globalWriter || typeof globalWriter.createRole !== 'function') {
+      return { ok: false, code: CLI_CONFIG_ERRORS.ROLE_WRITE_FAILED, message: '全局配置写入器不可用' }
+    }
+    const result = await globalWriter.createRole(role)
+    if (!result?.ok) return { ...result, code: result?.code ?? CLI_CONFIG_ERRORS.ROLE_WRITE_FAILED }
+    return result
+  }
+
+  /**
+   * 删除一个全局角色（B1b）。只删 profile 全局定义，不清理会话覆盖记录。
+   * @param {string} roleId
+   */
+  async function deleteGlobalRole(roleId) {
+    if (!isValidRoleId(roleId)) {
+      return { ok: false, code: CLI_CONFIG_ERRORS.INVALID_ROLE_ID, message: `角色 id 不合法：${String(roleId)}` }
+    }
+    if (!globalWriter || typeof globalWriter.deleteRole !== 'function') {
+      return { ok: false, code: CLI_CONFIG_ERRORS.ROLE_WRITE_FAILED, message: '全局配置写入器不可用' }
+    }
+    const result = await globalWriter.deleteRole(roleId)
+    if (!result?.ok) return { ...result, code: result?.code ?? CLI_CONFIG_ERRORS.ROLE_WRITE_FAILED }
+    return result
+  }
+
+  /**
    * 写项目配置（白名单字段；保留未知字段）。
    * @param {string} projectRoot
    * @param {Record<string, any>} patch
@@ -329,6 +358,8 @@ export function createConfigGuiApi({ cfg, globalWriter, projectWriter, preflight
     setCliEnabled,
     setGlobalRoleEnabled,
     updateGlobalRole,
+    createGlobalRole,
+    deleteGlobalRole,
     updateProjectConfig,
     setProjectRoleOverride,
     preferencesView,

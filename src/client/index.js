@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 集合石 0.2.0 · GUI 只读 section（浏览器 half，接真实 Host 数据）。
  *
  * 本文件不是 Node 模块，而是宿主 client module system 直接当脚本加载的
@@ -228,6 +228,24 @@ window.__ModuleLoader__.load({
               { name: 'roleId', wire: 'roleId', source: 'json', codec: roleIdCodec() },
               { name: 'patch', wire: 'patch', source: 'json', codec: jsonValueCodec() },
             ],
+            invocation: { kind: 'direct' },
+            result: { mode: 'src-json' },
+          },
+          {
+            id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/createGlobalRole`,
+            service: REMOTE_SERVICE,
+            namespace: REMOTE_SERVICE,
+            method: 'createGlobalRole',
+            parameters: [{ name: 'role', wire: 'role', source: 'json', codec: jsonValueCodec() }],
+            invocation: { kind: 'direct' },
+            result: { mode: 'src-json' },
+          },
+          {
+            id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/deleteGlobalRole`,
+            service: REMOTE_SERVICE,
+            namespace: REMOTE_SERVICE,
+            method: 'deleteGlobalRole',
+            parameters: [{ name: 'roleId', wire: 'roleId', source: 'json', codec: roleIdCodec() }],
             invocation: { kind: 'direct' },
             result: { mode: 'src-json' },
           },
@@ -784,6 +802,8 @@ window.__ModuleLoader__.load({
         setCliEnabled: (cli, enabled) => call('setCliEnabled', [cli, enabled]),
         refreshCli: (cli, force) => call('refreshCli', [cli, Boolean(force)]),
         updateGlobalRole: (roleId, patch) => call('updateGlobalRole', [roleId, patch]),
+        createGlobalRole: (role) => call('createGlobalRole', [role]),
+        deleteGlobalRole: (roleId) => call('deleteGlobalRole', [roleId]),
       }
     }
 
@@ -1084,6 +1104,15 @@ window.__ModuleLoader__.load({
       globalRoleBadge: '全局',
       managerClose: '收起',
       managerOpenLabel: '打开全局角色管理',
+      addRole: '新增角色',
+      createRoleTitle: '新建全局角色',
+      createRoleHint: '角色 ID 自动生成（role-<名称>，冲突自动加序号）；保存后写入 profile，对所有会话生效。',
+      createRole: '创建角色',
+      deleteRole: '删除角色',
+      confirmDeleteRole:
+        '确认删除该全局角色？只删除 profile 中的全局默认定义；已有会话的覆盖记录不会被改写（可能指向已删角色）。',
+      confirmDelete: '确认删除',
+      roleIdLabelAuto: '角色 ID（自动生成）',
       roleCount: '角色数量',
       openAdvanced: '展开',
       closeAdvanced: '收起',
@@ -1238,6 +1267,16 @@ window.__ModuleLoader__.load({
       globalRoleBadge: 'Global',
       managerClose: 'Collapse',
       managerOpenLabel: 'Open global role management',
+      addRole: 'Add role',
+      createRoleTitle: 'New global role',
+      createRoleHint:
+        'Role ID is generated automatically (role-<name>, with a numeric suffix on conflict); saving writes the profile and affects every session.',
+      createRole: 'Create role',
+      deleteRole: 'Delete role',
+      confirmDeleteRole:
+        'Delete this global role? Only the global definition in the profile is removed; existing session override records are left untouched (they may point at the deleted role).',
+      confirmDelete: 'Delete',
+      roleIdLabelAuto: 'Role ID (generated)',
       roleCount: 'Role count',
       openAdvanced: 'Expand',
       closeAdvanced: 'Collapse',
@@ -1635,14 +1674,20 @@ window.__ModuleLoader__.load({
      * @param {{
      *   selectedRoleId?: string,
      *   draft?: any,
+     *   creating?: boolean,
      *   onSelect?: Function,
+     *   onCreate?: Function,
      *   onBack?: Function,
      *   onDraft?: Function,
      *   onSave?: Function,
      *   onCancelConfirm?: Function,
+     *   onRequestDelete?: Function,
+     *   onConfirmDelete?: Function,
+     *   onCancelDelete?: Function,
      *   onClose?: Function,
      *   saving?: boolean,
      *   confirming?: boolean,
+     *   deleteConfirming?: boolean,
      *   error?: any,
      * }} [opts]
      */
@@ -1657,8 +1702,17 @@ window.__ModuleLoader__.load({
         channels: globalChannels.length > 0 ? globalChannels : asArray(snapshot?.channels),
       }
       const selectedRoleId = asString(opts.selectedRoleId)
+      const creating = opts.creating === true
+      const deleteConfirming = opts.deleteConfirming === true
       const onSelect = typeof opts.onSelect === 'function' ? opts.onSelect : () => {}
+      const onCreate = typeof opts.onCreate === 'function' ? opts.onCreate : () => {}
       const onClose = typeof opts.onClose === 'function' ? opts.onClose : () => {}
+      const onRequestDelete =
+        typeof opts.onRequestDelete === 'function' ? opts.onRequestDelete : () => {}
+      const onConfirmDelete =
+        typeof opts.onConfirmDelete === 'function' ? opts.onConfirmDelete : () => {}
+      const onCancelDelete =
+        typeof opts.onCancelDelete === 'function' ? opts.onCancelDelete : () => {}
       const header = jsxs('div', {
         style: alignRow,
         children: [
@@ -1668,27 +1722,82 @@ window.__ModuleLoader__.load({
         ],
       })
       const note = jsx('p', { style: noteStyle, children: t('globalRolesNote') })
-      if (selectedRoleId) {
+
+      // 详情：新建（虚拟角色 + 空 draft，不落盘）或编辑现有角色。
+      if (creating || selectedRoleId) {
+        const virtualRole = {
+          roleId: selectedRoleId || '__new_role__',
+          name: '',
+          aliases: [],
+          setting: '',
+          channel: {},
+          enabled: true,
+          fieldSources: {},
+          state: {},
+        }
+        const detailView = creating ? { ...view, roles: [...roles, virtualRole] } : view
+        const detailRoleId = creating ? virtualRole.roleId : selectedRoleId
         return jsxs('div', {
           style: { ...card, display: 'flex', flexDirection: 'column', gap: 6 },
           children: [
             header,
             note,
-            renderRoleDetail(t, view, selectedRoleId, {
+            creating ? jsx('p', { style: noteStyle, children: t('createRoleHint') }) : null,
+            renderRoleDetail(t, detailView, detailRoleId, {
               scope: 'global',
-              draft: opts.draft ?? undefined,
+              draft: opts.draft ?? (creating ? emptyRoleDraft() : undefined),
               saving: opts.saving === true,
               confirming: opts.confirming === true,
               error: opts.error,
               showScope: false,
+              title: creating ? t('createRoleTitle') : undefined,
+              saveLabel: creating ? t('createRole') : undefined,
               onBack: opts.onBack,
               onDraft: opts.onDraft,
               onSave: opts.onSave,
               onCancelConfirm: opts.onCancelConfirm,
             }),
+            creating
+              ? null
+              : deleteConfirming
+                ? jsxs('div', {
+                    style: { ...card, gap: 4, borderColor: 'var(--dsw-alias-state-error-primary)' },
+                    children: [
+                      jsx('div', { style: noteStyle, children: t('confirmDeleteRole') }),
+                      jsxs('div', {
+                        style: { display: 'flex', gap: 8 },
+                        children: [
+                          jsx('button', {
+                            type: 'button',
+                            style: { ...scopeButton, color: 'var(--dsw-alias-state-error-primary)' },
+                            disabled: opts.saving === true,
+                            onClick: onConfirmDelete,
+                            children: t('confirmDelete'),
+                          }),
+                          jsx('button', {
+                            type: 'button',
+                            style: scopeButton,
+                            onClick: onCancelDelete,
+                            children: t('cancel'),
+                          }),
+                        ],
+                      }),
+                    ],
+                  })
+                : jsx('div', {
+                    style: { display: 'flex', justifyContent: 'flex-end' },
+                    children: jsx('button', {
+                      type: 'button',
+                      style: { ...linkButton, color: 'var(--dsw-alias-state-error-primary)' },
+                      onClick: onRequestDelete,
+                      children: t('deleteRole'),
+                    }),
+                  }),
           ],
         })
       }
+
+      // 列表：每行名称 + 启停状态；底部「新增角色 / 收起」。
       return jsxs('div', {
         style: { ...card, display: 'flex', flexDirection: 'column', gap: 6 },
         children: [
@@ -1742,13 +1851,21 @@ window.__ModuleLoader__.load({
                 ),
               }),
           jsx('div', {
-            style: { display: 'flex', justifyContent: 'flex-end' },
-            children: jsx('button', {
-              type: 'button',
-              style: linkButton,
-              onClick: onClose,
-              children: t('managerClose'),
-            }),
+            style: { display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' },
+            children: [
+              jsx('button', {
+                type: 'button',
+                style: scopeButton,
+                onClick: onCreate,
+                children: t('addRole'),
+              }),
+              jsx('button', {
+                type: 'button',
+                style: linkButton,
+                onClick: onClose,
+                children: t('managerClose'),
+              }),
+            ],
           }),
         ],
       })
@@ -1769,7 +1886,7 @@ window.__ModuleLoader__.load({
      * 设置页组件：两区 + 错误摘条件显示。
      * CLI 开关失败不做乐观更新：失败时开关保持关闭，并显示一行摘要/人工步骤/重新检测。
      */
-    function Section({ t, list: load, updateGlobalRole, setCliEnabled, refreshCli }) {
+    function Section({ t, list: load, updateGlobalRole, createGlobalRole, deleteGlobalRole, setCliEnabled, refreshCli }) {
       const [state, setState] = react.useState({ status: 'loading' })
       const [errorOpen, setErrorOpen] = react.useState(false)
       const [cliStates, setCliStates] = react.useState(null)
@@ -1777,10 +1894,13 @@ window.__ModuleLoader__.load({
       const [cliFailures, setCliFailures] = react.useState({})
       // B1：设置页内联全局角色管理（不打开右侧栏会话面板）。
       const [managerOpen, setManagerOpen] = react.useState(false)
+      // B1b：list / edit / create 三态 + 删除二次确认。
+      const [managerMode, setManagerMode] = react.useState('list')
       const [managerRoleId, setManagerRoleId] = react.useState('')
       const [managerDraft, setManagerDraft] = react.useState(null)
       const [managerSaving, setManagerSaving] = react.useState(false)
       const [managerConfirming, setManagerConfirming] = react.useState(false)
+      const [managerDeleteConfirming, setManagerDeleteConfirming] = react.useState(false)
       const [managerError, setManagerError] = react.useState(null)
 
       react.useEffect(() => {
@@ -1904,9 +2024,11 @@ window.__ModuleLoader__.load({
 
       function closeManager() {
         setManagerOpen(false)
+        setManagerMode('list')
         setManagerRoleId('')
         setManagerDraft(null)
         setManagerConfirming(false)
+        setManagerDeleteConfirming(false)
         setManagerError(null)
       }
 
@@ -1916,56 +2038,105 @@ window.__ModuleLoader__.load({
           return
         }
         setManagerOpen(true)
+        setManagerMode('list')
         setManagerRoleId('')
         setManagerDraft(null)
         setManagerConfirming(false)
+        setManagerDeleteConfirming(false)
         setManagerError(null)
       }
 
       function selectManagerRole(roleId) {
         const role = asArray(state.snapshot?.roles).find((item) => item.roleId === roleId)
+        setManagerMode('edit')
         setManagerRoleId(roleId)
         setManagerDraft(role ? draftOfRole(role) : null)
         setManagerConfirming(false)
+        setManagerDeleteConfirming(false)
         setManagerError(null)
       }
 
       function backToManagerList() {
+        setManagerMode('list')
         setManagerRoleId('')
         setManagerDraft(null)
         setManagerConfirming(false)
+        setManagerDeleteConfirming(false)
+        setManagerError(null)
+      }
+
+      /** B1b：进入新建态（空 draft，roleId 保存时由系统生成）。 */
+      function createManagerRole() {
+        setManagerMode('create')
+        setManagerRoleId('')
+        setManagerDraft(emptyRoleDraft())
+        setManagerConfirming(false)
+        setManagerDeleteConfirming(false)
         setManagerError(null)
       }
 
       function updateManagerDraft(field, value) {
         setManagerDraft((previous) => {
           const next = { ...(previous ?? {}), [field]: value }
-          if (field === 'channelId') {
-            const instance = asArray(state.snapshot?.global?.channels).find(
-              (channel) => asString(channel.channelId) === asString(value),
-            )
-            next.model = instance ? asString(instance.model) : ''
-            next.reasoning = instance ? asString(instance.reasoning) : ''
+          if (field === 'cli') {
+            // B2 联动：切 CLI 清空模型/强度，避免残留非法组合。
+            next.model = ''
+            next.reasoning = ''
           }
           return next
         })
         setManagerConfirming(false)
+        setManagerDeleteConfirming(false)
         setManagerError(null)
       }
 
-      /** 保存全局角色：一次 patch 写入（二次确认），复用 saveGlobalPatch。 */
+      /**
+       * 保存全局角色：编辑=一次 patch；新建=一次 create；都先二次确认。
+       * 失败不刷新列表、不乐观更新（错误落详情一行摘要）。
+       */
       async function saveManagerRole() {
+        if (!managerConfirming) {
+          setManagerConfirming(true)
+          return
+        }
+        const channels = state.snapshot?.global?.channels
+        if (managerMode === 'create') {
+          if (typeof createGlobalRole !== 'function') {
+            setManagerError({ code: 'REMOTE_UNAVAILABLE', message: t('remoteUnavailableHint') })
+            return
+          }
+          const built = buildCreateRolePayload(t, managerDraft, channels, asArray(state.snapshot?.roles).map((item) => item.roleId))
+          if (built.error) {
+            setManagerConfirming(false)
+            setManagerError({ code: 'DETAIL_INVALID', message: built.error })
+            return
+          }
+          setManagerSaving(true)
+          const result = await saveCreateGlobalRole({
+            role: built.payload,
+            createGlobalRole,
+            reload: reloadSnapshot,
+          })
+          setManagerSaving(false)
+          setManagerConfirming(false)
+          if (result.ok !== true) {
+            setManagerError(result.error)
+            return
+          }
+          const nextRole = asArray(result.view?.roles).find((item) => item.roleId === result.roleId)
+          setManagerMode('edit')
+          setManagerRoleId(result.roleId)
+          setManagerDraft(nextRole ? draftOfRole(nextRole) : null)
+          return
+        }
+
         const role = asArray(state.snapshot?.roles).find((item) => item.roleId === managerRoleId)
         if (!role || !managerDraft) return
         if (typeof updateGlobalRole !== 'function') {
           setManagerError({ code: 'REMOTE_UNAVAILABLE', message: t('remoteUnavailableHint') })
           return
         }
-        if (!managerConfirming) {
-          setManagerConfirming(true)
-          return
-        }
-        const built = buildGlobalPatch(t, role, managerDraft, state.snapshot?.global?.channels)
+        const built = buildGlobalPatch(t, role, managerDraft, channels)
         if (built.error) {
           setManagerConfirming(false)
           setManagerError({ code: 'DETAIL_INVALID', message: built.error })
@@ -1991,6 +2162,39 @@ window.__ModuleLoader__.load({
         }
         const nextRole = asArray(result.view?.roles).find((item) => item.roleId === managerRoleId)
         setManagerDraft(nextRole ? draftOfRole(nextRole) : null)
+      }
+
+      /** 删除第一步：进入二次确认（不写盘）。 */
+      function requestDeleteManagerRole() {
+        setManagerDeleteConfirming(true)
+        setManagerConfirming(false)
+        setManagerError(null)
+      }
+
+      function cancelDeleteManagerRole() {
+        setManagerDeleteConfirming(false)
+      }
+
+      /** 删除第二步：确认后一次 delete；失败保持当前详情，不刷新列表。 */
+      async function confirmDeleteManagerRole() {
+        if (!managerRoleId) return
+        if (typeof deleteGlobalRole !== 'function') {
+          setManagerError({ code: 'REMOTE_UNAVAILABLE', message: t('remoteUnavailableHint') })
+          return
+        }
+        setManagerSaving(true)
+        const result = await saveDeleteGlobalRole({
+          roleId: managerRoleId,
+          deleteGlobalRole,
+          reload: reloadSnapshot,
+        })
+        setManagerSaving(false)
+        setManagerDeleteConfirming(false)
+        if (result.ok !== true) {
+          setManagerError(result.error)
+          return
+        }
+        backToManagerList()
       }
 
       if (state.status === 'loading') {
@@ -2036,14 +2240,20 @@ window.__ModuleLoader__.load({
                 manager: {
                   selectedRoleId: managerRoleId,
                   draft: managerDraft,
+                  creating: managerMode === 'create',
                   saving: managerSaving,
                   confirming: managerConfirming,
+                  deleteConfirming: managerDeleteConfirming,
                   error: managerError,
                   onSelect: selectManagerRole,
+                  onCreate: createManagerRole,
                   onBack: backToManagerList,
                   onDraft: updateManagerDraft,
                   onSave: saveManagerRole,
                   onCancelConfirm: () => setManagerConfirming(false),
+                  onRequestDelete: requestDeleteManagerRole,
+                  onConfirmDelete: confirmDeleteManagerRole,
+                  onCancelDelete: cancelDeleteManagerRole,
                   onClose: closeManager,
                 },
                 onToggleCli: toggleCli,
@@ -2161,6 +2371,15 @@ window.__ModuleLoader__.load({
               updateGlobalRole: (roleId, patch) =>
                 typeof configActions.updateGlobalRole === 'function'
                   ? configActions.updateGlobalRole(roleId, patch)
+                  : { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '配置远程未装配' } },
+              // B1b：新增/删除全局角色；同一 global writer 路径，失败原样返回错误码。
+              createGlobalRole: (role) =>
+                typeof configActions.createGlobalRole === 'function'
+                  ? configActions.createGlobalRole(role)
+                  : { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '配置远程未装配' } },
+              deleteGlobalRole: (roleId) =>
+                typeof configActions.deleteGlobalRole === 'function'
+                  ? configActions.deleteGlobalRole(roleId)
                   : { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '配置远程未装配' } },
             }),
           },
@@ -2402,6 +2621,84 @@ window.__ModuleLoader__.load({
         out.push(value)
       }
       return out
+    }
+
+    /** 新建角色的空 draft（B1b）。 */
+    function emptyRoleDraft() {
+      return { name: '', aliases: '', setting: '', cli: '', model: '', reasoning: '' }
+    }
+
+    /**
+     * 生成合法 roleId：`role-<slug>`；冲突自动加序号；无可用 ASCII 时 `role-custom`。
+     * 纯函数：结果只由 name 与已有 id 决定（无随机数，便于单测与可复现）。
+     */
+    function generateRoleId(name, existingRoleIds = []) {
+      const slug = String(name ?? '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 32)
+      const base = slug ? `role-${slug}` : 'role-custom'
+      const taken = new Set(asArray(existingRoleIds).map(String))
+      if (!taken.has(base)) return base
+      let index = 2
+      while (taken.has(`${base}-${index}`)) index += 1
+      return `${base}-${index}`
+    }
+
+    /**
+     * 新建全局角色 payload（B1b）：roleId 系统生成 + 名称/简称/设定 + B2 的
+     * CLI→模型→强度组合解析；组合不唯一/不支持时返回与编辑保存一致的错误（不伪造 channel）。
+     */
+    function buildCreateRolePayload(t, draft, channels, existingRoleIds) {
+      const name = asString(draft?.name).trim()
+      if (!name) return { payload: null, error: t('detailInvalidName') }
+      const combo = comboOf(draft, channels)
+      if (!combo.cli) return { payload: null, error: t('pendingConfig') }
+      if (!combo.instance) return { payload: null, error: t('pendingConfig') }
+      const instance = combo.instance
+      const channel = { channelId: asString(instance.channelId) }
+      for (const key of ['kind', 'provider', 'model', 'reasoning']) {
+        const value = asString(instance[key])
+        if (value) channel[key] = value
+      }
+      return {
+        payload: {
+          roleId: generateRoleId(name, existingRoleIds),
+          name,
+          aliases: parseAliases(draft?.aliases),
+          setting: asString(draft?.setting),
+          channel,
+          enabled: true,
+        },
+        error: null,
+      }
+    }
+
+    /** 新建全局角色写入（一次 create；调用方先做二次确认）。 */
+    async function saveCreateGlobalRole({ role, createGlobalRole, reload }) {
+      const result = await createGlobalRole(role)
+      if (!result || result.ok !== true) {
+        return { ok: false, error: result?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' } }
+      }
+      const loaded = await reload()
+      if (!loaded || loaded.ok !== true) {
+        return { ok: false, error: loaded?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' } }
+      }
+      return { ok: true, view: loaded.view, value: result.value, roleId: asString(role?.roleId) }
+    }
+
+    /** 删除全局角色（一次 delete；调用方先做二次确认）。 */
+    async function saveDeleteGlobalRole({ roleId, deleteGlobalRole, reload }) {
+      const result = await deleteGlobalRole(roleId)
+      if (!result || result.ok !== true) {
+        return { ok: false, error: result?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' } }
+      }
+      const loaded = await reload()
+      if (!loaded || loaded.ok !== true) {
+        return { ok: false, error: loaded?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' } }
+      }
+      return { ok: true, view: loaded.view, value: result.value }
     }
 
     /**
@@ -2853,7 +3150,10 @@ window.__ModuleLoader__.load({
                 onClick: opts.onBack,
                 children: `← ${t('detailBack')}`,
               }),
-              jsx('strong', { style: { fontSize: 13, lineHeight: '20px' }, children: role.name || role.roleId }),
+              jsx('strong', {
+                style: { fontSize: 13, lineHeight: '20px' },
+                children: opts.title ? String(opts.title) : role.name || role.roleId,
+              }),
               jsx(Tag, { tone: roleColorTone(asObject(role.state).color), children: t('detailTitle') }),
             ],
           }),
@@ -2935,7 +3235,11 @@ window.__ModuleLoader__.load({
                   style: scopeButton,
                   disabled,
                   onClick: opts.onSave,
-                  children: disabled ? t('savingDetail') : t('saveDetail'),
+                  children: disabled
+                    ? t('savingDetail')
+                    : opts.saveLabel
+                      ? String(opts.saveLabel)
+                      : t('saveDetail'),
                 }),
               }),
         ],
@@ -3541,6 +3845,11 @@ window.__ModuleLoader__.load({
       renderPaneError,
       renderPaneLoading,
       draftOfRole,
+      emptyRoleDraft,
+      generateRoleId,
+      buildCreateRolePayload,
+      saveCreateGlobalRole,
+      saveDeleteGlobalRole,
       detailOptionsOf,
       buildSessionChanges,
       buildGlobalPatch,

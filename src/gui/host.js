@@ -74,6 +74,8 @@ export const GUI_REMOTE_METHODS = Object.freeze([
   'setCliEnabled',
   'refreshCli',
   'updateGlobalRole',
+  'createGlobalRole',
+  'deleteGlobalRole',
 ])
 
 /**
@@ -631,6 +633,28 @@ export function registerGuiRemote(ctx, deps) {
           throw new RemoteError('MEETINGSTONE_GUI_REMOTE_UNAVAILABLE', '配置远程未装配')
         }
         return configApi.updateGlobalRole(roleId, patch)
+      }
+
+      /**
+       * 新增一个全局角色（strict：role）。
+       * 与 updateGlobalRole 共用 global writer / configEditor.edit；失败原样返回错误码。
+       */
+      async createGlobalRole(role) {
+        if (!configApi || typeof configApi.createGlobalRole !== 'function') {
+          throw new RemoteError('MEETINGSTONE_GUI_REMOTE_UNAVAILABLE', '配置远程未装配')
+        }
+        return configApi.createGlobalRole(role)
+      }
+
+      /**
+       * 删除一个全局角色（strict：roleId）。
+       * 只删 profile 全局定义；会话覆盖记录不清理（前端二次确认并提示）。
+       */
+      async deleteGlobalRole(roleId) {
+        if (!configApi || typeof configApi.deleteGlobalRole !== 'function') {
+          throw new RemoteError('MEETINGSTONE_GUI_REMOTE_UNAVAILABLE', '配置远程未装配')
+        }
+        return configApi.deleteGlobalRole(roleId)
       }
     }
     for (const method of GUI_REMOTE_METHODS) {

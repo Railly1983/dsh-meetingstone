@@ -37,6 +37,7 @@ export const GLOBAL_CONFIG_ERRORS = Object.freeze({
   INVALID_ROLE_ID: 'GLOBAL_CONFIG_INVALID_ROLE_ID',
   INVALID_ROLE_PATCH: 'GLOBAL_CONFIG_INVALID_ROLE_PATCH',
   ROLE_NOT_FOUND: 'GLOBAL_CONFIG_ROLE_NOT_FOUND',
+  ROLE_EXISTS: 'GLOBAL_CONFIG_ROLE_EXISTS',
   OVERRIDDEN: 'GLOBAL_CONFIG_OVERRIDDEN',
   ENTRY_STALE: 'GLOBAL_CONFIG_ENTRY_STALE',
   ENTRY_INACTIVE: 'GLOBAL_CONFIG_ENTRY_INACTIVE',
@@ -255,5 +256,77 @@ export function createGlobalConfigWriter(deps = {}) {
     return updateRole(roleId, { enabled })
   }
 
-  return { update, setCliPreference, updateRole, setRoleEnabled }
+  /**
+   * 新增一个全局角色（B1b）。与 updateRole 共用同一 `configEditor.edit` 写路径；
+   * roleId 由调用方生成（`role-<slug>`，冲突由调用方加序号），这里只做合法性/唯一性校验。
+   *
+   * @param {Record<string, any>} input 新角色对象（roleId/name/aliases/setting/channel…）
+   */
+  async function createRole(input) {
+    if (!isPlainObject(input)) {
+      return fail(GLOBAL_CONFIG_ERRORS.INVALID_ROLE_PATCH, '新角色必须是 JSON 对象')
+    }
+    const roleId = input.roleId
+    if (!isValidRoleId(roleId)) {
+      return fail(GLOBAL_CONFIG_ERRORS.INVALID_ROLE_ID, `角色 id 不合法：${String(roleId)}`)
+    }
+    /** @type {any[]} */
+    const errors = []
+    const sanitized = sanitizeRolePatch(input, { roleId, path: `roles.${roleId}`, errors })
+    if (errors.length > 0) {
+      return fail(
+        GLOBAL_CONFIG_ERRORS.INVALID_ROLE_PATCH,
+        errors.map((error) => error.message).join('；'),
+      )
+    }
+    if (typeof sanitized.name !== 'string' || !sanitized.name.trim()) {
+      return fail(GLOBAL_CONFIG_ERRORS.INVALID_ROLE_PATCH, '新角色必须有名称 name')
+    }
+
+    return update((current) => {
+      const roles = Array.isArray(current.roles) ? current.roles.slice() : []
+      if (roles.some((role) => isPlainObject(role) && role.roleId === roleId)) {
+        throw Object.assign(new Error(`全局角色已存在：${roleId}`), {
+          code: GLOBAL_CONFIG_ERRORS.ROLE_EXISTS,
+        })
+      }
+      // 默认值与 RoleSchema 对齐：aliases [] / setting '' / enabled true；
+      // channel 由调用方按 CLI→模型→强度解析出的组合传入（不在这里猜）。
+      const nextRole = {
+        roleId,
+        aliases: [],
+        setting: '',
+        enabled: true,
+        ...sanitized,
+        roleId,
+      }
+      roles.push(nextRole)
+      return { ...current, roles }
+    })
+  }
+
+  /**
+   * 删除一个全局角色（B1b）。只删 profile 里的全局定义；
+   * **不**清理会话 `roleOverrides`（无跨会话枚举能力，删除前由 UI 二次确认并提示）。
+   *
+   * @param {string} roleId
+   */
+  async function deleteRole(roleId) {
+    if (!isValidRoleId(roleId)) {
+      return fail(GLOBAL_CONFIG_ERRORS.INVALID_ROLE_ID, `角色 id 不合法：${String(roleId)}`)
+    }
+    return update((current) => {
+      const roles = Array.isArray(current.roles) ? current.roles.slice() : []
+      const index = roles.findIndex((role) => isPlainObject(role) && role.roleId === roleId)
+      if (index < 0) {
+        throw Object.assign(new Error(`全局角色不存在：${roleId}`), {
+          code: GLOBAL_CONFIG_ERRORS.ROLE_NOT_FOUND,
+        })
+      }
+      roles.splice(index, 1)
+      return { ...current, roles }
+    })
+  }
+
+  return { update, setCliPreference, updateRole, setRoleEnabled, createRole, deleteRole }
 }

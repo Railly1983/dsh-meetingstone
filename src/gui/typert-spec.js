@@ -46,11 +46,13 @@ export const SESSION_REMOTE_METHODS = Object.freeze([
   'clearSessionOverride',
 ])
 
-/** 三个配置方法名（U2：CLI 开关 + 重新检测 + 全局角色字段写入）。 */
+/** 配置方法名（U2：CLI 开关 + 重新检测 + 全局角色写；B1b：新增/删除全局角色）。 */
 export const CONFIG_REMOTE_METHODS = Object.freeze([
   'setCliEnabled',
   'refreshCli',
   'updateGlobalRole',
+  'createGlobalRole',
+  'deleteGlobalRole',
 ])
 
 /** Host 注册的全部 strict 方法（会话 + 配置；`list` 仍走无参 SRC）。 */
@@ -264,6 +266,30 @@ export function createSessionRemoteSpec(zod) {
             name: 'patch',
             typeSymbol: SESSION_REMOTE_TYPES.value,
             build: value,
+          }),
+        ],
+        result: result(SESSION_REMOTE_TYPES.jsonResult, jsonResult),
+      },
+      'meetingstone/createGlobalRole': {
+        service: 'meetingstone',
+        invocation: { kind: 'direct' },
+        parameters: [
+          parameter({
+            name: 'role',
+            typeSymbol: SESSION_REMOTE_TYPES.value,
+            build: value,
+          }),
+        ],
+        result: result(SESSION_REMOTE_TYPES.jsonResult, jsonResult),
+      },
+      'meetingstone/deleteGlobalRole': {
+        service: 'meetingstone',
+        invocation: { kind: 'direct' },
+        parameters: [
+          parameter({
+            name: 'roleId',
+            typeSymbol: SESSION_REMOTE_TYPES.roleId,
+            build: roleId,
           }),
         ],
         result: result(SESSION_REMOTE_TYPES.jsonResult, jsonResult),

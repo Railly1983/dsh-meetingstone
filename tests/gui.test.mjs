@@ -661,8 +661,8 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
 
   assert.equal(mounted.length, 1)
   assert.equal(mounted[0].package, 'dsh-meetingstone')
-  // list（无参 SRC）+ 三个 strict 会话方法 + 三个 strict 配置方法（U2）。
-  assert.equal(mounted[0].descriptors.length, 7)
+  // list（无参 SRC）+ 会话 3 个 strict 方法 + 配置 5 个 strict 方法（U2 + B1b）。
+  assert.equal(mounted[0].descriptors.length, 9)
   assert.deepEqual(
     mounted[0].descriptors.map((d) => d.method),
     [
@@ -673,6 +673,8 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
       'setCliEnabled',
       'refreshCli',
       'updateGlobalRole',
+      'createGlobalRole',
+      'deleteGlobalRole',
     ],
   )
   assert.deepEqual(mounted[0].descriptors[0].parameters, [], 'list 必须无参')
@@ -719,6 +721,9 @@ test('Browser half：注册 settings.section 并通过 remote.meetingstone.list 
   // B1：设置页内联全局角色管理复用 updateGlobalRole 写路径；不再注入 openRoles
   // （旧实现会把「管理角色」错跳到会话级右侧栏面板，settings.section 是 root 无 sessionId）。
   assert.equal(typeof injected.updateGlobalRole, 'function', '设置页注入全局角色写入口')
+  // B1b：新增/删除全局角色同样从设置页注入（同一 global writer 路径）。
+  assert.equal(typeof injected.createGlobalRole, 'function', '设置页注入新增全局角色')
+  assert.equal(typeof injected.deleteGlobalRole, 'function', '设置页注入删除全局角色')
   assert.equal(injected.openRoles, undefined, '设置页不再注入 openRoles（不跳右侧栏）')
   const snapshot = await injected.list()
   // B1：roleView 增补 description/prompt/fieldSources/sourceLayer/channel(嵌套)，
@@ -1548,6 +1553,8 @@ test('B1：设置页「管理角色」内联展开全局角色管理（不打开
   const section = registrations.find((r) => r.options.name === 'settings.section')
   const injected = section.options.inject()
   assert.equal(typeof injected.updateGlobalRole, 'function')
+  assert.equal(typeof injected.createGlobalRole, 'function', 'B1b：注入新增全局角色')
+  assert.equal(typeof injected.deleteGlobalRole, 'function', 'B1b：注入删除全局角色')
   assert.equal(injected.openRoles, undefined, '不再注入会跳右侧栏的入口')
 
   const snapshot = exports.__test.normalizeSnapshot({

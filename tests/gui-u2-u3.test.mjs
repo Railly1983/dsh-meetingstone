@@ -510,3 +510,215 @@ test('B1：设置页内联全局角色管理渲染（列表 + 全局详情，无
   const empty = __test.renderGlobalRoleManager(t, __test.normalizeSnapshot({ roles: [] }), {})
   assert.ok(collectStrings(empty).includes('globalRolesEmpty'))
 })
+
+test('B1b generateRoleId：role-<slug>、中文回退 role-custom、冲突自动加序号', async () => {
+  const { __test } = await loadClient()
+  assert.equal(__test.generateRoleId('Deck Hand'), 'role-deck-hand')
+  assert.equal(__test.generateRoleId('  '), 'role-custom')
+  assert.equal(__test.generateRoleId('沙僧'), 'role-custom', '无 ASCII slug 时回退')
+  assert.equal(__test.generateRoleId('沙僧', ['role-custom']), 'role-custom-2')
+  assert.equal(__test.generateRoleId('沙僧', ['role-custom', 'role-custom-2']), 'role-custom-3')
+  assert.equal(__test.generateRoleId('deck hand', ['role-deck-hand']), 'role-deck-hand-2')
+})
+
+test('B1b buildCreateRolePayload：必须名称+真实组合；payload 与编辑保存同口径', async () => {
+  const { __test } = await loadClient()
+  const t = (key) => key
+  const draft = {
+    name: 'Deck Hand',
+    aliases: 'DH, 甲板',
+    setting: '负责甲板',
+    cli: 'acp-cli',
+    model: 'm1',
+    reasoning: 'low',
+  }
+  const built = __test.buildCreateRolePayload(t, draft, CHANNELS, ['role-sashi'])
+  assert.equal(built.error, null)
+  assert.deepEqual(built.payload, {
+    roleId: 'role-deck-hand',
+    name: 'Deck Hand',
+    aliases: ['DH', '甲板'],
+    setting: '负责甲板',
+    channel: { channelId: 'ch-acp', kind: 'acp-cli', provider: 'acp', model: 'm1', reasoning: 'low' },
+    enabled: true,
+  })
+
+  const noName = __test.buildCreateRolePayload(t, { ...draft, name: '  ' }, CHANNELS, [])
+  assert.equal(noName.error, 'detailInvalidName')
+  assert.equal(noName.payload, null)
+
+  const noCli = __test.buildCreateRolePayload(t, { ...draft, cli: '', model: '', reasoning: '' }, CHANNELS, [])
+  assert.equal(noCli.error, 'pendingConfig', '不选 CLI 不得伪造组合')
+
+  // 组合在 channels 中不存在 → 待配置（与编辑保存一致），不写假 channel。
+  const ghost = __test.buildCreateRolePayload(
+    t,
+    { ...draft, cli: 'codex', model: 'ghost', reasoning: '' },
+    CHANNELS,
+    [],
+  )
+  assert.equal(ghost.error, 'pendingConfig')
+})
+
+test('B1b saveCreateGlobalRole / saveDeleteGlobalRole：一次写入 + reload；失败不 reload', async () => {
+  const { __test } = await loadClient()
+  const createCalls = []
+  const deleteCalls = []
+  let reloads = 0
+  const reload = async () => {
+    reloads += 1
+    return { ok: true, view: viewWith([]) }
+  }
+
+  const created = await __test.saveCreateGlobalRole({
+    role: { roleId: 'role-new', name: '新角色' },
+    createGlobalRole: async (...args) => {
+      createCalls.push(args)
+      return { ok: true, value: { written: true } }
+    },
+    reload,
+  })
+  assert.equal(created.ok, true)
+  assert.equal(created.roleId, 'role-new')
+  assert.deepEqual(createCalls, [[{ roleId: 'role-new', name: '新角色' }]])
+  assert.equal(reloads, 1)
+
+  const createFailed = await __test.saveCreateGlobalRole({
+    role: { roleId: 'role-new', name: '新角色' },
+    createGlobalRole: async () => ({ ok: false, error: { code: 'GLOBAL_CONFIG_WRITE_FAILED', message: 'x' } }),
+    reload,
+  })
+  assert.equal(createFailed.ok, false)
+  assert.equal(createFailed.error.code, 'GLOBAL_CONFIG_WRITE_FAILED')
+  assert.equal(reloads, 1, '新增失败不得 reload')
+
+  const deleted = await __test.saveDeleteGlobalRole({
+    roleId: 'role-new',
+    deleteGlobalRole: async (...args) => {
+      deleteCalls.push(args)
+      return { ok: true, value: { written: true } }
+    },
+    reload,
+  })
+  assert.equal(deleted.ok, true)
+  assert.deepEqual(deleteCalls, [['role-new']])
+  assert.equal(reloads, 2)
+
+  const deleteFailed = await __test.saveDeleteGlobalRole({
+    roleId: 'role-new',
+    deleteGlobalRole: async () => ({ ok: false, error: { code: 'GLOBAL_CONFIG_ROLE_NOT_FOUND', message: 'x' } }),
+    reload,
+  })
+  assert.equal(deleteFailed.ok, false)
+  assert.equal(reloads, 2, '删除失败不得 reload（不乐观删除）')
+})
+
+test('B1b renderGlobalRoleManager：新增入口/新建态/删除二次确认', async () => {
+  const { __test } = await loadClient()
+  const t = (key) => key
+  const snapshot = __test.normalizeSnapshot({
+    roles: [
+      {
+        roleId: 'role-sashi',
+        name: '沙僧',
+        aliases: ['SS'],
+        setting: '骨干',
+        enabled: true,
+        channelId: 'ch-acp',
+        kind: 'acp-cli',
+        provider: 'acp',
+        model: 'm1',
+        reasoning: 'low',
+      },
+    ],
+    channels: [{ channelId: 'ch-acp', kind: 'acp-cli' }],
+    lastError: null,
+    global: {
+      channels: [{ channelId: 'ch-acp', kind: 'acp-cli', provider: 'acp', model: 'm1', reasoning: 'low' }],
+    },
+  })
+
+  // 列表新增入口。
+  const listStrings = collectStrings(__test.renderGlobalRoleManager(t, snapshot, {}))
+  assert.ok(listStrings.includes('addRole'), '列表有「新增角色」')
+  assert.ok(listStrings.includes('managerClose'), '列表可收起')
+
+  // 新建态：标题/提示/创建按钮，无删除按钮；空 draft 时字段控件仍在。
+  const createTree = __test.renderGlobalRoleManager(t, snapshot, {
+    creating: true,
+    draft: __test.emptyRoleDraft(),
+    onDraft: () => {},
+    onSave: () => {},
+  })
+  const createStrings = collectStrings(createTree)
+  for (const key of ['createRoleTitle', 'createRoleHint', 'createRole', 'fieldName', 'fieldSetting']) {
+    assert.ok(createStrings.includes(key), `新建态包含 ${key}`)
+  }
+  assert.ok(!createStrings.includes('deleteRole'), '新建态不出现删除')
+
+  // 编辑态 + 删除确认态。
+  const editTree = __test.renderGlobalRoleManager(t, snapshot, {
+    selectedRoleId: 'role-sashi',
+    draft: __test.draftOfRole(snapshot.roles[0]),
+    onDraft: () => {},
+    onSave: () => {},
+    onRequestDelete: () => {},
+  })
+  assert.ok(collectStrings(editTree).includes('deleteRole'), '编辑态有删除入口')
+  const confirmTree = __test.renderGlobalRoleManager(t, snapshot, {
+    selectedRoleId: 'role-sashi',
+    draft: __test.draftOfRole(snapshot.roles[0]),
+    deleteConfirming: true,
+  })
+  const confirmStrings = collectStrings(confirmTree)
+  assert.ok(confirmStrings.includes('confirmDeleteRole'), '删除二次确认文案')
+  assert.ok(confirmStrings.includes('confirmDelete') && confirmStrings.includes('cancel'))
+})
+
+test('B1b global-writer create/delete：同一 configEditor.edit 路径、角色不存在/重复有稳定错误码', async () => {
+  const { createGlobalConfigWriter } = await import('../src/config/global-writer.js')
+  /** @type {any} */
+  let config = {
+    roles: [{ roleId: 'role-sashi', name: '沙僧', setting: '骨干', enabled: true }],
+  }
+  const writer = createGlobalConfigWriter({
+    getConfigEditor: () => ({
+      async edit(_entry, change) {
+        config = change(structuredClone(config))
+      },
+    }),
+    getEntry: () => ({ id: 'meetingstone' }),
+  })
+
+  const created = await writer.createRole({
+    roleId: 'role-deck-hand',
+    name: 'Deck Hand',
+    aliases: ['DH'],
+    setting: '甲板',
+    channel: { channelId: 'ch-acp', kind: 'acp-cli', provider: 'acp', model: 'm1', reasoning: 'low' },
+  })
+  assert.equal(created.ok, true)
+  assert.equal(config.roles.length, 2)
+  const added = config.roles.find((role) => role.roleId === 'role-deck-hand')
+  assert.equal(added.name, 'Deck Hand')
+  assert.deepEqual(added.aliases, ['DH'])
+  assert.equal(added.enabled, true, '新角色默认启用')
+  assert.equal(added.channel.model, 'm1')
+
+  const duplicate = await writer.createRole({ roleId: 'role-deck-hand', name: '重复' })
+  assert.equal(duplicate.ok, false)
+  assert.equal(duplicate.code, 'GLOBAL_CONFIG_ROLE_EXISTS')
+  assert.equal(config.roles.length, 2, '重复新增不写入')
+
+  const badName = await writer.createRole({ roleId: 'role-x', name: '  ' })
+  assert.equal(badName.ok, false)
+  assert.equal(badName.code, 'GLOBAL_CONFIG_INVALID_ROLE_PATCH')
+
+  const deleted = await writer.deleteRole('role-deck-hand')
+  assert.equal(deleted.ok, true)
+  assert.deepEqual(config.roles.map((role) => role.roleId), ['role-sashi'])
+
+  const missing = await writer.deleteRole('role-deck-hand')
+  assert.equal(missing.ok, false)
+  assert.equal(missing.code, 'GLOBAL_CONFIG_ROLE_NOT_FOUND', '删除失败不改变配置')
+})

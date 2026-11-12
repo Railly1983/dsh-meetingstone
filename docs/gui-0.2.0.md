@@ -673,9 +673,9 @@ npm run verify               # exit 0（host-schema / manifest / package）
 
 ### 11.3 边界（不是遗漏）
 
-- **只能编辑现有全局角色**：写 API `updateGlobalRole` 只做 update
-  （`GLOBAL_CONFIG_ROLE_NOT_FOUND`），global writer **没有** create/delete 语义；
-  「新增/删除全局角色」需要新的写 API（未在 B1 新建，D1 前需单独立项裁决）。
+- **B1 阶段只支持编辑现有全局角色**：create/delete 在 B1b（§12）补齐；
+  `updateGlobalRole` 语义不变（只做 update，不存在的 roleId 返回
+  `GLOBAL_CONFIG_ROLE_NOT_FOUND`）。
 - 全局层仍不能「清空字段」：Prompt/名称留空视为无效输入（沿用 §10 边界）。
 - 会话覆盖入口仍只在右侧栏；全局视图不再提供会话覆盖，反之亦然。
 
@@ -696,3 +696,65 @@ npm run verify               # exit 0（host-schema / manifest / package）
 - **多角色列表滚动/长文本**：未做真机长列表验证。
 - **B2 联动**：CLI→模型→强度联动、去「通道」措辞不在本节；字段模型已就绪，
   由 task-7 接手。
+
+## 12. B1b：全局角色新增/删除（2026-11-12，task-14）
+
+> 补齐 B1 的 create/delete 缺口（D1 验收需要）。仍是**同一** global writer /
+> `configEditor.edit` 写路径；不新建队列/进程/写通道。B2 已把角色字段统一为
+> `setting` + CLI→模型→强度组合，本节直接复用。
+
+### 12.1 Remote 契约（7 → 9 descriptors）
+
+`list`（无参 SRC）+ 8 个 strict：会话 3（`getSessionConfig` / `setSessionOverride` /
+`clearSessionOverride`）+ 配置 5（`setCliEnabled` / `refreshCli` / `updateGlobalRole` /
+**`createGlobalRole`** / **`deleteGlobalRole`**）。
+
+| 方法 | 参数（strict） | 语义 |
+| --- | --- | --- |
+| `createGlobalRole` | `role`（JSON 对象） | 在 profile `roles` 追加一个全局角色；roleId 由客户端生成、Host 校验合法/唯一 |
+| `deleteGlobalRole` | `roleId` | 从 profile `roles` 删除该全局角色；只删全局定义，不动会话覆盖记录 |
+
+Host 侧新增两个 handler（`src/gui/host.js`），参数 codec 与 client descriptor 逐字一致；
+`GUI_REMOTE_METHODS` / `GUI_STRICT_METHODS` 已同步（契约测试断言 8 个 strict 端点）。
+
+### 12.2 新增（create）
+
+- 设置页内联管理器列表底部「新增角色」→ 新建态（空 draft）；字段：名称 / 简称 /
+  角色设定 / CLI → 模型 → 思考强度（选项来自真实 `channels`，复用 B2 capabilities）。
+- **roleId 系统生成**：`role-<slug>`（小写 ASCII slug，截 32）；无可用 ASCII 时
+  `role-custom`；与现有 id 冲突自动追加 `-2/-3…`。生成函数 `generateRoleId()` 为纯函数。
+- 保存前二次确认（沿用全局写确认）；成功后重新拉 `list()`，切到该角色编辑态。
+- 组合解析失败（无 CLI / 组合不存在 / 不一致）→ 返回与编辑保存一致的 `pendingConfig`，
+  **不伪造 channel、不写盘**。
+
+### 12.3 删除（delete）
+
+- 编辑态底部「删除角色」→ 二次确认卡片：文案明确「只删 profile 全局定义；已有会话
+  覆盖记录不会被改写（可能指向已删角色）」。
+- 删除失败（`GLOBAL_CONFIG_ROLE_NOT_FOUND` / 写失败）→ 保持当前详情，**不刷新列表、
+  不乐观删除**；错误落详情一行摘要。
+- 成功 → 重新拉 `list()` 回到列表态。
+- 不跨会话枚举/清理 `roleOverrides`（无该能力；设计上由会话侧自行恢复继承）。
+
+### 12.4 错误码（沿用/新增）
+
+`GLOBAL_CONFIG_INVALID_ROLE_ID`、`GLOBAL_CONFIG_INVALID_ROLE_PATCH`、
+`GLOBAL_CONFIG_ROLE_NOT_FOUND`、**`GLOBAL_CONFIG_ROLE_EXISTS`**（新增，重复 roleId）、
+以及既有 `GLOBAL_CONFIG_OVERRIDDEN` / `ENTRY_STALE` / `WRITE_FAILED` 等原样透传。
+
+### 12.5 测试
+
+- `npm test`：**572 tests / 571 pass / 0 fail / 1 skipped**。
+- 新增用例：`generateRoleId`（slug/中文回退/冲突序号）、`buildCreateRolePayload`
+  （名称必填、CLI 组合必填、不存在组合拒绝）、`saveCreateGlobalRole` /
+  `saveDeleteGlobalRole`（一次写入 + reload；失败不 reload）、
+  `renderGlobalRoleManager`（新增入口/新建态/删除二次确认）、global-writer
+  create/delete（同一 edit 路径、重复/不存在错误码、失败不改配置）。
+- 契约同步：descriptor 数量 7→9（`tests/gui.test.mjs`、`tests/gui-primitives.stub.test.mjs`、
+  `scripts/smoke-client-inject.mjs`）；strict 端点 6→8（`tests/typert-contract.test.mjs`）。
+
+### 12.6 未验证项
+
+- **真机渲染/真实网关往返**：未启动 DSH 桌面端、未改 profile、未重启；新增/删除的
+  二次确认、错误提示、下拉联动只做 stub/单测断言。
+- 会话覆盖指向已删角色时的运行时表现（宿主读配置会报 `UNKNOWN_ROLE_ID` 告警）未真机验证。
