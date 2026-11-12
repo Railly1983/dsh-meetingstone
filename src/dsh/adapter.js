@@ -347,8 +347,10 @@ function buildRunBase({ input, role, provider, childId, startedAt }) {
  * 为什么要拼：子 Agent 默认不知道"自己是谁"。CLIWorker 时代靠 persona 的 prompt 注入，
  * 我们替代它时必须保留这个语义，否则「沙僧」和「小白」派出去只是同一个裸模型。
  *
- * 顺序（P0-B/P0-C）：人设 → TaskSpec+ContextPack → 重放块 → 任务正文 → 输出契约。
- * 简报与重放块都在人设之后、任务之前；旧输出是不可信数据，必须用显式边界隔开。
+ * 顺序（P0-B/P0-C，C1 定稿后禁止调换）：人设 → TaskSpec+ContextPack → 重放块 →
+ * 任务正文 → 输出契约。稳定前缀（人设）在最前，动态信息（简报/重放/任务）在后；
+ * 执行参数（cwd/isolation/timeout）只走宿主 spec，不写进提示词。
+ * 导出仅供测试/测量（C2），生产调用点仍在 start() 内。
  *
  * @param {any} role
  * @param {string} task
@@ -357,7 +359,7 @@ function buildRunBase({ input, role, provider, childId, startedAt }) {
  * @param {any} [contextPack] 已校验的最小上下文（可空）
  * @returns {string}
  */
-function composePrompt(role, task, continuation = null, taskSpec = null, contextPack = null) {
+export function composePrompt(role, task, continuation = null, taskSpec = null, contextPack = null) {
   const name = typeof role?.name === 'string' ? role.name : ''
   const persona =
     // B2：description 与 prompt 已合并为单一 setting；旧字段只作兜底读取。

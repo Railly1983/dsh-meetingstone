@@ -349,6 +349,68 @@ export function composePromptWithContinuation(input) {
 }
 
 /**
+ * C2：派单提示词分段测量（只读纯函数）。
+ *
+ * 用**与 composePromptWithContinuation 相同的组装规则**产出各段 UTF-8 字节与位置，
+ * 供基线脚本与单测验证「稳定前缀在前、动态在后」。只报字节，不报 Token
+ * （bytes ≠ Token；Provider Usage 未知，不估算）。
+ *
+ * 段序固定：persona（稳定前缀）→ taskBrief（L2）→ continuation（L3，可选）→ task → outputContract。
+ *
+ * @param {{
+ *   personaHead?: string,
+ *   persona?: string,
+ *   taskBrief?: string,
+ *   continuation?: { text: string } | null,
+ *   task?: string,
+ *   outputContract?: string,
+ * }} [input]
+ */
+export function measurePromptSegments(input = {}) {
+  const head = typeof input.personaHead === 'string' ? input.personaHead.trim() : ''
+  const persona = typeof input.persona === 'string' ? input.persona.trim() : ''
+  const brief = typeof input.taskBrief === 'string' ? input.taskBrief.trim() : ''
+  const continuation =
+    input.continuation && typeof input.continuation.text === 'string' ? input.continuation : null
+  const task = String(input.task ?? '')
+  const contract = typeof input.outputContract === 'string' ? input.outputContract.trim() : ''
+  const hasContext = Boolean(head || persona || brief || continuation)
+
+  /** 与 composePromptWithContinuation 完全一致的段序列（顺序是契约）。 */
+  const parts = []
+  if (head || persona) parts.push({ key: 'persona', text: [head, persona].filter(Boolean).join(' ') })
+  if (brief) parts.push({ key: 'taskBrief', text: brief })
+  if (continuation) parts.push({ key: 'continuation', text: continuation.text })
+  parts.push({ key: 'task', text: hasContext ? `任务：${task}` : task })
+  if (contract) parts.push({ key: 'outputContract', text: contract })
+
+  /** @type {Record<string, number>} */
+  const bytes = {}
+  /** @type {Record<string, number>} */
+  const chars = {}
+  let offset = 0
+  for (let i = 0; i < parts.length; i += 1) {
+    if (i > 0) offset += 2 // '\n\n' 分隔符
+    const part = parts[i]
+    bytes[part.key] = Buffer.byteLength(part.text, 'utf8')
+    chars[part.key] = offset
+    offset += part.text.length
+  }
+  const totalBytes = Buffer.byteLength(parts.map((part) => part.text).join('\n\n'), 'utf8')
+  const order = parts.map((part) => part.key)
+  return {
+    order,
+    chars,
+    bytes: { ...bytes, total: totalBytes },
+    separatorsBytes: Math.max(0, parts.length - 1) * 2,
+    // 稳定前缀 = persona 段（同一角色跨任务字节级一致）；L2 起随任务变化。
+    stablePrefixBytes: parts[0]?.key === 'persona' ? bytes.persona : 0,
+    hasContinuation: Boolean(continuation),
+    note: 'bytes=UTF-8 字节；不估算 Token（Provider Usage 未知）',
+  }
+}
+
+/**
  * 解析 `continuesFrom` 参数并取回上次结果。
  *
  * @param {string | undefined} continuesFrom

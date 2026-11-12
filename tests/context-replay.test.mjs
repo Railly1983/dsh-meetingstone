@@ -5,11 +5,20 @@ import {
   ContinuationError,
   composePromptWithContinuation,
   formatContinuation,
+  measurePromptSegments,
   resolveContinuation,
   REPLAY_MAX_BYTES,
 } from '../src/context-replay.js'
 import { truncateUtf8 } from '../src/run-store.js'
 import { registerTools } from '../src/dsh/register.js'
+import { composePrompt } from '../src/dsh/adapter.js'
+import { renderTaskBrief } from '../src/taskspec.js'
+import { renderOutputContract } from '../src/result-contract.js'
+import {
+  recommendContinuation,
+  REUSE_DECISIONS,
+  REUSE_REASONS,
+} from '../src/dispatch/reuse-policy.js'
 
 function completedRun(overrides = {}) {
   return {
@@ -279,4 +288,155 @@ test('C3：dispatch 工具透传 taskId 外键（空值忽略，不伪造）', a
 
   await spec.execute({ role: 'SS', task: '干活', taskId: '   ' }, exec)
   assert.equal(Object.hasOwn(calls[1], 'taskId'), false, '空 taskId 不得伪造外键')
+})
+
+// ────────────────────────────────────────────────────────────────────────────
+// C2：缓存顺序断言固化 + 复用判据（不改 C1 契约字段）
+// ────────────────────────────────────────────────────────────────────────────
+
+/** C2 固定合成样本（无时间戳/随机值）。 */
+function c2Spec() {
+  return {
+    title: 'C2 顺序检查',
+    objective: '验证稳定前缀在前、动态在后',
+    scope: { include: ['src/context-replay.js'], exclude: [] },
+    acceptance: ['顺序正确'],
+    evidence: ['测试断言'],
+    contextRefs: ['docs/design/context-contract.md'],
+    artifactPolicy: 'none',
+  }
+}
+
+function c2Pack() {
+  return {
+    knownFacts: ['C1 契约定稿'],
+    files: ['src/context-replay.js'],
+    priorResults: [],
+    doNotRepeat: ['不要调换提示词顺序'],
+  }
+}
+
+test('C2：派单提示词五段顺序固定（人设最前、输出契约收尾；C1 禁止调换）', () => {
+  const role = { name: '沙僧', prompt: '你是沙僧。只改授权文件，结论附证据。', channel: { kind: 'acp-cli' } }
+  const continuation = formatContinuation(completedRun({ output: '上一轮结论：顺序正确。' }))
+  const text = composePrompt(role, '核对派单顺序', continuation, c2Spec(), c2Pack())
+
+  const iPersona = text.indexOf('你是「沙僧」。')
+  const iBrief = text.indexOf('[TASK SPEC')
+  const iContinuation = text.indexOf('[PREVIOUS TASK OUTPUT')
+  const iEnd = text.indexOf('[END PREVIOUS TASK OUTPUT')
+  const iTask = text.indexOf('任务：核对派单顺序')
+  const iContract = text.indexOf('[OUTPUT CONTRACT')
+  assert.equal(iPersona, 0, '人设必须是稳定前缀第一段')
+  assert.ok(iPersona < iBrief, '简报在人设之后')
+  assert.ok(iBrief < iContinuation, '交接块在简报之后')
+  assert.ok(iContinuation < iEnd, '交接块边界成对')
+  assert.ok(iEnd < iTask, '本次任务在交接块之后（防旧内容抢注意力）')
+  assert.ok(iTask < iContract, '输出契约固定收尾')
+
+  // 无 continuesFrom：不出现交接边界。
+  const bare = composePrompt(role, '推进', null, c2Spec(), c2Pack())
+  assert.equal(bare.indexOf('[PREVIOUS TASK OUTPUT'), -1)
+})
+
+test('C2：measurePromptSegments 报告段字节；稳定前缀跨任务一致、动态段随任务变化', () => {
+  const common = {
+    personaHead: '你是「沙僧」。',
+    persona: '你是沙僧。只改授权文件，结论附证据。',
+    taskBrief: renderTaskBrief(c2Spec(), c2Pack()),
+    outputContract: renderOutputContract('runs'),
+  }
+  const taskA = measurePromptSegments({ ...common, task: '任务 A：只读核对' })
+  const taskB = measurePromptSegments({ ...common, task: '任务 B：完全不同的更长任务文本，用来改变动态段字节' })
+  assert.deepEqual(taskA.order, ['persona', 'taskBrief', 'task', 'outputContract'])
+  assert.equal(taskA.bytes.persona, taskB.bytes.persona, '稳定前缀（persona）跨任务字节级一致')
+  assert.notEqual(taskA.bytes.task, taskB.bytes.task, '任务正文随任务变化')
+  assert.ok(taskA.stablePrefixBytes > 0)
+  assert.equal(taskA.bytes.total, taskA.bytes.persona + taskA.bytes.taskBrief + taskA.bytes.task + taskA.bytes.outputContract + taskA.separatorsBytes)
+  assert.equal(Object.hasOwn(taskA, 'tokens'), false, '只报字节，不输出 Token 估算')
+
+  const withContinuation = measurePromptSegments({
+    ...common,
+    continuation: formatContinuation(completedRun({ output: '上一轮结论。' })),
+    task: '续轮核对',
+  })
+  assert.deepEqual(withContinuation.order, [
+    'persona',
+    'taskBrief',
+    'continuation',
+    'task',
+    'outputContract',
+  ])
+  assert.ok(withContinuation.bytes.continuation > 0)
+})
+
+test('C2：执行参数与聊天历史不进提示词（cwd/isolation/timeout/messages 均不出现）', () => {
+  const role = {
+    name: '沙僧',
+    prompt: '你是沙僧。',
+    channel: { kind: 'acp-cli', channelId: 'ch-acp', model: 'm1', reasoning: 'high' },
+  }
+  const text = composePrompt(role, '只读核对', null, c2Spec(), c2Pack())
+  for (const forbidden of ['D:/proj', 'worktree', 'isolation', 'timeoutMs', 'messages', 'chatHistory', 'transcript']) {
+    assert.equal(text.includes(forbidden), false, `提示词不应包含执行参数/聊天历史：${forbidden}`)
+  }
+  assert.ok(text.includes('你是「沙僧」。'), '人设仍在')
+})
+
+test('C2 reuse-policy：同一任务谱系才复用；组合/项目/隔离/预算/失败均新建', () => {
+  const role = {
+    roleId: 'role-sashi',
+    channel: { kind: 'acp-cli', channelId: 'ch-acp', model: 'm1', reasoning: 'high' },
+  }
+  const previous = {
+    childId: 'prev-1',
+    status: 'completed',
+    stopReason: 'completed',
+    taskId: 'task-1',
+  }
+  const base = {
+    previous,
+    taskId: 'task-1',
+    role,
+    nextRole: role,
+    projectRoot: 'D:/proj',
+    nextProjectRoot: 'D:/proj',
+    isolation: 'worktree',
+    nextIsolation: 'worktree',
+    chainLength: 0,
+    continuationBytes: 1024,
+  }
+  const allowed = recommendContinuation(base)
+  assert.equal(allowed.decision, REUSE_DECISIONS.REUSE)
+  assert.equal(allowed.reason, REUSE_REASONS.REUSE_ALLOWED)
+  assert.equal(allowed.policyVersion, 1)
+
+  /** @type {Array<[any, string]>} */
+  const cases = [
+    [{ ...base, previous: null }, REUSE_REASONS.NO_PREVIOUS],
+    [{ ...base, previous: { ...previous, status: 'running' } }, REUSE_REASONS.PREVIOUS_RUNNING],
+    [{ ...base, previous: { ...previous, status: 'failed' } }, REUSE_REASONS.PREVIOUS_NOT_REUSABLE],
+    [{ ...base, previous: { ...previous, status: 'cancelled' } }, REUSE_REASONS.PREVIOUS_NOT_REUSABLE],
+    [{ ...base, taskId: 'task-2' }, REUSE_REASONS.TASK_CHANGED],
+    [
+      {
+        ...base,
+        nextRole: {
+          roleId: 'role-bajie',
+          channel: { kind: 'acp-cli', channelId: 'ch-acp', model: 'm1', reasoning: 'high' },
+        },
+      },
+      REUSE_REASONS.EXECUTION_COMBO_CHANGED,
+    ],
+    [{ ...base, nextProjectRoot: 'D:/other' }, REUSE_REASONS.PROJECT_CHANGED],
+    [{ ...base, nextIsolation: 'none' }, REUSE_REASONS.ISOLATION_CHANGED],
+    [{ ...base, chainLength: 3 }, REUSE_REASONS.CHAIN_TOO_LONG],
+    [{ ...base, continuationBytes: 16 * 1024 + 1 }, REUSE_REASONS.CONTEXT_BUDGET_EXCEEDED],
+  ]
+  for (const [input, reason] of cases) {
+    const decision = recommendContinuation(input)
+    assert.equal(decision.reason, reason)
+    assert.equal(decision.decision, REUSE_DECISIONS.NEW, `${reason} 必须新建`)
+    assert.equal(decision.reuse, false)
+  }
 })

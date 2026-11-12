@@ -394,3 +394,58 @@ H. 默认免轮询、事件驱动更新、一次汇报多任务。
 | 主控 Token | 主 Agent 在协调、派单、读取回执和汇总中的 Token |
 | 子 Agent Token | 外部 CLI/子 Agent 执行任务时实际消耗的 Token |
 | 工具回执字节 | 插件工具返回给主控的文本/结构化数据大小，不等同 Token |
+
+---
+
+## 12. C2（2026-11-12）：派单提示词缓存顺序与同任务复用判据
+
+> 任务：C2（task-9）｜执行：小白｜状态：实现完成（源码级）
+> 依据：C1 契约 `docs/design/context-contract.md` §1.4/§9 D6、C2 基线 `docs/plan/verify/2026-11-12-c2-baseline.md`
+> 边界：**不改 B/C1 契约字段、不调换顺序**；不做真机验证；Token 统计一律标「未知/估算」。
+
+### 12.1 结论
+
+1. **顺序已符合 C1 且禁止调换**：L1 人设（稳定前缀）→ L2 TaskSpec/ContextPack → L3 交接重放（可选）→ 本次任务 → 输出契约。C2 只做**断言固化 + 字节测量 + 复用判据**，未改组装逻辑。
+2. **稳定前缀只有 L1**；输出契约虽稳定但固定收尾（C1 要求），不参与前缀缓存。
+3. **同任务复用 = 上下文重放**（`continuesFrom`），**不是**真会话复用：外部 CLI 每次全新进程、provider 未开放续接（`src/context-replay.js:3-8`）。
+4. **复用判据已落为纯函数** `recommendContinuation`（`src/dispatch/reuse-policy.js`），只给建议，**不自动接线**（避免小任务默认重放多烧 token）；真实节省比例：**未知**。
+
+### 12.2 顺序证据（可复核）
+
+| 段 | 来源 | 稳定性 | 证据 |
+| --- | --- | --- | --- |
+| L1 persona | `你是「name」。` + `role.prompt`（空回退 description） | **稳定前缀**（同角色字节级一致） | `src/dsh/adapter.js:composePrompt`；`src/context-replay.js:343` |
+| L2 taskBrief | `renderTaskBrief(taskSpec, contextPack)` | 任务相关 | `src/taskspec.js:339`；`src/context-replay.js:344` |
+| L3 continuation | `formatContinuation(run)`（有界 ≤16KiB，UNTRUSTED 边界） | 动态、有界 | `src/context-replay.js:255-316,345` |
+| 任务正文 | `任务：<task>` | 动态 | `src/context-replay.js:346` |
+| 输出契约 | `renderOutputContract(artifactPolicy)` | 稳定但收尾 | `src/result-contract.js:renderOutputContract`；`src/context-replay.js:347` |
+
+验证方式：`src/context-replay.js:measurePromptSegments`（与 compose 同规则）+ `scripts/measure-prompt-segments.mjs`；单测 `tests/context-replay.test.mjs`（C2 五段顺序 / 无交接无边界 / 执行参数与聊天历史不进提示词 / 前缀跨任务一致）与 `tests/token-output.test.mjs`（交接块有界 + 分段字节可复算）。
+
+### 12.3 实测字节（合成样本，2026-11-12，bytes ≠ Token）
+
+`node scripts/measure-prompt-segments.mjs`：
+
+| 样本 | 顺序 | persona | taskBrief | continuation | task | outputContract | total |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 首轮 / 短人设 | persona→taskBrief→task→outputContract | 215 | 932 | — | 85 | 847 | 2,085 |
+| 首轮 / 长人设 | 同上 | 2,226 | 932 | — | 85 | 847 | 4,096 |
+| 续轮 / 长人设+交接（约 8KB 输出） | persona→taskBrief→continuation→task→outputContract | 2,226 | 932 | 9,856 | 85 | 906 | 14,013 |
+
+- 口径：UTF-8 字节；**不估算 Token、不声明节省比例**（Provider Usage 未知）。
+- 工具回执/账本基线见 `docs/plan/verify/2026-11-12-c2-baseline.md` §4（`measure-tool-output`：dispatch 5,056→252 B 等；`token-ledger`：97 runs 成功 82 等）——同样是字节口径，非 Token。
+
+### 12.4 同任务复用判据（`recommendContinuation`）
+
+**复用（返回 `reuse`）需同时满足**：上一轮已终态且可复用（非 failed/cancelled/interrupted/unknown）、taskId 一致（两边都给出时）、执行组合（roleId/CLI/模型/强度/channelId）一致、项目根一致、隔离方式一致、重放链长未达上限（默认 3，草案值）、重放字节未超预算（16KiB）。
+
+**新建（返回 `new`，附原因码）**：`NO_PREVIOUS` / `PREVIOUS_RUNNING` / `PREVIOUS_NOT_REUSABLE` / `TASK_CHANGED` / `EXECUTION_COMBO_CHANGED` / `PROJECT_CHANGED` / `ISOLATION_CHANGED` / `CHAIN_TOO_LONG` / `CONTEXT_BUDGET_EXCEEDED`。
+
+边界：判据为纯函数、不做 I/O、当前 dispatcher **不自动套用**；是否传 `continuesFrom` 仍由调用方决定（C1 契约不变）。单测覆盖见 `tests/context-replay.test.mjs`。
+
+### 12.5 未知 / 未验证
+
+- 真实 Prompt Token 与 provider prompt-cache 命中率：**未知**（无 Usage 源；宿主 system prompt + 工具定义不在插件控制范围）。
+- 生产 persona 实际字节分布：未统计（runs 不存 prompt；样本为固定合成）。
+- 链长 ≤3 的合理性：草案，未做生产实测。
+- 真机：未启动 DSH 桌面端、未改 profile、未重启；UI 与真实网关往返不在 C2 范围。

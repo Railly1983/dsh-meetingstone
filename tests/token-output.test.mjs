@@ -16,6 +16,7 @@ import { join } from 'node:path'
 import { registerTools, TOOL_NAMES, TASK_RESULT_HEAD_BYTES, TASK_RESULT_TAIL_BYTES } from '../src/dsh/register.js'
 import { createDshAdapter } from '../src/dsh/adapter.js'
 import { createRunStore, truncateUtf8 } from '../src/run-store.js'
+import { formatContinuation, measurePromptSegments, REPLAY_MAX_BYTES } from '../src/context-replay.js'
 
 /** @param {Record<string, object>} tools */
 function makeTools(depsOver = {}) {
@@ -344,4 +345,47 @@ test('continuationBytes 落盘：有就写，没有就省略该字段', async ()
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('C2：交接块有界 + 提示词分段字节可测（bytes≠Token，不估算 Token）', () => {
+  // 远超 16KiB 的上一轮输出：重放必须被截断，块本身有界。
+  const bigOutput = '证据行：文件与结论。'.repeat(4000)
+  const continuation = formatContinuation({
+    childId: 'prev-c2',
+    status: 'completed',
+    stopReason: 'completed',
+    output: bigOutput,
+  })
+  assert.equal(continuation.truncated, true, '超限输出必须截断')
+  const blockBytes = Buffer.byteLength(continuation.text, 'utf8')
+  assert.ok(
+    blockBytes <= REPLAY_MAX_BYTES + 4096,
+    `重放块必须有界（实际 ${blockBytes}B，上限 ${REPLAY_MAX_BYTES}B + 边界开销）`,
+  )
+
+  const segments = measurePromptSegments({
+    personaHead: '你是「沙僧」。',
+    persona: '你是沙僧。',
+    taskBrief: '[TASK SPEC — 结构化任务简报]\ntitle: C2 顺序检查',
+    continuation,
+    task: '续轮核对',
+    outputContract: '[OUTPUT CONTRACT]',
+  })
+  assert.equal(
+    segments.order.join('>'),
+    'persona>taskBrief>continuation>task>outputContract',
+    'C1 固定顺序：稳定人设 → 简报 → 交接 → 任务 → 输出契约',
+  )
+  assert.ok(segments.bytes.continuation > 0)
+  assert.equal(
+    segments.bytes.total,
+    segments.bytes.persona +
+      segments.bytes.taskBrief +
+      segments.bytes.continuation +
+      segments.bytes.task +
+      segments.bytes.outputContract +
+      segments.separatorsBytes,
+    '总字节 = 各段 + 分隔符（口径可复算）',
+  )
+  assert.equal(Object.hasOwn(segments, 'tokens'), false, '只报字节，不输出 Token 估算')
 })
