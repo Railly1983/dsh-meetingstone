@@ -2,6 +2,30 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.12] - 2026-11-12
+
+### Fixed
+
+- **「模型列表刷新不正常」**（用户真机反馈，Codex 交叉评审列为 P0）。两个成因：
+
+  1. **外部 CLI 通道被整个跳过**：`channelsToCatalog()` 见 `model` 为空就 `continue`，
+     但 acp-cli / codex / claude-code 三种通道在 profile 里**本来就没有 `model` 字段**
+     （它们的模型由角色行或 provider 行 `--model` 承载）。结果这三个 CLI 从能力目录里
+     彻底消失，编辑器只剩 `dsh` 一项。
+     修复：没有 model 也登记通道（models 可为空，但 rows 要有），CLI 至少能出现在下拉里。
+
+  2. **角色绑定的模型没进目录**：用户给唐僧绑的是 `ch-acp-kimi` + `role.model = kimi-k3.1-pro`，
+     而 `ch-acp-kimi` 通道行本身没 model → 这个模型在编辑器里根本看不到。
+     新增 `mergeRoleBoundModels()`：从角色侧反补 model / reasoning，
+     并标 `sources: ["role", ...]` 让 UI 能区分「来自角色绑定」而不是伪装成探测结果。
+
+- `createCliCapabilityCatalog()` 新增 `roles` 选项（与 `channels` 同风格，接受函数或数组），
+  `src/gui/host.js` 接线时传入 `registry.list()`。
+
+### 测试
+
+- 578 → 584 tests（+6 条回归，覆盖「外部通道无 model」「角色绑定模型补录」「纯函数不改入参」）
+
 ## [0.1.0-alpha.11] - 2026-11-12
 
 ### Fixed

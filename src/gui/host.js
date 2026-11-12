@@ -371,6 +371,10 @@ export function createGuiState({
     capabilities ??
     createCliCapabilityCatalog({
       channels: () => (Array.isArray(channels) ? channels : []),
+      // 角色实际绑定的模型也要进目录：外部 CLI 通道行通常没有 model 字段，
+      // 模型声明在角色行上（如唐僧→ch-acp-kimi + model=kimi-k3.1-pro）。
+      // 不补这一项，编辑器里那些模型根本看不到，用户会以为「刷新不出模型」。
+      roles: () => (typeof registry?.list === 'function' ? registry.list() : []),
       probes: createDefaultProbes({
         ctx,
         resolveExecutable: async (/** @type {string} */ cli) => {

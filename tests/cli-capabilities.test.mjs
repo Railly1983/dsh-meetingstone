@@ -24,6 +24,7 @@ import {
   defaultProviderConfigPaths,
   extractHostModels,
   mergeCatalogs,
+  mergeRoleBoundModels,
   parseCodexModelList,
   parseProviderPatchRows,
   providerForCatalogModel,
@@ -470,3 +471,95 @@ test('D1-B：channels 源优先于 provider 行，且两者合并去重', () => 
   assert.deepEqual(merged.codebuddy.models.map((item) => item.id).sort(), ['glm-5.3-flash', 'hy3'])
 })
 
+// ── 回归：2026-11-12「模型列表刷新不正常」──────────────────────────────
+// 用户反馈：角色编辑器里模型列表刷新不出来。
+// 根因：外部 CLI 通道（acp-cli / codex / claude-code）在 profile 里**没有 model 字段**，
+// 早期 channelsToCatalog 见 model 为空就 continue，导致这些 CLI 从目录里整个消失。
+
+test('回归：外部 CLI 通道没有 model 字段时，CLI 仍要出现在目录里', () => {
+  const catalog = channelsToCatalog([
+    { channelId: 'ch-acp-kimi', kind: 'acp-cli', provider: 'acp-kimi', reasoning: 'high' },
+    { channelId: 'ch-codex-astra', kind: 'codex', provider: 'codex' },
+  ])
+  assert.ok(catalog.codebuddy, 'acp-cli 通道必须让 codebuddy 出现在目录里')
+  assert.ok(catalog.codex, 'codex 通道必须让 codex 出现在目录里')
+  // 没有 model 时 models 可以为空，但通道 id 要登记
+  assert.deepEqual(catalog.codebuddy.rows, ['ch-acp-kimi'])
+  assert.deepEqual(catalog.codex.rows, ['ch-codex-astra'])
+})
+
+test('回归：in-process 通道的 llmModel 正常进目录', () => {
+  const catalog = channelsToCatalog([
+    {
+      channelId: 'ch-inprocess',
+      kind: 'in-process',
+      provider: 'spawn',
+      llmProvider: 'workbuddy',
+      llmModel: 'deepseek-v4.1-flash',
+      reasoning: 'high',
+    },
+  ])
+  assert.ok(catalog.dsh)
+  assert.equal(catalog.dsh.models.length, 1)
+  assert.equal(catalog.dsh.models[0].id, 'deepseek-v4.1-flash')
+  assert.equal(catalog.dsh.models[0].provider, 'workbuddy')
+  assert.deepEqual(catalog.dsh.models[0].strengths, ['high'])
+})
+
+test('回归：角色绑定的模型补进目录，并标注来源为 role', () => {
+  const base = channelsToCatalog([
+    { channelId: 'ch-acp-kimi', kind: 'acp-cli', provider: 'acp-kimi', reasoning: 'high' },
+  ])
+  const merged = mergeRoleBoundModels(base, [
+    {
+      roleId: 'role-tangtang',
+      name: '唐僧',
+      model: 'kimi-k3.1-pro',
+      reasoning: 'high',
+      channel: { kind: 'acp-cli', provider: 'acp-kimi' },
+    },
+  ])
+  assert.ok(merged.codebuddy, '角色绑定的模型必须让 codebuddy 有内容')
+  const model = merged.codebuddy.models.find((m) => m.id === 'kimi-k3.1-pro')
+  assert.ok(model, '角色声明的模型必须出现在目录里')
+  assert.deepEqual(model.sources, ['role'], '来源要标注为 role，不能伪装成探测结果')
+  assert.deepEqual(model.strengths, ['high'])
+  assert.equal(model.provider, 'acp-kimi')
+})
+
+test('mergeRoleBoundModels：不修改入参（纯函数）', () => {
+  const base = channelsToCatalog([{ channelId: 'c', kind: 'acp-cli', provider: 'p' }])
+  const snapshot = JSON.stringify(base)
+  mergeRoleBoundModels(base, [
+    { model: 'm1', reasoning: 'high', channel: { kind: 'acp-cli', provider: 'p' } },
+  ])
+  assert.equal(JSON.stringify(base), snapshot, '入参不能被改')
+})
+
+test('mergeRoleBoundModels：与通道来源合并时保留双来源标记', () => {
+  // 通道里有同 id 的模型，角色也绑了它 → sources 应含两边
+  const catalog = {
+    codebuddy: {
+      models: [{ id: 'glm-5.3-flash', label: 'glm-5.3-flash', provider: 'acp', strengths: [] }],
+      strengths: [],
+      rows: ['ch-acp-flash'],
+    },
+  }
+  const merged = mergeRoleBoundModels(catalog, [
+    { model: 'glm-5.3-flash', reasoning: 'high', channel: { kind: 'acp-cli', provider: 'acp' } },
+  ])
+  const model = merged.codebuddy.models[0]
+  assert.deepEqual(model.sources.sort(), ['channel', 'role'])
+  assert.deepEqual(model.strengths, ['high'])
+})
+
+test('mergeRoleBoundModels：没有 model 的角色 / 未知 kind 一律跳过', () => {
+  const base = channelsToCatalog([{ channelId: 'c', kind: 'acp-cli', provider: 'p' }])
+  const merged = mergeRoleBoundModels(base, [
+    { roleId: 'r1' }, // 无 model
+    { roleId: 'r2', model: 'm', channel: { kind: 'unknown-kind' } }, // 未知 kind
+    null,
+    undefined,
+  ])
+  assert.equal(merged.codebuddy.models.length, 0, '不该凭空造出模型')
+})

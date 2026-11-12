@@ -344,11 +344,22 @@ export function channelsToCatalog(channels = []) {
     if (!cli) continue
     // in-process 用 llmModel/llmProvider；外部通道用 model/provider。
     const model = asString(channel.llmModel) || asString(channel.model)
-    if (!model) continue
     const provider = asString(channel.llmProvider) || asString(channel.provider) || null
     const effort = asString(channel.reasoning)
     const bucket = byCli[cli] ?? { models: [], strengths: new Set(), rows: [] }
     byCli[cli] = bucket
+    // 2026-11-12 修复：外部 CLI 通道（acp-cli / codex / claude-code）在 profile 里
+    // 通常没有 `model` 字段 —— 它们的模型由角色行（role.model）或 provider 行的
+    // --model 承载。早期这里 `if (!model) continue` 会让这些 CLI 从目录里**整个消失**，
+    // 表现就是用户反馈的「模型列表刷新不正常 / 只有 dsh 一个 CLI」。
+    // 现在：没有 model 也登记通道（models 为空但有 rows），CLI 至少能出现在下拉里；
+    // 角色实际绑定的模型由 mergeRoleBoundModels() 从角色侧补进来。
+    if (!model) {
+      if (effort) bucket.strengths.add(effort)
+      const channelId = asString(channel.channelId)
+      if (channelId && !bucket.rows.includes(channelId)) bucket.rows.push(channelId)
+      continue
+    }
     const existing = bucket.models.find((item) => item.id === model)
     if (existing) {
       if (!existing.provider && provider) existing.provider = provider
@@ -357,12 +368,76 @@ export function channelsToCatalog(channels = []) {
       bucket.models.push({ id: model, label: model, provider, strengths: effort ? [effort] : [] })
     }
     if (effort) bucket.strengths.add(effort)
-    if (asString(channel.channelId)) bucket.rows.push(asString(channel.channelId))
+    const rowId = asString(channel.channelId)
+    if (rowId && !bucket.rows.includes(rowId)) bucket.rows.push(rowId)
   }
   /** @type {Record<string, any>} */
   const out = {}
   for (const [cli, bucket] of Object.entries(byCli)) {
     out[cli] = { models: bucket.models, strengths: [...bucket.strengths], rows: bucket.rows }
+  }
+  return out
+}
+
+/**
+ * 把角色**实际绑定的模型**补进能力目录。
+ *
+ * ── 为什么需要（「模型列表刷新不正常」的正解之二）──────────────────────
+ * profile 里模型的真实来源有两处：
+ * 1. 通道行：in-process 的 `llmModel`、外部 CLI 的 provider 行 `--model`
+ * 2. **角色行**：`role.model` / `role.reasoning`（角色派单时实际用的就是它）
+ *
+ * 早期只读了第 1 处。但用户给「唐僧」绑的是 `ch-acp-kimi` + `role.model = kimi-k3.1-pro`，
+ * 而 `ch-acp-kimi` 通道行本身没有 model —— 于是编辑器里这个模型**根本看不到**，
+ * 用户会以为「刷新不出模型」。
+ *
+ * 本函数从角色侧反补：凡是角色声明过的 model / reasoning 都并进对应 CLI 的目录，
+ * 并标 `sources: ['role', ...]` 让 UI 能区分「来自角色绑定」而不是伪装成探测结果。
+ *
+ * @param {Record<string, any>} catalog 已有目录
+ * @param {any[]} roles 角色列表
+ * @param {Record<string, string>} [kindToCli] 通道 kind → CLI id（默认用内置映射）
+ * @returns {Record<string, any>} 新目录（不修改入参）
+ */
+export function mergeRoleBoundModels(catalog, roles, kindToCli) {
+  /** @type {Record<string, any>} */
+  const out = {}
+  for (const [cli, entry] of Object.entries(catalog ?? {})) {
+    if (!entry || typeof entry !== 'object') continue
+    out[cli] = {
+      models: Array.isArray(entry.models) ? entry.models.map((/** @type {any} */ m) => ({ ...m })) : [],
+      strengths: Array.isArray(entry.strengths) ? [...entry.strengths] : [],
+      rows: Array.isArray(entry.rows) ? [...entry.rows] : [],
+    }
+  }
+  const map = kindToCli ?? CHANNEL_KIND_TO_CLI
+  for (const role of Array.isArray(roles) ? roles : []) {
+    if (!role || typeof role !== 'object') continue
+    const model = asString(role.model) || asString(role.channel?.model)
+    if (!model) continue
+    const reasoning = asString(role.reasoning) || asString(role.channel?.reasoning)
+    const kind = asString(role.channel?.kind) || asString(role.kind)
+    const cli = /** @type {Record<string, string>} */ (map)[kind] ?? null
+    if (!cli) continue
+    const bucket = out[cli] ?? { models: [], strengths: [], rows: [] }
+    out[cli] = bucket
+    const provider = asString(role.channel?.provider) || asString(role.provider) || null
+    const existing = bucket.models.find((/** @type {any} */ item) => item.id === model)
+    if (existing) {
+      if (!existing.provider && provider) existing.provider = provider
+      if (reasoning && !existing.strengths.includes(reasoning)) existing.strengths.push(reasoning)
+      if (!Array.isArray(existing.sources)) existing.sources = ['channel']
+      if (!existing.sources.includes('role')) existing.sources.push('role')
+    } else {
+      bucket.models.push({
+        id: model,
+        label: model,
+        provider,
+        strengths: reasoning ? [reasoning] : [],
+        sources: ['role'],
+      })
+    }
+    if (reasoning && !bucket.strengths.includes(reasoning)) bucket.strengths.push(reasoning)
   }
   return out
 }
@@ -839,6 +914,8 @@ export function buildCatalogEntry(cli, state = {}) {
  *   autoRefresh?: boolean,
  *   configReader?: (() => Promise<{ path: string | null, rows: any[], catalog: Record<string, any>, errors: string[] }>) | null,
  *   configReaderSync?: (() => { path: string | null, rows: any[], catalog: Record<string, any>, errors: string[] }) | null,
+ *   channelsSource?: () => any[],
+ *   rolesSource?: () => any[],
  * }} [options]
  * @returns {CapabilityCatalog}
  */
@@ -848,6 +925,10 @@ export function createCliCapabilityCatalog(options = {}) {
   const probes = options.probes ?? {}
   const resolveExecutable = options.resolveExecutable ?? (async () => null)
   const autoRefresh = options.autoRefresh !== false
+  // roles 源：角色实际绑定的模型/强度（「模型列表刷新不正常」的正解之二，见 mergeRoleBoundModels）。
+  // 与 `channels` 一样接受函数或数组，保持参数风格一致。
+  const rolesSource =
+    typeof options.roles === 'function' ? options.roles : () => options.roles ?? []
   // channels 源：插件配置里的通道实例表（与派单侧 adapter.js 同源）。
   // in-process 的 `llmModel` 只存在于这里，provider 行拿不到（D1 缺陷 1 成因 B）。
   const channelsSource =
@@ -894,7 +975,16 @@ export function createCliCapabilityCatalog(options = {}) {
     } catch {
       channels = []
     }
-    return mergeCatalogs(channelsToCatalog(channels), configData.catalog ?? {})
+    let roles = []
+    try {
+      roles = Array.isArray(rolesSource()) ? rolesSource() : []
+    } catch {
+      roles = []
+    }
+    // 顺序：provider 行（只覆盖外部 CLI）→ channels（与派单侧同源，优先）
+    // → 角色绑定（角色派单时实际用的就是它，最高优先，只做补全集）。
+    const withChannels = mergeCatalogs(channelsToCatalog(channels), configData.catalog ?? {})
+    return mergeRoleBoundModels(withChannels, roles)
   }
   /** @type {Map<string, { discovered: any[] | null, config: any, errors: string[], refreshedAt: number | null }>} */
   const state = new Map()
