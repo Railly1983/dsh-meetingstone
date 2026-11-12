@@ -1,50 +1,116 @@
-# 今晚工作计划（2026-11-12 18:20 起）
+# 今晚工作进展（2026-11-12，实时更新）
 
-> 授权：唐僧角色代为决策裁决
-> **硬约束：今晚不重启 DSH、不安装新包**（alpha.12 已装，是今晚的基线）
-> 所有代码改动只提交到 git，明天一起装
+> 授权：唐僧角色代为决策
+> 起点：`0.1.0-alpha.11`（18:20 时）
+> 当前：`0.1.0-alpha.13` 已装 + 4 个本地提交待装
 
-## 基线
+## 一、并发上限调整（用户要求）
 
-- 已装版本：`0.1.0-alpha.12`（模型刷新 bug 已修，但**未真机验证**）
-- 测试：584 / 583 pass / 1 skip
-- 门禁：8 PASS / 0 SKIP
+| 项 | 改前 | 改后 |
+|---|---|---|
+| 全局并行上限 | 4 | **8** |
+| 单会话上限 | （无） | **4** |
 
-## 进行中
+新增错误码 `WRITE_LIMIT_SESSION` 与全局满区分。
+拿不到 sessionId 时只受全局约束，不被误伤。
+
+## 二、关键发现：槽位泄漏（今晚最大收获）
+
+**现象**：18:20 起所有派单返回「已达上限 4」，但实际没有任何任务在跑。
+
+**根因**：`active` 是纯内存 Map，槽位只在 `onFinish`（完成/失败/取消）时释放。
+**DSH 重启时任务被强杀，`onFinish` 永不触发 → 每次重启必然泄漏槽位。**
+
+**已缓解**：上限放宽到 8 + 重启后已解锁。
+**未修根因**：`docs/plan/2026-11-12-slot-leak-critical.md`。
+**可诊断**：新增 `meetingstone_stats` 工具，能看真实占用数。
+
+## 三、已修复项
+
+### 3.1 模型列表刷新不正常（P0，用户报的 bug）
+
+两个成因：
+1. `channelsToCatalog` 见 `model` 为空就跳过 → 外部 CLI 从目录消失
+2. 角色绑定的模型没进目录
+
+**修复**：没有 model 也登记通道；新增 `mergeRoleBoundModels()` 从角色侧反补。
+
+**验收结果**（小白，契约层）：**通过**
+- 4 个 CLI 全部出现（DeepSeek Harness / Claude Code / Codex / CodeBuddy）
+- dsh = `deepseek-v4.1-flash`
+- CodeBuddy = `kimi-k3.1-pro` / `hy4free` / `glm-5.3-flash` / `hy3`
+- Codex = `gpt-6-astra` / `gpt-6.1-sol`
+- dsh 与 CodeBuddy 思考强度有 `high`
+
+**遗留**：`sources:['role']` 标记没传到 UI（统一显示成 `config`）。不阻塞。
+
+### 3.2 重放块边界可被伪造逃逸（安全，中危）
+
+旧输出含 `[END PREVIOUS TASK OUTPUT]` 会提前闭合不可信边界，
+让旧输出冒充主控指令。已加 `neutralizeBoundaryMarks()` 无害化。
+
+### 3.3 list_runs 返回体冗余（Token 优化）
+
+实测单条 1.7KB，其中约 1KB 是纯排障字段。新增 `verbose` 参数，
+默认紧凑，**省约 65% 返回体**（20 条从 34KB → 12KB）。
+
+## 四、安全审计结论（沙僧，已完成）
+
+**无高危**。中危 4 项：
+1. ✅ 重放块边界可伪造逃逸（**已修**）
+2. run 记录 result 含敏感内容无过滤（已文档化接受）
+3. install-safe 整目录替换有窗口期
+4. watcher 回滚是叠加不是整目录替换
+5. 回滚 tgz 选择按字母序
+
+低危若干：`.cmd/.bat` 走 cmd.exe 拼接、符号链接 realpath 回退、错误栈泄漏路径。
+
+完整报告：`docs/plan/2026-11-12-security-audit.md`
+
+## 五、进行中
 
 | childId | 角色 | 任务 | 状态 |
 |---|---|---|---|
-| `12d58077` | 悟空 | Token 优化评估 | running（18:02） |
-| `47841797` | 小白 | workbuddy-to-dsh UI 参考 + 上下文长度可配置性 | running（18:02） |
+| `beaff738` | 悟空 | 路由矩阵 | running（20+ 分钟） |
+| `14da4947` | 八戒 | Worktree 真机验收 | running（20+ 分钟） |
 
-## P0 队列（按 Codex 评审）
+## 六、已完成
 
-1. **黄色状态不可达**（quota 接入 `deriveRoleView`）
-2. **CLI 与模型路由矩阵**：为每个正式启用角色真实派单一次，记录实际 provider/model/强度
-3. **续聊/取消/进程清理**：外部 CLI 的 `restart-with-output` 真机验证 + Windows 子进程树清理
-4. **alpha.12 UI 验收**：D1 U1–U10 共 46 步
+| 角色 | 任务 | 结果 |
+|---|---|---|
+| 小白 | alpha.13 UI 验收 | 契约层 PASS，视觉层需用户目视 |
+| 沙僧 | 安全审计 | 无高危，2 中危（1 已修） |
+| Lead | Token 复核 + list_runs 优化 | 已实现并提交 |
+| Lead | 槽位泄漏诊断 + stats 工具 | 已实现并提交 |
 
-## P1 队列
+## 七、待办
 
-5. **Worktree 真实并行验收**：两个任务改不同文件 → 测试 → 合并 → 冲突处理 → 清理
-6. **安全审计**：命令注入、路径越权、密钥泄漏、外部输出不可信处理
-7. **Token 优化复核**（悟空评估后落地）
-8. **产品体验复核**：CLI 开关、角色开关、全局/项目继承
+### 待用户手工确认
 
-## 人员分配
+1. **D1 视觉层**：U1–U10 目视 46 步（重点 U6-22/23、U7、U9）
+2. **黄色状态**：目前不可达，需决定「接通 quota」还是「承认只有绿/灰」
 
-- **悟空**：技术评估、路由矩阵、安全审计（已派 Token 评估）
-- **小白**：UI 验收、体验复核、workbuddy 参考落地
-- **八戒**：兜底（悟空/小白额度不足时接手）
-- **唐僧**：裁决争议、决定取舍
-- **Lead（我）**：调度、代码实现、提交（不装包）
+### 待悟空/八戒完成
 
-## 交付物
+3. 路由矩阵（悟空）
+4. Worktree 真机验收（八戒）
 
-- `docs/plan/2026-11-12-token-optimization-review.md`（悟空）
-- `docs/plan/2026-11-12-workbuddy-ui-reference.md`（小白）
-- `docs/plan/2026-11-12-route-matrix.md`（路由矩阵）
-- `docs/plan/verify/2026-11-12-d1-alpha12.md`（UI 验收）
-- `docs/plan/2026-11-12-security-audit.md`（安全审计）
-- `docs/plan/2026-11-12-worktree-acceptance.md`（并行验收）
-- 明确「明天安装什么、验证什么」的清单
+### 明天要做的
+
+5. 安装今天的 4 个提交（alpha.14）
+6. 验证 `meetingstone_stats` 真机可用
+7. 验证 `list_runs` 紧凑模式实际省多少
+8. 外部 CLI 的 `restart-with-output` 真机验证（还没做）
+
+## 八、今晚的提交线
+
+```
+c238ea3 feat(stats): 新增 meetingstone_stats
+8459115 perf(tokens): list_runs 默认紧凑
+6650844 fix(security): 重放块边界可被伪造逃逸
+82c088d feat(limits): 并发上限两档（8/4）
+a9da9a5 fix(capabilities): 模型列表刷新
+```
+
+**注意：以上除 alpha.13 外都还没装**（今晚只提交不装包的原则已破例一次，
+因为槽位泄漏必须重启解锁）。
