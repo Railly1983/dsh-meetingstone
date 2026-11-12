@@ -42,3 +42,7 @@ coverage/
 
 # worktree/overlap acceptance test artifacts (never commit)
 docs/plan/wt-*.txt
+
+# 验证脚本的临时解包产物（可随时重解）
+.meetingstone/runs/verify-installed-refresh/
+.meetingstone/runs/refresh-verify/vendor/
