@@ -645,6 +645,37 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * 把 remote 错误码翻译成**用户能看懂的话**。
+     *
+     * 2026-11-12 用户真机反馈「刷新能力一点就红字报错」，暴露两个问题：
+     * 1. 底层是 ReferenceError（已修）；
+     * 2. 就算是我们自己的 RemoteError，用户也只看到一行 code/message，
+     *    不知道该怎么办。
+     *
+     * 这里把已知错误码翻成「发生了什么 + 怎么办」，未知码原样透出（不编造）。
+     *
+     * @param {string} code
+     * @param {string} message
+     */
+    function explainRemoteError(code, message) {
+      if (code === 'MEETINGSTONE_GUI_CAPABILITIES_UNAVAILABLE') {
+        return '能力目录未就绪：插件初始化时没拿到模型清单。点「刷新能力」重试；仍失败请重启 DSH。'
+      }
+      if (code === 'MEETINGSTONE_GUI_REMOTE_UNAVAILABLE') {
+        return '配置服务未装配：插件的 GUI 写入通道没准备好。重启 DSH 后重试。'
+      }
+      if (code === 'REMOTE_UNAVAILABLE') {
+        return '设置页还没连上宿主（remote.meetingstone 未就绪）。稍等片刻或重新打开设置页。'
+      }
+      if (code === 'gateway/internal') {
+        // 宿主把未捕获异常统一包成这个码。原文里通常带真实原因。
+        return `宿主内部错误：${message || '无详情'}`
+      }
+      // 未知码：原样透出，不编造解释
+      return message || code
+    }
+
     /** 配置写/检测操作（CLI 开关 + 全局角色；全局写入由调用方二次确认）。 */
     function makeConfigActions(serviceOrGet, mountFailure) {
       const call = makeRemoteCall(serviceOrGet, mountFailure)
@@ -2602,7 +2633,14 @@ window.__ModuleLoader__.load({
     /** 详情页错误行（一行摘要；完整 message 放 title）。 */
     function detailErrorLine(t, error) {
       if (!error) return null
-      const message = asString(error.message) || t('loadFailed')
+      const rawCode = asString(error.code)
+      const rawMessage = asString(error.message)
+      // 2026-11-12：之前这里是 `${code} ${message}` 原样拼给用户 ——
+      // 用户看到的就是 `MEETINGSTONE_GUI_CAPABILITIES_UNAVAILABLE 能力目录未装配`，
+      // 或者宿主的 `gateway/internal xxx is not defined`，不知道该干什么。
+      // 现在翻成「发生了什么 + 怎么办」；原始 code 仍放在 title 里便于排障。
+      const friendly = explainRemoteError(rawCode, rawMessage)
+      const text = rawCode && rawCode !== 'gateway/internal' ? `${rawCode} ${friendly}` : friendly
       return jsx('p', {
         role: 'alert',
         style: {
@@ -2612,8 +2650,8 @@ window.__ModuleLoader__.load({
           overflow: 'hidden',
           textOverflow: 'ellipsis',
         },
-        title: `${asString(error.code)} ${message}`,
-        children: `${asString(error.code)} ${message}`,
+        title: `${rawCode} ${rawMessage}`.trim(),
+        children: text,
       })
     }
 
@@ -3129,6 +3167,8 @@ window.__ModuleLoader__.load({
       safeRender,
       makeRemoteCall,
       makeConfigActions,
+      // 2026-11-12：错误码翻译。用户看到的是人话而不是 raw code。
+      explainRemoteError,
       REMOTE_CONTRIBUTION,
       SESSION_TYPES,
       // D1 缺陷 2 护栏：文案断言需要真实字典（而非 t(key) 恒等替身）。

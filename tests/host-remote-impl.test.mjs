@@ -282,3 +282,30 @@ test('【真调】其余 remote 方法都能被调用且不抛 ReferenceError', 
     }
   }
 })
+
+
+test('【全量】列出并调用所有 remote 方法，报告可序列化性', async () => {
+  const { deps } = makeDeps()
+  const { instance } = await makeInstance(deps)
+  assert.ok(instance, '前提：注册成功')
+  const proto = Object.getPrototypeOf(instance)
+  const methods = Object.getOwnPropertyNames(proto).filter(
+    (n) => n !== 'constructor' && typeof instance[n] === 'function',
+  )
+  console.log('    [methods] ' + methods.join(', '))
+  const args = {
+    list: [],
+    setCliEnabled: ['codex', true],
+    refreshCli: ['codex', true],
+    updateGlobalRole: ['role-x', {}],
+    createGlobalRole: [{}],
+    deleteGlobalRole: ['role-x'],
+  }
+  for (const name of methods) {
+    if (!(name in args)) continue
+    const r = await instance[name](...args[name])
+    const ser = JSON.stringify(r)
+    assert.notEqual(ser, undefined, name + ' 的返回值必须可 JSON 序列化')
+    assert.ok(!/is not defined/.test(JSON.stringify(r || {})), name + ' 返回值里不该含未定义错误')
+  }
+})

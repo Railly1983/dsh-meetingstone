@@ -1494,3 +1494,25 @@ test('B3：channels 声明合并进能力目录（config 优先于 static，不�
   assert.equal(combo.channel.model, 'glm-5.3-flash')
   assert.equal(combo.channel.reasoning, 'high')
 })
+
+test('错误码翻译：已知码给人话，未知码原样透出（不编造）', async () => {
+  const { exports } = await loadClientHarness()
+  const fn = exports.__test.explainRemoteError
+  assert.equal(typeof fn, 'function', 'explainRemoteError 必须导出')
+
+  // 已知码 → 有「怎么办」
+  const cap = fn('MEETINGSTONE_GUI_CAPABILITIES_UNAVAILABLE', '能力目录未装配')
+  assert.match(cap, /能力目录/, '提到能力目录')
+  assert.match(cap, /重试|重启/, '要告诉用户怎么办')
+
+  const remote = fn('MEETINGSTONE_GUI_REMOTE_UNAVAILABLE', '配置远程未装配')
+  assert.match(remote, /重启|重试/)
+
+  const gw = fn('gateway/internal', 'capabilityCatalog is not defined')
+  assert.match(gw, /宿主内部错误/, 'gateway/internal 要说清是宿主内部错误')
+  assert.match(gw, /capabilityCatalog/, '要把原始 message 带上，便于排障')
+
+  // 未知码 → 原样透出，不编造
+  const unknown = fn('SOME_WEIRD_CODE', '原始消息')
+  assert.equal(unknown, '原始消息', '未知码不能编造解释')
+})
