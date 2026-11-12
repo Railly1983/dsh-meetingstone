@@ -956,3 +956,75 @@ test('meetingstone_stats：有占用时提示可能是泄漏', async () => {
   assert.equal(idle.active, 0)
   assert.match(idle.hint, /可以派单/)
 })
+
+test('list_runs 默认紧凑：剥掉排障字段，保留决策字段', async () => {
+  const { ctx, registered } = fakeCtx()
+  const { deps } = makeDeps()
+  const sample = {
+    runs: [
+      {
+        childId: 'c1',
+        role: 'role-baji',
+        status: 'completed',
+        provider: 'spawn',
+        model: null,
+        interrupted: false,
+        stopConfirmed: true,
+        summaryPreview: 'ok',
+        changedFiles: [],
+        overlapWarnings: [],
+        // 以下都是排障字段，默认应被剥掉
+        runtimeId: 'rt-1',
+        operationId: 'op-1',
+        routing: { roleId: 'r', auto: false },
+        worktree: {
+          path: 'D:/w',
+          branch: 'b',
+          baseSha: 'sha',
+          repositoryRoot: 'D:/',
+          operationId: 'op-1',
+        },
+        overlapTruncated: false,
+        changedFilesUnknown: false,
+      },
+    ],
+    dir: '/runs',
+  }
+  registerTools(ctx, { ...deps, listPersistedRuns: async () => JSON.parse(JSON.stringify(sample)) })
+  const listRuns = registered.find((t) => t.name === TOOL_NAMES.LIST_RUNS)
+  const out = await listRuns.execute({}, {})
+  assert.equal(out.compact, true)
+  assert.match(out.note, /verbose/)
+  const r = out.runs[0]
+  // 决策字段必须在
+  for (const key of ['childId', 'role', 'status', 'provider', 'summaryPreview']) {
+    assert.ok(key in r, `决策字段 ${key} 不能丢`)
+  }
+  // 布尔 false 也要保留（明确「没被中断」是信息）
+  assert.equal(r.interrupted, false)
+  assert.equal(r.stopConfirmed, true)
+  // 空数组也保留：「确认没改文件/没重叠」是有效信息
+  assert.deepEqual(r.changedFiles, [])
+  assert.deepEqual(r.overlapWarnings, [])
+  // 排障字段应被剥掉
+  assert.equal(r.runtimeId, undefined)
+  assert.equal(r.operationId, undefined)
+  assert.equal(r.routing, undefined)
+  assert.equal(r.worktree.branch, undefined, 'worktree 只留 path')
+  assert.equal(r.worktree.path, 'D:/w', 'worktree.path 要保留（排障要进去看）')
+})
+
+test('list_runs verbose:true 返回全量字段', async () => {
+  const { ctx, registered } = fakeCtx()
+  const { deps } = makeDeps()
+  const sample = {
+    runs: [{ childId: 'c1', status: 'running', runtimeId: 'rt-1', worktree: { path: 'p', branch: 'b' } }],
+    dir: '/runs',
+  }
+  registerTools(ctx, { ...deps, listPersistedRuns: async () => JSON.parse(JSON.stringify(sample)) })
+  const listRuns = registered.find((t) => t.name === TOOL_NAMES.LIST_RUNS)
+  const out = await listRuns.execute({ verbose: true }, {})
+  assert.equal(out.compact, undefined, 'verbose 时不标 compact')
+  assert.equal(out.runs[0].runtimeId, 'rt-1', 'verbose 要保留 runtimeId')
+  assert.equal(out.runs[0].worktree.branch, 'b', 'verbose 要保留 branch')
+})

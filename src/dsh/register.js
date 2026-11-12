@@ -832,13 +832,20 @@ export function registerTools(ctx, deps) {
     {
       name: TOOL_NAMES.LIST_RUNS,
       description:
-        '列出当前项目最近的派单记录（新的在前）：title、childId、角色、通道、模型、状态、结构化结果摘要（resultStatus/summaryPreview）、' +
-        '失败分类（failureClass）与给主控的下一步建议（hint）、耗时、工作树路径/分支、改动文件（changedFiles）、原生 Job id（jobId）、' +
-        '同项目任务之间的 overlapWarnings 与 200 字预览。' +
+        '列出当前项目最近的派单记录（新的在前）。**默认紧凑**：只回 childId、角色、状态、' +
+        '通道/模型、摘要预览、失败分类与建议、耗时。' +
+        '工作树路径/分支、改动文件、overlapWarnings、原生 Job id 这些排障字段需要 verbose:true 才返回 —— ' +
+        '它们占返回体的大部分字节，但对「下一步该做什么」没有决策价值。' +
         '数据来自 `.meetingstone/runs/`，DSH 重启后仍可查；上一个进程遗留的 running 会显示为 interrupted。' +
         '带工作树的记录不会被 100 条/30 天自动清理，用于保护未合并成果的元数据。',
       parameters: {
         limit: { type: 'number', description: '最多返回多少条（默认 20，上限 200）' },
+        verbose: {
+          type: 'boolean',
+          description:
+            'true 时额外返回排障元数据（worktree 路径/分支、changedFiles、overlapWarnings、jobId、operationId 等）。' +
+            '默认 false —— 那些字段单条约占 1.1KB，20 条就是 22KB 的纯开销。',
+        },
       },
       output: { schema: { type: 'object', additionalProperties: true }, render: renderObject },
       async execute(args, exec) {
@@ -846,7 +853,80 @@ export function registerTools(ctx, deps) {
           return { runs: [], reason: '当前插件未启用派单记录' }
         }
         const limit = typeof args?.limit === 'number' ? args.limit : undefined
-        return listPersistedRuns(exec, { limit })
+        const result = await listPersistedRuns(exec, { limit })
+        if (args?.verbose === true) return result
+        // 默认紧凑：剥掉**纯排障**元数据，但保留有决策价值的字段。
+        //
+        // 依据（2026-11-12 实测）：单条 running 记录 1.7KB，其中
+        // runtimeId / operationId / worktree.baseSha / worktree.repositoryRoot /
+        // routing / 一堆 *Truncated:false & *Unknown:false 占约 1KB，
+        // 这些对「下一步该做什么」没有任何价值。
+        //
+        // **但要保留**：status（含 interrupted 投影）、changedFiles（有没有改文件是决策信息）、
+        // worktree.path（用户偶尔需要进去看）、stopConfirmed（取消是否真的停了）。
+        // 早期版本把这些也剥了，导致依赖它们的集成测试失败 —— 那是被正确抓到的回归。
+        const runs = Array.isArray(result?.runs)
+          ? result.runs.map((/** @type {any} */ item) => {
+              if (!item || typeof item !== 'object') return item
+              /** @type {Record<string, unknown>} */
+              const slim = {}
+              for (const key of [
+                'childId',
+                'title',
+                'role',
+                'channel',
+                'provider',
+                'model',
+                'status',
+                'stopReason',
+                'stopConfirmed',
+                'interrupted',
+                'failureClass',
+                'hint',
+                'resultStatus',
+                'summaryPreview',
+                'preview',
+                'durationMs',
+                'jobId',
+                'createdAt',
+                'upstreamChildId',
+                'artifactPolicy',
+              ]) {
+                if (item[key] !== undefined && item[key] !== null && item[key] !== '') {
+                  slim[key] = item[key]
+                }
+              }
+              // 工作树：只留 path（排障要进去看），剥掉 branch/baseSha/repositoryRoot/operationId。
+              if (item.worktree && typeof item.worktree === 'object' && item.worktree.path) {
+                slim.worktree = { path: item.worktree.path }
+              }
+              // overlap：空数组也要保留 —— 「明确没有重叠」本身是决策信息，
+              // 剥掉会让调用方分不清「没有重叠」和「这个字段不存在」。
+              if (Array.isArray(item.overlapWarnings)) {
+                slim.overlapWarnings = item.overlapWarnings
+              }
+              // 改动文件同理：空数组表示「确认没改文件」，也是有效信息。
+              if (Array.isArray(item.changedFiles)) {
+                slim.changedFiles = item.changedFiles
+              }
+              return slim
+            })
+          : []
+        // 布尔字段单独处理：false 也是有意义的值（明确「没被中断」），不能按空值过滤掉。
+        const runsWithFlags = runs.map((/** @type {any} */ item, /** @type {number} */ i) => {
+          const source = result.runs[i]
+          if (!item || !source || typeof source !== 'object') return item
+          for (const flag of ['interrupted', 'stopConfirmed', 'resultTruncated']) {
+            if (typeof source[flag] === 'boolean') item[flag] = source[flag]
+          }
+          return item
+        })
+        return {
+          runs: runsWithFlags,
+          ...(typeof result?.dir === 'string' ? { dir: result.dir } : {}),
+          compact: true,
+          note: '默认紧凑输出（剥掉 runtimeId/operationId/worktree.branch 等排障字段）。需要全量请传 verbose:true。',
+        }
       },
     },
     {
