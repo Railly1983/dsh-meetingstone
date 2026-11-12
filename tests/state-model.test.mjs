@@ -87,11 +87,15 @@ function memoryFs(initial = {}) {
   }
 }
 
-test('枚举固定：三字段 + 三色，旧 availability 取值不变', () => {
+test('枚举固定：两色（V1 裁决已删黄色与 exhausted），旧 availability 取值不变', () => {
   assert.deepEqual(STATE_MODEL_VALUES.userPreference, ['unset', 'enabled', 'disabled'])
   assert.deepEqual(STATE_MODEL_VALUES.readiness, ['ready', 'blocked', 'unknown'])
-  assert.deepEqual(STATE_MODEL_VALUES.quota, ['available', 'exhausted', 'unknown', 'not_applicable'])
-  assert.deepEqual(Object.values(ROLE_COLOR), ['gray', 'yellow', 'green'])
+  // 2026-11-12 唐僧裁决：删掉 exhausted —— 宿主没有额度查询 API，
+  // 用失败记录推断额度会把「历史某次失败」伪装成「当前无额度」。
+  assert.deepEqual(STATE_MODEL_VALUES.quota, ['available', 'unknown', 'not_applicable'])
+  assert.deepEqual(Object.values(ROLE_COLOR), ['gray', 'green'], 'V1 只有两色')
+  assert.equal(ROLE_COLOR.YELLOW, undefined, 'YELLOW 必须不存在')
+  assert.equal(QUOTA.EXHAUSTED, undefined, 'EXHAUSTED 必须不存在')
   assert.deepEqual(DEFAULT_PROVIDER_BY_KIND, PROVIDER_BY_KIND, '状态模型与适配器的 provider 映射不得漂移')
 })
 
@@ -185,20 +189,19 @@ test('quota：V1 默认 unknown；按量付费 not_applicable；拒绝失败信�
     assert.equal(deriveQuota(roleA(), { quota, quotaSource: 'meter' }), quota)
   }
 
-  // 429 / refusal / failureClass=quota 只是失败分类，不得变成 exhausted
+  // 429 / refusal / failureClass=quota 只是失败分类，不得变成任何额度事实
   assert.equal(deriveQuota(roleA(), { failureClass: 'quota' }), QUOTA.UNKNOWN)
   assert.equal(deriveQuota(roleA(), { lastFailure: { failureClass: 'quota', stopReason: 'refusal' } }), QUOTA.UNKNOWN)
   assert.equal(deriveQuota(roleA(), { lastError: 'HTTP 429 rate limit' }), QUOTA.UNKNOWN)
+  // 2026-11-12 裁决：exhausted 已不存在，传进来也必须被拒绝
   assert.equal(deriveQuota(roleA(), { quota: 'exhausted', quotaSource: 'failure' }), QUOTA.UNKNOWN)
   assert.equal(deriveQuota(roleA(), { quota: 'exhausted', quotaSource: 'inferred' }), QUOTA.UNKNOWN)
-  // 显式注入的额度事实可采纳（生产 V1 不注入，默认仍是 unknown）
-  assert.equal(deriveQuota(roleA(), { quota: 'exhausted' }), QUOTA.EXHAUSTED)
+  assert.equal(deriveQuota(roleA(), { quota: 'exhausted' }), QUOTA.UNKNOWN, 'exhausted 不再被采纳')
 })
 
-test('三色矩阵：3 偏好 × 3 就绪 × 4 额度', () => {
-  const expected = (pref, readiness, quota) => {
+test('两色矩阵：3 偏好 × 3 就绪 × 3 额度（颜色与 quota 无关）', () => {
+  const expected = (pref, readiness) => {
     if (pref === USER_PREFERENCE.DISABLED || readiness !== READINESS.READY) return ROLE_COLOR.GRAY
-    if (quota === QUOTA.EXHAUSTED) return ROLE_COLOR.YELLOW
     return ROLE_COLOR.GREEN
   }
 
@@ -207,7 +210,7 @@ test('三色矩阵：3 偏好 × 3 就绪 × 4 额度', () => {
       for (const quota of Object.values(QUOTA)) {
         assert.equal(
           deriveRoleColor({ userPreference, readiness, quota }),
-          expected(userPreference, readiness, quota),
+          expected(userPreference, readiness),
           `${userPreference}/${readiness}/${quota}`,
         )
       }
@@ -219,9 +222,11 @@ test('三色矩阵：3 偏好 × 3 就绪 × 4 额度', () => {
     deriveRoleColor({ userPreference: USER_PREFERENCE.UNSET, readiness: READINESS.READY, quota: QUOTA.UNKNOWN }),
     ROLE_COLOR.GREEN,
   )
+  // V1 裁决：quota 不参与颜色 —— 即使传 exhausted 也只影响诊断，不影响颜色
   assert.equal(
-    deriveRoleColor({ userPreference: USER_PREFERENCE.ENABLED, readiness: READINESS.READY, quota: QUOTA.EXHAUSTED }),
-    ROLE_COLOR.YELLOW,
+    deriveRoleColor({ userPreference: USER_PREFERENCE.ENABLED, readiness: READINESS.READY, quota: 'exhausted' }),
+    ROLE_COLOR.GREEN,
+    'quota 不参与颜色派生',
   )
   assert.equal(
     deriveRoleColor({ userPreference: USER_PREFERENCE.DISABLED, readiness: READINESS.READY, quota: QUOTA.AVAILABLE }),
@@ -256,14 +261,14 @@ test('deriveRoleView：输出三字段 + 颜色 + 旧 availability，且是无�
   assert.equal(disabled.color, ROLE_COLOR.GRAY)
   assert.equal(disabled.availability, 'disabled')
 
-  // ready + 明确的额度耗尽 -> 黄
-  const yellow = deriveRoleView(roleA(), {
+  // V1 裁决（2026-11-12）：quota 不参与颜色 —— 传 exhausted 也只影响诊断字段
+  const withQuota = deriveRoleView(roleA(), {
     isProviderAvailable: () => true,
     quota: 'exhausted',
     quotaSource: 'meter',
   })
-  assert.equal(yellow.color, ROLE_COLOR.YELLOW)
-  assert.equal(yellow.quota, QUOTA.EXHAUSTED)
+  assert.equal(withQuota.color, ROLE_COLOR.GREEN, 'quota 不再让角色变黄')
+  assert.equal(withQuota.quota, QUOTA.UNKNOWN, 'exhausted 不是合法额度值，回落 unknown')
 
   // 配置不完整 -> 灰，availability 不得投影成 available
   const incomplete = deriveRoleView({ roleId: 'role-a', name: 'A' }, { availability: 'available' })

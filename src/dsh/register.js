@@ -877,6 +877,10 @@ export function registerTools(ctx, deps) {
                 'channel',
                 'provider',
                 'model',
+                // 生效路由三件套（2026-11-12）：比 provider/model 更能说明「实际跑在什么上」。
+                'effectiveProvider',
+                'effectiveModel',
+                'reasoningEffort',
                 'status',
                 'stopReason',
                 'stopConfirmed',

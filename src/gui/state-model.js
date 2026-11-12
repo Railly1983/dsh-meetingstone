@@ -11,10 +11,14 @@
  *   `not_applicable`。**不得**用 429 / refusal / `failureClass=quota` 推断
  *   `exhausted`——那是失败分类，不是额度事实（docs/efficiency.md §失败分类）
  *
- * 颜色语义（与 Kimi 拆解 §B/§C P0-S1 对齐）：
+ * 颜色语义（**V1 两色**，2026-11-12 唐僧裁决）：
  * - 灰：`userPreference=disabled` 或 `readiness!=ready`
- * - 黄：非 disabled + ready + `quota=exhausted`
- * - 绿：非 disabled + ready + `quota` 为 available / unknown / not_applicable
+ * - 绿：非 disabled + ready。**不声明额度充足，也不表示实时额度。**
+ *
+ * 黄色与 `quota=exhausted` 已删除：宿主没有额度查询 API，
+ * 用 `failureClass=quota` 推断颜色会把「历史某次失败」伪装成「当前无额度」，
+ * 违反「额度未知不得伪装」的边界。
+ * 见 `docs/plan/2026-11-12-yellow-state-verdict.md`。
  *
  * `availability` 是旧字段的兼容投影，取值仍是
  * `disabled | ambiguous | available | provider-unavailable | unknown`，
@@ -39,25 +43,41 @@ export const READINESS = Object.freeze({
   UNKNOWN: 'unknown',
 })
 
-/** 额度状态：V1 默认 unknown，不做任何推断。 */
+/**
+ * 额度状态：V1 默认 unknown，不做任何推断。
+ *
+ * **2026-11-12 裁决（唐僧，用户授权）**：删除 `EXHAUSTED`。
+ * 宿主没有额度查询 API，只有错误分类常量（`QUOTA_EXCEEDED_CODE` 等）与
+ * `isQuotaExceededError()` —— 那是**失败诊断**，不是余额事实。
+ * 见 `docs/plan/2026-11-12-yellow-state-verdict.md`。
+ */
 export const QUOTA = Object.freeze({
   AVAILABLE: 'available',
-  EXHAUSTED: 'exhausted',
   UNKNOWN: 'unknown',
   NOT_APPLICABLE: 'not_applicable',
 })
 
-/** 三色语义。 */
+/**
+ * 角色颜色语义：**V1 只有两色**。
+ *
+ * 2026-11-12 裁决：取消黄色及「确认无额度」的产品承诺。
+ * 原因：没有可信的实时额度源；用 `failureClass=quota` 推断颜色会让
+ * 「历史某次失败」伪装成「当前无额度」，违反「额度未知不得伪装」的边界。
+ *
+ * 语义：
+ * - 绿 = 未关闭且依赖就绪。**不声明额度充足，也不表示实时额度。**
+ * - 灰 = 已关闭，或依赖阻断 / 就绪状态未知。
+ *
+ * 未来只有取得可信、实时的额度事实源，才可重新评审第三色。
+ */
 export const ROLE_COLOR = Object.freeze({
   GRAY: 'gray',
-  YELLOW: 'yellow',
   GREEN: 'green',
 })
 
 /** 颜色的中文标签（展示层可直接用，避免各处硬编码）。 */
 export const ROLE_COLOR_LABEL = Object.freeze({
   gray: '灰',
-  yellow: '黄',
   green: '绿',
 })
 
@@ -256,20 +276,23 @@ export function deriveQuota(role, ctx = {}) {
 }
 
 /**
- * 三色派生（纯函数，矩阵可穷举）。
+ * 两色派生（纯函数，矩阵可穷举）。
  *
- * @param {{ userPreference: string, readiness: string, quota: string }} state
- * @returns {'gray' | 'yellow' | 'green'}
+ * **2026-11-12 裁决**：V1 只有绿 / 灰。黄色与 `quota=exhausted` 已删除 ——
+ * 没有可信的实时额度源，用失败记录推断颜色会把「历史某次失败」
+ * 伪装成「当前无额度」。
+ *
+ * `quota` 参数仍保留（调用方可能传），但**不再影响颜色** ——
+ * 它只作为诊断信息存在，绝不参与状态投影。
+ *
+ * @param {{ userPreference: string, readiness: string, quota?: string }} state
+ * @returns {'gray' | 'green'}
  */
-export function deriveRoleColor({ userPreference, readiness, quota } = /** @type {any} */ ({})) {
+export function deriveRoleColor({ userPreference, readiness } = /** @type {any} */ ({})) {
   if (userPreference === USER_PREFERENCE.DISABLED || readiness !== READINESS.READY) {
     return ROLE_COLOR.GRAY
   }
-  if (quota === QUOTA.EXHAUSTED) return ROLE_COLOR.YELLOW
-  if (quota === QUOTA.AVAILABLE || quota === QUOTA.UNKNOWN || quota === QUOTA.NOT_APPLICABLE) {
-    return ROLE_COLOR.GREEN
-  }
-  return ROLE_COLOR.GRAY
+  return ROLE_COLOR.GREEN
 }
 
 /**
@@ -308,7 +331,7 @@ function legacyAvailability(role, userPreference, readiness, reason) {
  *   readiness: 'ready' | 'blocked' | 'unknown',
  *   readinessReason: string,
  *   quota: 'available' | 'exhausted' | 'unknown' | 'not_applicable',
- *   color: 'gray' | 'yellow' | 'green',
+ *   color: 'gray' | 'green',
  *   availability: string,
  * }}
  */

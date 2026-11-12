@@ -575,11 +575,11 @@ window.__ModuleLoader__.load({
         readiness:
           readiness === 'ready' || readiness === 'blocked' ? readiness : 'unknown',
         readinessReason: asString(source.readinessReason) || 'PROVIDER_EVIDENCE_MISSING',
+        // quota 只保留诊断值（V1 裁决 2026-11-12：不再有 exhausted，它不参与颜色）
         quota:
-          quota === 'available' || quota === 'exhausted' || quota === 'not_applicable'
-            ? quota
-            : 'unknown',
-        color: color === 'green' || color === 'yellow' ? color : 'gray',
+          quota === 'available' || quota === 'not_applicable' ? quota : 'unknown',
+        // 两色（V1 裁决）：只认 green / gray，其它一律按 gray
+        color: color === 'green' ? 'green' : 'gray',
         availability: asString(source.availability) || 'unknown',
       }
     }
@@ -727,20 +727,19 @@ window.__ModuleLoader__.load({
      *   label: string,
      *   title?: string,
      *   disabled?: boolean,
-     *   color?: 'gray' | 'yellow' | 'green',
+     *   color?: 'gray' | 'green',
      *   onChange?: (next: boolean) => void,
      * }} props
      */
     function Switch(props) {
       const checked = props?.checked === true
-      const color = props?.color === 'green' || props?.color === 'yellow' ? props.color : 'gray'
+      // V1 两色（2026-11-12 裁决）：只认 green / gray
+      const color = props?.color === 'green' ? 'green' : 'gray'
       const offTrack = 'var(--dsw-alias-border-l4)'
       const onTrack =
         color === 'green'
           ? 'var(--dsw-alias-state-success-primary)'
-          : color === 'yellow'
-            ? 'var(--dsw-alias-state-warn-primary)'
-            : 'var(--dsw-alias-label-tertiary)'
+          : 'var(--dsw-alias-label-tertiary)'
       const disabled = props?.disabled === true
       return jsxs('button', {
         type: 'button',
@@ -969,9 +968,10 @@ window.__ModuleLoader__.load({
       // 角色列表
       roleOpenDetail: '查看角色详情',
       roleEnabled: '已启用',
+      // V1 裁决（2026-11-12）：颜色只表示启用与依赖就绪，不表示实时额度。
+      roleColorNote: '颜色仅表示启用与依赖就绪状态，不表示实时额度。',
       roleDisabled: '已关闭',
       roleBlocked: '依赖阻断',
-      roleQuota: '额度耗尽',
       roleUnknown: '状态未知',
       roleSwitchLabel: '启用角色',
       noRolesDetail: '没有可编辑的角色',
@@ -1069,9 +1069,10 @@ window.__ModuleLoader__.load({
       noCliStates: 'CLI states unavailable (role configuration is unaffected)',
       roleOpenDetail: 'Open role detail',
       roleEnabled: 'Enabled',
+      roleColorNote:
+        'Colors only indicate enablement and dependency readiness, not real-time quota.',
       roleDisabled: 'Off',
       roleBlocked: 'Blocked',
-      roleQuota: 'Quota exhausted',
       roleUnknown: 'Unknown',
       roleSwitchLabel: 'Enable role',
       noRolesDetail: 'No editable roles',
@@ -2191,22 +2192,25 @@ window.__ModuleLoader__.load({
       return source || 'default'
     }
 
-    /** 三色 → Tag tone（只用宿主已有 tone，不新增色板）。 */
+    /** 两色 → Tag tone（只用宿主已有 tone，不新增色板）。V1 裁决：已无黄色。 */
     function roleColorTone(color) {
       if (color === 'green') return 'success'
-      if (color === 'yellow') return 'warning'
       return 'neutral'
     }
 
     /**
-     * 阻断/额度原因的**一行**说明（只用于 Tooltip 与列表下方说明，不展开细节）。
+     * 阻断原因的**一行**说明（只用于 Tooltip 与列表下方说明，不展开细节）。
+     *
+     * 2026-11-12 裁决：删掉 `quota === 'exhausted'` → 「额度耗尽」分支。
+     * 额度不是可观测事实，不该出现在状态说明里；`failureClass=quota`
+     * 仍留在 run 记录与派单诊断中。
+     *
      * @param {(key: string) => string} t
      * @param {any} role
      */
     function roleReasonOf(t, role) {
       const state = asObject(role?.state)
       if (role?.enabled === false) return t('roleDisabled')
-      if (state.quota === 'exhausted') return t('roleQuota')
       if (state.readiness === 'blocked') {
         const reason = asString(state.readinessReason)
         return reason ? `${t('roleBlocked')} · ${reason}` : t('roleBlocked')

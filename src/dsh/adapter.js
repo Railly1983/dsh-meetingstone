@@ -289,44 +289,49 @@ function callOnFinish(holder) {
  * @param {string} args.childId
  * @param {number} args.startedAt
  */
-export function buildRunBase({ input, role, provider, childId, startedAt }) {
+export function buildRunBase({ input, role, provider, childId, startedAt, agentOptions }) {
   // P0-B：TaskSpec / ContextPack 摘要（截断后落盘，供 list_runs / get_task 展示标题）
   const taskSpec = summarizeTaskSpec(input?.taskSpec)
   const contextPack = summarizeContextPack(input?.contextPack)
-  // 生效模型：**必须同时看 model 和 llmModel**（2026-11-12 路由矩阵缺口 2）。
+  // ── 路由证据闭环（2026-11-12 路由矩阵缺口 2/3）────────────────────────
   //
-  // 历史实现只读 `role.channel.model`，但 in-process 通道的模型声明在 `llmModel`
-  // （见 src/config.js 的 ChannelInstanceSchema 与 buildChildAgentOptions 的注释）。
-  // 后果：八戒（ch-inprocess）的 run 记录里 model 恒为 null，
-  // **路由证据无法闭环** —— 明明派单时确实钉了 workbuddy/deepseek-v4.1-flash，
-  // 记录里却看不到，只能靠静态推断。
+  // 问题：`model` 字段只取 `role.channel.model`，但 in-process 通道的模型声明在
+  // `llmModel`，**而且实际生效值在 `agentOptions` 里**（见 buildChildAgentOptions）。
+  // 后果：八戒派单时明明钉了 workbuddy/deepseek-v4.1-flash，记录里 `model` 却是 null
+  // → 路由矩阵只能静态推断，无法动态验证。
+  //
+  // 修法（按悟空 2026-11-12 方案，优于我最初的做法）：
+  // **新增 effectiveProvider / effectiveModel / reasoningEffort 三个字段，
+  //  `model` 原样保留不动。**
+  //
+  // 为什么不重载 `model`：`model` 的历史语义是「通道声明的模型」，
+  // 存量 123 条记录都按这个理解。改它的含义会让新旧记录无法直接对比，
+  // 也说不清某条记录里的 `model` 到底是声明值还是生效值。
+  //
+  // 三个新字段的取值语义：
+  // | 通道 | effectiveProvider | effectiveModel | reasoningEffort |
+  // |------|-------------------|----------------|-----------------|
+  // | ACP（唐僧/悟空/沙僧/小白） | null（无宿主 LLM 覆盖） | channel.model | channel.reasoning |
+  // | in-process（八戒） | workbuddy | deepseek-v4.1-flash | high |
   const channel = role?.channel
+  const nonEmpty = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null)
+  const effectiveProvider = nonEmpty(agentOptions?.provider) ?? null
   const effectiveModel =
-    (typeof channel?.llmModel === 'string' && channel.llmModel.trim()
-      ? channel.llmModel.trim()
-      : null) ??
-    (typeof channel?.model === 'string' && channel.model.trim() ? channel.model.trim() : null)
-  // 生效 provider：in-process 用 llmProvider（宿主 LLM provider），外部 CLI 用 provider。
-  // 两者语义不同：前者是「跑哪个模型的网关」，后者是「用哪个子进程协议」。
-  const effectiveLlmProvider =
-    typeof channel?.llmProvider === 'string' && channel.llmProvider.trim()
-      ? channel.llmProvider.trim()
-      : null
-  const effectiveReasoning =
-    typeof channel?.reasoning === 'string' && channel.reasoning.trim()
-      ? channel.reasoning.trim()
-      : null
+    nonEmpty(agentOptions?.model) ?? nonEmpty(channel?.model) ?? nonEmpty(channel?.llmModel) ?? null
+  const reasoningEffort =
+    nonEmpty(agentOptions?.reasoningEffort) ?? nonEmpty(channel?.reasoning) ?? null
   return {
     childId,
     projectRoot: typeof input?.context?.projectRoot === 'string' ? input.context.projectRoot : null,
     role: role?.roleId ?? null,
     channel: role?.channel?.kind ?? null,
     provider,
-    model: effectiveModel,
-    // 路由证据闭环（2026-11-12）：把「跑在哪个 LLM 网关」和「思考强度」也落盘。
-    // 此前它们只在内存里，run 记录看不到 → 路由矩阵只能静态证明，无法动态验证。
-    ...(effectiveLlmProvider ? { llmProvider: effectiveLlmProvider } : {}),
-    ...(effectiveReasoning ? { reasoning: effectiveReasoning } : {}),
+    // 历史字段：通道声明的模型。**语义不变，不重载**（见上方说明）。
+    model: nonEmpty(channel?.model) ?? null,
+    // 生效路由三件套（新增）：这才是「派单实际用了什么」。
+    effectiveProvider,
+    effectiveModel,
+    reasoningEffort,
     status: 'running',
     createdAt: startedAt,
     startedAt,
@@ -1213,7 +1218,7 @@ export function createDshAdapter(ctx, options = {}) {
         )
       }
       const startedAt = now()
-      const lateRunBase = buildRunBase({ input, role: effectiveRole, provider, childId: lateChildId, startedAt })
+      const lateRunBase = buildRunBase({ input, role: effectiveRole, provider, childId: lateChildId, startedAt, agentOptions: childAgentOptions?.agentOptions })
       /** @type {any} */
       const lateHandle = {
         activation,
@@ -1273,7 +1278,7 @@ export function createDshAdapter(ctx, options = {}) {
       timer = setTimeout(() => controller.abort(new Error('meetingstone: timeout')), timeoutMs)
     }
     /** 落盘用的基础信息（不含终态），cancel 也需要它 */
-    const runBase = buildRunBase({ input, role: effectiveRole, provider, childId, startedAt })
+    const runBase = buildRunBase({ input, role: effectiveRole, provider, childId, startedAt, agentOptions: childAgentOptions?.agentOptions })
     // 先登记句柄，再建 Job：hooks.cancel 要能按 childId 找到同一个 activation。
     handles.set(childId, {
       activation,

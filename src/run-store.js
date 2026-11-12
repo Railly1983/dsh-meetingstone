@@ -617,6 +617,12 @@ export function createRunStore(options) {
       channel: record.channel ?? null,
       provider: record.provider ?? null,
       model: record.model ?? null,
+      // 生效路由三件套（2026-11-12 路由矩阵缺口 2/3）：这才是「派单实际用了什么」。
+      // `model` 是通道声明的模型（历史语义，不重载）；这三个是生效值。
+      // 旧记录没有这些键 → 读侧得 null，不报错（纯增量，schemaVersion 仍为 1）。
+      effectiveProvider: record.effectiveProvider ?? null,
+      effectiveModel: record.effectiveModel ?? null,
+      reasoningEffort: record.reasoningEffort ?? null,
       status: record.status,
       stopReason: record.stopReason ?? null,
       // 宿主原生 Job id（可选）：派单成功且宿主 jobs 服务可用时写入，
@@ -982,6 +988,10 @@ export function createRunStore(options) {
         channel: parsed.channel ?? null,
         provider: parsed.provider ?? null,
         model: parsed.model ?? null,
+        // 生效路由（2026-11-12）：列表也带上，否则每次要靠 get_task 二次查。
+        effectiveProvider: parsed.effectiveProvider ?? null,
+        effectiveModel: parsed.effectiveModel ?? null,
+        reasoningEffort: parsed.reasoningEffort ?? null,
         status: parsed.status ?? 'unknown',
         ...(parsed.interrupted === true ? { interrupted: true } : {}),
         // P0-B/P0-C：列表里展示任务名与结构化结果摘要（不返回长文）
