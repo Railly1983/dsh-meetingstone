@@ -876,6 +876,12 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
           : {}),
         // C3/§6：Team 任务外键（单向关联；仅随记录落盘，不写回 Team 任务板）
         ...(typeof req.taskId === 'string' && req.taskId ? { taskId: req.taskId } : {}),
+        // 上游任务 id（2026-11-12 第六轮真机测试暴露）：
+        // `meetingstone_steer_task` 重开时传 `upstreamChildId`，但这里没透明传递，
+        // 于是新任务的记录里该字段恒为 null，无法追溯「这次重开接的是哪个原任务」。
+        ...(typeof req.upstreamChildId === 'string' && req.upstreamChildId
+          ? { upstreamChildId: req.upstreamChildId }
+          : {}),
         // 隔离模式下 cwd 必须是工作树；显式传入的 cwd 不能绕过隔离
         cwd: taskCwd,
         timeoutMs: role.timeoutMs,

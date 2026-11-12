@@ -292,3 +292,44 @@ test('cancel 报没有句柄、但磁盘已终态 → 允许重开（不被异�
   assert.equal(out.stopConfirmed, true)
   assert.equal(dispatches.length, 1)
 })
+
+// ── 接替说明（2026-11-12 第七轮真机测试暴露）─────────────────────────
+// 新任务是全新会话，不知道有原任务。若原任务无产出，它只看到裸指令，
+// 会判断「这要求我虚构结果」并合理拒绝执行。
+
+test('重开任务必须带接替说明（否则新任务会拒绝执行）', async () => {
+  const noOutput = { ...ACP_RECORD, result: null }
+  const { tool, dispatches } = harness({ record: noOutput })
+  await tool.execute({ childId: 'old-child', instruction: '输出「验证通过」' }, EXEC)
+  const task = dispatches[0].task
+  assert.match(task, /任务接替说明/, '必须告诉它这是接替')
+  assert.match(task, /old-child/, '必须给出原任务 id')
+  assert.match(task, /尚未产出任何结果/, '必须说明没有上一轮上下文')
+  assert.match(task, /不需要复述或"验证"任何历史过程/, '要明确叫它别虚构验证')
+  assert.match(task, /新指示/, '要有明确的分段')
+  assert.match(task, /输出「验证通过」/, '新指示本身要保留')
+})
+
+test('有产出时：接替说明仍然有，但措辞不同（指向重放块）', async () => {
+  const { tool, dispatches } = harness({ record: ACP_RECORD }) // ACP_RECORD 有 result
+  await tool.execute({ childId: 'old-child', instruction: 'x' }, EXEC)
+  const task = dispatches[0].task
+  assert.match(task, /任务接替说明/)
+  assert.match(task, /已有产出附在下方/)
+  assert.doesNotMatch(task, /尚未产出任何结果/)
+})
+
+test('无产出时 note 要提示「新任务只能看到你的新指示」', async () => {
+  const noOutput = { ...ACP_RECORD, result: null }
+  const { tool } = harness({ record: noOutput })
+  const out = await tool.execute({ childId: 'old-child', instruction: 'x' }, EXEC)
+  assert.equal(out.replayedBytes, 0)
+  assert.match(out.note, /尚无产出/, 'note 必须提示这一点')
+  assert.match(out.note, /建议把必要背景写进 instruction/)
+})
+
+test('有产出时 note 不追加「无产出」提示', async () => {
+  const { tool } = harness({ record: ACP_RECORD })
+  const out = await tool.execute({ childId: 'old-child', instruction: 'x' }, EXEC)
+  assert.doesNotMatch(out.note, /尚无产出/)
+})

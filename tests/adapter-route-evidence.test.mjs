@@ -232,3 +232,60 @@ test('upstreamChildId：都没有时不写这个键（不塞 null）', () => {
   const r = buildRunBase({ input: {}, role: null, provider: 'acp', childId: 'c', startedAt: START })
   assert.equal('upstreamChildId' in r, false)
 })
+
+// ── dispatcher 的 upstreamChildId 透传（2026-11-12 第六轮真机测试暴露）──
+// adapter 已经能读 input.upstreamChildId，但 dispatcher.dispatch 构造
+// adapter.start 入参时**没把它列进去** → 一路丢失到落盘。
+
+test('dispatcher 必须把 req.upstreamChildId 透传给 adapter.start', async () => {
+  const { createDispatcher } = await import('../src/dispatch/dispatcher.js')
+  /** @type {any[]} */
+  const started = []
+  const d = createDispatcher({
+    registry: {
+      list: () => [],
+      resolve: () => ({ roleId: 'role-a', name: 'A', enabled: true, timeoutMs: 1000 }),
+    },
+    adapter: {
+      async start(input) {
+        started.push(input)
+        return { taskRef: { childId: 'new-child' } }
+      },
+    },
+    limits: { defaultIsolation: 'none', serializeWrites: false },
+  })
+  await d.dispatch({
+    role: 'role-a',
+    task: 't',
+    projectKey: 'p',
+    isolation: 'none',
+    upstreamChildId: 'prev-child',
+  })
+  assert.equal(started.length, 1)
+  assert.equal(
+    started[0].upstreamChildId,
+    'prev-child',
+    'dispatcher 必须透传，否则 adapter 读不到、落盘恒为 null',
+  )
+})
+
+test('dispatcher：没有 upstreamChildId 时不塞这个键', async () => {
+  const { createDispatcher } = await import('../src/dispatch/dispatcher.js')
+  /** @type {any[]} */
+  const started = []
+  const d = createDispatcher({
+    registry: {
+      list: () => [],
+      resolve: () => ({ roleId: 'role-a', name: 'A', enabled: true, timeoutMs: 1000 }),
+    },
+    adapter: {
+      async start(input) {
+        started.push(input)
+        return { taskRef: { childId: 'x' } }
+      },
+    },
+    limits: { defaultIsolation: 'none', serializeWrites: false },
+  })
+  await d.dispatch({ role: 'role-a', task: 't', projectKey: 'p', isolation: 'none' })
+  assert.equal('upstreamChildId' in started[0], false)
+})
