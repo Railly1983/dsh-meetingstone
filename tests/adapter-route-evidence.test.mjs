@@ -145,3 +145,48 @@ test('兼容性：既有字段语义完全不变', () => {
   assert.equal(r.createdAt, START)
   assert.equal(r.startedAt, START)
 })
+
+// ── 项目标识（2026-11-12 第五轮真机测试暴露）──────────────────────────
+// buildRunBase 一直有写 projectRoot，但 run-store 白名单没收 → 落盘时丢弃。
+// 后果：steer 重开时拿不到项目根，报 PROJECT_ROOT_UNKNOWN。
+
+test('projectRoot：从 input 顶层取（派单的实际形状）', () => {
+  const r = buildRunBase({
+    input: { projectRoot: 'D:/proj' },
+    role: null,
+    provider: 'acp',
+    childId: 'c1',
+    startedAt: START,
+  })
+  assert.equal(r.projectRoot, 'D:/proj', '顶层 projectRoot 必须落盘')
+  assert.equal(r.projectKey, 'd:/proj', 'projectKey 要归一化（小写、正斜杠）')
+})
+
+test('projectRoot：兼容 context.projectRoot 旧写法', () => {
+  const r = buildRunBase({
+    input: { context: { projectRoot: 'D:/old' } },
+    role: null,
+    provider: 'acp',
+    childId: 'c1',
+    startedAt: START,
+  })
+  assert.equal(r.projectRoot, 'D:/old')
+  assert.equal(r.projectKey, 'd:/old')
+})
+
+test('projectKey 归一化：反斜杠与尾斜杠都处理', () => {
+  const r = buildRunBase({
+    input: { projectRoot: 'D:\\Proj\\Sub\\' },
+    role: null,
+    provider: 'acp',
+    childId: 'c1',
+    startedAt: START,
+  })
+  assert.equal(r.projectKey, 'd:/proj/sub', '反斜杠转正斜杠、去尾斜杠、转小写')
+})
+
+test('没有 projectRoot 时两个字段都是 null（不编造）', () => {
+  const r = buildRunBase({ input: {}, role: null, provider: 'acp', childId: 'c1', startedAt: START })
+  assert.equal(r.projectRoot, null)
+  assert.equal(r.projectKey, null)
+})

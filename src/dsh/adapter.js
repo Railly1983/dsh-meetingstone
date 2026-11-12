@@ -320,9 +320,20 @@ export function buildRunBase({ input, role, provider, childId, startedAt, agentO
     nonEmpty(agentOptions?.model) ?? nonEmpty(channel?.model) ?? nonEmpty(channel?.llmModel) ?? null
   const reasoningEffort =
     nonEmpty(agentOptions?.reasoningEffort) ?? nonEmpty(channel?.reasoning) ?? null
+  // 项目根：派单时工具层把 `projectRoot` 放在 input 顶层（见 register.js 的 dispatch input），
+  // 也兼容放在 `context.projectRoot` 的旧写法。
+  // 2026-11-12 第五轮真机测试暴露：之前只读 `context.projectRoot`，而实际派单传的是
+  // 顶层 `projectRoot` → 记录里恒为 null → steer 重开报 PROJECT_ROOT_UNKNOWN。
+  const projectRoot =
+    nonEmpty(input?.projectRoot) ?? nonEmpty(input?.context?.projectRoot) ?? null
   return {
     childId,
-    projectRoot: typeof input?.context?.projectRoot === 'string' ? input.context.projectRoot : null,
+    projectRoot,
+    // 并发计数键：与 dispatcher 的 normalizeProjectKey 语义一致（小写、正斜杠、去尾斜杠）。
+    // 在这里落一份，steer 重开时可直接复用，不必再推导。
+    projectKey: projectRoot
+      ? projectRoot.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+      : null,
     role: role?.roleId ?? null,
     channel: role?.channel?.kind ?? null,
     provider,

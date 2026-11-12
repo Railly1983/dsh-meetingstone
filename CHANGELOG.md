@@ -2,6 +2,35 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.18] - 2026-11-12
+
+### Fixed
+
+- **run 记录缺 `projectRoot` / `projectKey`**（alpha.17 第五轮真机测试暴露）。
+  `buildRunBase` 一直有写 `projectRoot`，但 **`run-store` 的字段白名单没有它** →
+  落盘时被静默丢弃。后果：`meetingstone_steer_task` 重开时拿不到项目根，
+  报 `PROJECT_ROOT_UNKNOWN`（"请求了工作树隔离，但无法确定项目根"）。
+
+  另一处：`buildRunBase` 之前只读 `input.context.projectRoot`，而派单时工具层
+  把 `projectRoot` 放在 **input 顶层** → 值本来就取不到。两处一起修。
+
+- 顺带把 `projectKey` 也在记录里落一份（归一化：小写、正斜杠、去尾斜杠），
+  steer 重开时可直接复用，不必再推导。
+
+### 至此 steer 的外部 CLI 路径已打通
+
+五轮真机测试依次暴露并修掉：
+1. repo 层字段读不全（内存 vs 磁盘）
+2. 重开缺 `context.agent` / `projectKey` / `sessionId` / `isolation`
+3. `stopConfirmed` 取值用错键（`.ok` vs `stopConfirmed`）
+4. 原任务没停也照样重开（已加门禁）
+5. 停止判定的证据顺序（内存同步写 vs 磁盘异步写）
+6. **`projectRoot` 没进 run-store 白名单 + 取值路径错**
+
+### 测试
+
+- 629 → 633 tests
+
 ## [0.1.0-alpha.17] - 2026-11-12
 
 ### Fixed

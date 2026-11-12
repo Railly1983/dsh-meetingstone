@@ -617,6 +617,13 @@ export function createRunStore(options) {
       channel: record.channel ?? null,
       provider: record.provider ?? null,
       model: record.model ?? null,
+      // 项目标识（2026-11-12 第五轮真机测试暴露）：
+      // `buildRunBase` 一直有写 `projectRoot`，但白名单没收 → 落盘时被丢弃。
+      // 后果：`meetingstone_steer_task` 重开时拿不到项目根，
+      // 报 `PROJECT_ROOT_UNKNOWN`（"请求了工作树隔离，但无法确定项目根"）。
+      // 现在补进白名单；旧记录没有这两个键 → 读侧得 null，不报错。
+      projectRoot: record.projectRoot ?? null,
+      projectKey: record.projectKey ?? null,
       // 生效路由三件套（2026-11-12 路由矩阵缺口 2/3）：这才是「派单实际用了什么」。
       // `model` 是通道声明的模型（历史语义，不重载）；这三个是生效值。
       // 旧记录没有这些键 → 读侧得 null，不报错（纯增量，schemaVersion 仍为 1）。
