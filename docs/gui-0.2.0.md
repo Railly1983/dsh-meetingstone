@@ -537,19 +537,41 @@ typeSymbol 一致；真实 `TypertRegistry` 接受 manifest 且 `dispose()` 后�
 错误：首屏一行 `[code] message`（`nowrap + ellipsis`，全文在 `title`），详情按钮展开
 时间/来源；无错误不渲染 alert、不占位。
 
-### 10.2 角色列表（`sidebar.right.pane.tab`）
+### 10.2 角色列表（`settings.section` 内联的全局角色管理）
 
-- 每行只有角色名（可点击，进入同栏详情）+ 三色二态 Switch；**不显示**模型、别名、通道细节。
-- 三色来自 Host `deriveRoleView`（`src/gui/state-model.js`）：
+> **2026-11-12 口径变更（唐僧裁决，用户授权）**：本节已从「三色二态」收敛为「两色二态」。
+> 黄色及「确认无额度」的产品承诺**正式撤回**。决策依据见
+> `docs/plan/2026-11-12-yellow-state-verdict.md`。
+> 变更要点：删 `ROLE_COLOR.YELLOW` / `QUOTA.EXHAUSTED` / `roleQuota` 文案与渲染分支；
+> `quota` 保留为诊断值（available / unknown / not_applicable），**不参与颜色派生**。
+> 原有「三色」表述（含本节历史版本与 §7/§9 的旧描述）全部作废。
+
+- 每行只有角色名（可点击，进入详情）+ 两色二态 Switch；**不显示**模型、别名、通道细节。
+- 颜色来自 Host `deriveRoleView`（`src/gui/state-model.js`），**只有两种**：
   - 灰：`userPreference=disabled` 或 `readiness != ready`；
-  - 黄：非 disabled + ready + `quota=exhausted`；
-  - 绿：非 disabled + ready + quota 为 available/unknown/not_applicable。
-  Switch 只有开/关两态，颜色只表达上述语义（不是自绘三态控件）。
-- 阻断/额度原因：Switch `title` + 行下一行小字说明（`readinessReason` / `quota`），不展开细节。
-- 列表开关只调用 `setSessionOverride(sessionId, roleId, 'enabled', next)`：
-  - 写的是**当前会话**覆盖，不碰全局/项目；
-  - 等值写入由 Host `diffRoleOverride` 归一为“删除覆盖”（恢复继承）；
-  - 失败原样返回错误，不 reload、不改变列表状态；成功后才 reload。
+  - 绿：非 disabled + ready。**不声明额度充足，也不表示实时额度。**
+  Switch 只有开/关两态，颜色只是只读状态投影。
+- 统一说明（放在角色列表区顶部，不在每行重复）：
+  「颜色仅表示启用与依赖就绪状态，不表示实时额度。」
+  （字典键 `roleColorNote`）
+- 阻断原因：Switch `title` + 行下一行小字说明（`readinessReason`），不展开细节。
+- **`failureClass=quota` 不进入颜色矩阵**：它是历史失败诊断（包含额度 / 频率限制等情形），
+  继续留在 run 记录与派单提示里，但不作为「当前额度」的证据。
+- 为什么不做第三色（记录在案，避免重复踩坑）：
+  1. 当前 DSH 宿主**没有可用的额度查询 API**；`QUOTA_EXCEEDED_CODE` 等常量与
+     `isQuotaExceededError()` 是错误分类，不是余额/剩余额度接口。
+  2. 用 `failureClass=quota` 推断会让「历史某次失败」伪装成「当前无额度」，
+     违反「额度未知不得伪装」的边界（`src/gui/state-model.js:5-17`）。
+  3. 实现方案 B 并非低成本：`createGuiState()` 无 `listPersistedRuns` 输入，
+     设置页 Remote 无会话 `cwd`，而 run 记录按项目根隔离 ——
+     要正确实现必须新增项目身份传递或跨项目聚合规则。
+  4. 只有未来出现**可信、实时**的额度事实源，才重新评审第三色；
+     不得默认接各 CLI 私有 API。
+- **会话级覆盖已下线（B3）**：列表开关只调 `updateGlobalRole(roleId, { enabled })`，
+  写的是全局配置（`profile`），校验保留二次确认。旧 `setSessionOverride` 路径已删除。
+  失败原样返回错误，不 reload、不改变列表状态；成功后才 reload。
+- 项目级 `roleOverrides` 同样不再支持：`resolveEffectiveConfig` 会主动剥掉并报
+  `PROJECT_ROLES_NOT_SUPPORTED`（见 `src/session/config.js` 的注释）。
 
 ### 10.3 二级详情（会话 / 全局两 scope 复用）
 
