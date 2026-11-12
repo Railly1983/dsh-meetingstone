@@ -65,16 +65,19 @@ test('没有 probes 时，所有 CLI 的来源都不能是 discovered', () => {
   }
 })
 
-test('createDefaultProbes 目前只实现了 codex 与 dsh（如实记录现状）', () => {
-  // 这条测试的价值：**如果将来有人加了 codebuddy/claude 的 probe，这里会失败**，
-  // 提醒他同步更新本测试和文档，而不是让「有 probe」这件事悄悄发生。
+test('createDefaultProbes 现在有 codex / dsh / codebuddy（如实记录现状）', () => {
+  // 这条测试的价值：**probe 实现变化时必须显式改这里**，
+  // 提醒同步更新文档与该 CLI 的 source 标注，而不是让「有 probe」这件事悄悄发生。
+  //
+  // 2026-11-12 变更：新增 codebuddy 的 ACP 探测（session/new 拿 availableModels）。
+  // claude 仍无 probe —— 它只有 --model <alias>（fable/opus/sonnet），不可枚举。
   const probes = createDefaultProbes({})
   const implemented = Object.keys(probes).sort()
   assert.deepEqual(
     implemented,
-    ['codex', 'dsh'],
+    ['codebuddy', 'codex', 'dsh'],
     `probe 实现变了：现在是 ${implemented.join(', ')}。` +
-      '如果新增了 codebuddy / claude 的探测，请同时更新本断言与该 CLI 的 source 标注。',
+      '如果新增了 claude 的探测，请同时更新本断言与该 CLI 的 source 标注。',
   )
 })
 
@@ -153,4 +156,60 @@ test('refresh 在没有对应 probe 时不抛错，只记 errors', async () => {
   assert.ok(Array.isArray(result.errors), 'errors 必须是数组')
   assert.ok(Array.isArray(result.refreshed), 'refreshed 必须是数组')
   // 关键：不抛异常
+})
+
+
+// ── CodeBuddy ACP 探测（2026-11-12 新增）────────────────────────────
+// 依据：ACP 规范的 session/new 返回 models.availableModels；
+// 社区实测（farm-out observed-behaviour.md）确认「模型列表随 session 一起来」。
+// 本机实测：20 个模型，5 秒左右，thought_level = high/enabled。
+
+test('probeCodebuddyModels 缺可执行文件时抛明确错误，不静默', async () => {
+  const { probeCodebuddyModels } = await import('../src/cli/capabilities.js')
+  await assert.rejects(
+    () => probeCodebuddyModels({}),
+    (error) => {
+      assert.match(String(error?.message ?? error), /CODEBUDDY_EXECUTABLE_MISSING/)
+      return true
+    },
+  )
+})
+
+test('probeCodebuddyModels 进程启动失败时优雅退化', async () => {
+  const { probeCodebuddyModels } = await import('../src/cli/capabilities.js')
+  // 注入一个必然失败的 spawn
+  const failingSpawn = () => {
+    throw new Error('模拟 spawn 失败')
+  }
+  await assert.rejects(
+    () => probeCodebuddyModels({ executable: 'C:/fake/codebuddy', spawnImpl: failingSpawn }),
+    (error) => {
+      assert.match(String(error?.message ?? error), /CODEBUDDY_SPAWN_FAILED/)
+      return true
+    },
+  )
+})
+
+test('probeCodebuddyModels 子进程提前退出时优雅退化（不挂住）', async () => {
+  const { probeCodebuddyModels } = await import('../src/cli/capabilities.js')
+  const { EventEmitter } = await import('node:events')
+  // 造一个立刻 exit 的假子进程
+  const fakeChild = new EventEmitter()
+  fakeChild.stdout = new EventEmitter()
+  fakeChild.stderr = new EventEmitter()
+  fakeChild.stdin = { write() {} }
+  fakeChild.kill = () => {}
+  setTimeout(() => fakeChild.emit('exit', 1), 10)
+  await assert.rejects(
+    () =>
+      probeCodebuddyModels({
+        executable: 'C:/fake/codebuddy',
+        spawnImpl: () => fakeChild,
+        timeoutMs: 3000,
+      }),
+    (error) => {
+      assert.match(String(error?.message ?? error), /CODEBUDDY_EXITED_EARLY/)
+      return true
+    },
+  )
 })

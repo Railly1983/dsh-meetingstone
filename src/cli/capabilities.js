@@ -1131,6 +1131,238 @@ export function createCliCapabilityCatalog(options = {}) {
 }
 
 /**
+ * 探测 CodeBuddy 的模型与思考强度：走 **ACP 的 session/new**。
+ *
+ * ## 为什么这条路可行（都有出处）
+ *
+ * 1. **ACP 规范**（agentclientprotocol.com/protocol）：
+ *    `session/new` 的 response 含
+ *      `models: SessionModelState | null`
+ *      `models.availableModels: List of available model objects`
+ *      `models.currentModelId: string`
+ *
+ * 2. **社区实测**（farm-out 的 observed-behaviour.md，2026-09-23）：
+ *    > "The model list comes with the session. session/new returns the available
+ *    >  model ids and a set of config options (model, thought_level, and
+ *    >  context_window for some models). No inference is needed to read them,
+ *    >  which is what probe, models and doctor use."
+ *
+ * 3. **本机实测（2026-11-12，本文件作者）**：
+ *    - 启动：`node <codebuddy-pkg>/bin/codebuddy --acp`
+ *      （**必须**用 `bin/codebuddy`；用 `lib/node/index.js` 会因 ESM 缺 `.js` 后缀崩溃）
+ *    - 发 `initialize` → 正常返回 `agentCapabilities`
+ *    - 发 `session/new` → 返回 20 个模型的 `availableModels`
+ *    - `configOptions` 里 `thought_level` 的可选值是 `high` / `enabled`
+ *    - 每个模型带积分倍率（在 `description` 里，形如 `x0.11 credits`）
+ *
+ * ## 与「静态配置」的区别
+ *
+ * 之前 codebuddy 没有 probe，模型只能来自 profile 配置（用户看到 4 个）。
+ * 走 ACP 后能拿到账号实际可用的全部模型（实测 20 个），且带积分倍率。
+ *
+ * @param {object} opts
+ * @param {string} opts.executable codebuddy 入口脚本绝对路径
+ * @param {string} [opts.runtimeExecutable] 用哪个 node 跑它（默认 process.execPath）
+ * @param {string} [opts.cwd] session/new 的 cwd
+ * @param {number} [opts.timeoutMs] 整体超时（默认 30s）
+ * @param {any} [opts.spawnImpl] 测试注入（默认 node:child_process.spawn）
+ * @returns {Promise<Array<{ id: string, label?: string, description?: string, strengths?: string[] }>>}
+ */
+export async function probeCodebuddyModels({
+  executable,
+  runtimeExecutable,
+  cwd,
+  timeoutMs = 30_000,
+  spawnImpl = nodeSpawn,
+} = /** @type {any} */ ({})) {
+  if (!executable || typeof executable !== 'string') {
+    throw new Error('CODEBUDDY_EXECUTABLE_MISSING: 缺少 codebuddy 入口脚本路径')
+  }
+  return new Promise((resolve, reject) => {
+    let child
+    try {
+      child = spawnImpl(runtimeExecutable || process.execPath, [executable, '--acp'], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+        env: {
+          ...process.env,
+          // 社区实测：继承这两个变量会让 CLI 试着绑一个已占用的端口然后卡住
+          SERVER__PORT: '',
+          SERVER__HOST: '',
+        },
+      })
+    } catch (err) {
+      reject(new Error(`CODEBUDDY_SPAWN_FAILED: ${err instanceof Error ? err.message : String(err)}`))
+      return
+    }
+
+    let buffer = ''
+    let settled = false
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    let timer = null
+    /** @type {string[]} */
+    const stderrTail = []
+    let nextId = 1
+
+    /** @param {Error} error */
+    const fail = (error) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      try {
+        child?.kill()
+      } catch {
+        /* ignore */
+      }
+      reject(error)
+    }
+
+    /** @param {any} value */
+    const done = (value) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      try {
+        child?.kill()
+      } catch {
+        /* ignore */
+      }
+      resolve(value)
+    }
+
+    timer = setTimeout(() => {
+      fail(
+        new Error(
+          `CODEBUDDY_MODEL_LIST_TIMEOUT（${timeoutMs}ms）` +
+            (stderrTail.length ? `；stderr: ${stderrTail.slice(-3).join(' | ')}` : ''),
+        ),
+      )
+    }, timeoutMs)
+
+    /** @param {any} message */
+    const send = (message) => {
+      try {
+        child.stdin.write(`${JSON.stringify(message)}\n`)
+      } catch (err) {
+        fail(new Error(`CODEBUDDY_STDIN_FAILED: ${err instanceof Error ? err.message : String(err)}`))
+      }
+    }
+
+    let initDone = false
+    let sessionSent = false
+
+    const handleMessage = (/** @type {any} */ msg) => {
+      if (!msg || typeof msg !== 'object') return
+      // initialize 的响应 → 紧接着发 session/new
+      if (msg.id === 1 && !initDone) {
+        initDone = true
+        if (msg.error) {
+          fail(new Error(`CODEBUDDY_INIT_FAILED: ${JSON.stringify(msg.error)}`))
+          return
+        }
+        sessionSent = true
+        send({
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'session/new',
+          params: { cwd: typeof cwd === 'string' && cwd ? cwd : process.cwd(), mcpServers: [] },
+        })
+        return
+      }
+      // session/new 的响应 → 提取模型
+      if (msg.id === 2 && sessionSent) {
+        if (msg.error) {
+          fail(new Error(`CODEBUDDY_SESSION_NEW_FAILED: ${JSON.stringify(msg.error)}`))
+          return
+        }
+        const result = msg.result ?? {}
+        const available = Array.isArray(result.models?.availableModels)
+          ? result.models.availableModels
+          : []
+        const configOptions = Array.isArray(result.configOptions) ? result.configOptions : []
+        const thoughtOption = configOptions.find((/** @type {any} */ o) => o && o.id === 'thought_level')
+        const strengths = Array.isArray(thoughtOption?.options)
+          ? thoughtOption.options.map((/** @type {any} */ o) => String(o?.value ?? o)).filter(Boolean)
+          : []
+        // **关键**：`availableModels[].id` 是**显示名**（如 `Hy4`、`Kimi-K3.1-Pro`），
+        // 不是能传给 `--model` 的 id。真正可用的是 `configOptions` 里
+        // `id === 'model'` 那一项的 `options[].value`（如 `hy4free`、`kimi-k3.1-pro`）。
+        //
+        // 2026-11-12 实测：两者按顺序一一对应，数量相同（各 20 个）。
+        // 如果数量不一致，退回用 availableModels 的 id（至少能显示，标 unknown 来源）。
+        const modelOption = configOptions.find((/** @type {any} */ o) => o && o.id === 'model')
+        const wireIds = Array.isArray(modelOption?.options)
+          ? modelOption.options.map((/** @type {any} */ o) => String(o?.value ?? o ?? '')).filter(Boolean)
+          : []
+        const useWireIds = wireIds.length === available.length
+
+        done(
+          available.map((/** @type {any} */ m, /** @type {number} */ index) => {
+            const displayId = String(m?.id ?? m?.name ?? '')
+            const wireId = useWireIds ? wireIds[index] : displayId
+            return {
+              // id 用于派单（--model 的值）；label 用于界面显示
+              id: wireId || displayId,
+              label: displayId || wireId,
+              description: typeof m?.description === 'string' ? m.description : undefined,
+              ...(strengths.length > 0 ? { strengths: [...strengths] } : {}),
+            }
+          }),
+        )
+      }
+    }
+
+    child.stdout?.on('data', (/** @type {Buffer} */ chunk) => {
+      buffer += chunk.toString('utf8')
+      let index = buffer.indexOf('\n')
+      while (index >= 0) {
+        const line = buffer.slice(0, index).trim()
+        buffer = buffer.slice(index + 1)
+        if (line) {
+          try {
+            handleMessage(JSON.parse(line))
+          } catch {
+            /* 非 JSON 行（日志噪音）忽略 */
+          }
+        }
+        index = buffer.indexOf('\n')
+      }
+    })
+
+    child.stderr?.on('data', (/** @type {Buffer} */ chunk) => {
+      stderrTail.push(chunk.toString('utf8').trim())
+      if (stderrTail.length > 20) stderrTail.shift()
+    })
+
+    child.on('error', (/** @type {Error} */ err) => {
+      fail(new Error(`CODEBUDDY_PROCESS_ERROR: ${err.message}`))
+    })
+    child.on('exit', (/** @type {number} */ code) => {
+      if (!settled) {
+        fail(
+          new Error(
+            `CODEBUDDY_EXITED_EARLY: 退出码 ${code}` +
+              (stderrTail.length ? `；stderr: ${stderrTail.slice(-3).join(' | ')}` : ''),
+          ),
+        )
+      }
+    })
+
+    // 握手开始
+    send({
+      jsonrpc: '2.0',
+      id: nextId++,
+      method: 'initialize',
+      params: {
+        protocolVersion: 1,
+        clientCapabilities: {},
+        clientInfo: { name: 'meetingstone-probe', version: '0.1.0' },
+      },
+    })
+  })
+}
+
+/**
  * 默认探测（host 侧可直接使用）：
  * - codex：`resolveExecutable('codex')` + app-server model/list
  * - dsh：宿主 `ctx.llm.listModels()`（拿不到 → 抛错，保留 unknown/静态）
@@ -1144,6 +1376,13 @@ export function createDefaultProbes(deps = {}) {
       const exe = executable || (await resolveExecutable('codex'))
       if (!exe) throw new Error('codex 可执行文件不可用')
       return probeCodexModels({ executable: exe, spawnImpl: deps.spawnImpl })
+    },
+    // CodeBuddy：走 ACP session/new 拿账号实际可用的模型（2026-11-12 实测 20 个）。
+    // 之前没有这个 probe，模型只来自 profile 配置（用户看到 4 个）。
+    codebuddy: async ({ executable }) => {
+      const exe = executable || (await resolveExecutable('codebuddy'))
+      if (!exe) throw new Error('codebuddy 入口脚本不可用')
+      return probeCodebuddyModels({ executable: exe, spawnImpl: deps.spawnImpl })
     },
     dsh: async () => {
       const ctx = deps.ctx
