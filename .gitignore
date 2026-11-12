@@ -36,3 +36,6 @@ coverage/
 
 # 本地诊断脚本（2026-11-12 计费排查用，不入库）
 .token-test/
+
+# D1 verification temp artifacts (2026-11-12, not tracked)
+.d1-verify*

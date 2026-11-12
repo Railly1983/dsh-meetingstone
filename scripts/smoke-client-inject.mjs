@@ -265,15 +265,16 @@ function findSvg(node) {
   const fiber = ctx.plugin({ inject: client.inject, apply: client.apply })
   await fiber
   await settle()
-  assert.equal(registrations.length, 4, 'header + section + 两个 keyed seat')
-  assert.equal(client.__test.REMOTE_CONTRIBUTION.descriptors.length, 9, 'list + 8 个 strict 方法（会话3+配置5）')
+  assert.equal(registrations.length, 1, 'B3 之后只注册 settings.section')
+  assert.equal(
+    client.__test.REMOTE_CONTRIBUTION.descriptors.length,
+    6,
+    'list + 5 个配置方法（B3 已下线 3 个会话覆盖方法）',
+  )
   assert.deepEqual(
     client.__test.REMOTE_CONTRIBUTION.descriptors.map((d) => d.method),
     [
       'list',
-      'getSessionConfig',
-      'setSessionOverride',
-      'clearSessionOverride',
       'setCliEnabled',
       'refreshCli',
       'updateGlobalRole',
@@ -283,13 +284,8 @@ function findSvg(node) {
   )
   assert.deepEqual(
     registrations.map((r) => r.options.name),
-    [
-      'conversation.session.header.actions',
-      'settings.section',
-      'sidebar.right.pane.tab',
-      'sidebar.right.pane.tab.title',
-    ],
-    '注册顺序：header 最先',
+    ['settings.section'],
+    'B3 之后不再注册 header / sidebar tab',
   )
   const section = registrations.find((r) => r.options.name === 'settings.section')
   assert.equal(section.options.id, 'meetingstone')
@@ -299,27 +295,21 @@ function findSvg(node) {
   assert.equal(snapshot.global.defaultRoleId, 'role-sashi')
   assert.equal(snapshot.global.cli[0].label, 'Codex CLI')
 
-  // 顶部入口独立于设置页：inject 给 remoteReady，点击打开右侧栏 tab。
-  const header = registrations[0]
-  assert.equal(header.options.id, 'meetingstone-role')
-  assert.equal(typeof header.options.inject, 'function')
-  const props = header.options.inject('sess-smoke')
-  assert.equal(props.remoteReady, true)
-  const element = header.Component(props)
-  const button = element.props.children.find((c) => c && c.type === 'button')
-  assert.ok(button, 'header 渲染按钮')
-  assert.equal(button.props['aria-label'], 'headerTitle')
-  assert.equal(findSvg(button)?.props?.['aria-hidden'], 'true', 'header 使用内联 SVG')
-
-  // 右侧栏只读面板：strict getSessionConfig → 来源层。
-  const pane = registrations.find((r) => r.options.name === 'sidebar.right.pane.tab')
-  const paneResult = await pane.options.inject('sess-smoke').loadSession()
-  assert.equal(paneResult.ok, true, '侧栏读取 strict getSessionConfig')
-  assert.equal(paneResult.view.roles[0].sourceLayer, 'global')
-  console.log('PASS B: 真实 Cordis 下 mount → getService → header/section/sidebar 注册 → list/getSessionConfig 成功')
+  // B3 作废项：header action 与 sidebar tab 不得存在。
+  assert.equal(
+    registrations.some((r) => r.options.name === 'conversation.session.header.actions'),
+    false,
+    'B3：不应再有对话页头角色入口',
+  )
+  assert.equal(
+    registrations.some((r) => r.options.name === 'sidebar.right.pane.tab'),
+    false,
+    'B3：不应再有右侧栏「本对话角色」面板',
+  )
+  console.log('PASS B: 真实 Cordis 下 mount → 只注册 settings.section → list 成功')
 }
 
-// C. $mount 失败：header / section / sidebar 仍注册，入口不消失。
+// C. $mount 失败：settings.section 仍注册，loader 返回 unavailable。
 {
   registrations.length = 0
   injectCalls.length = 0
@@ -338,24 +328,12 @@ function findSvg(node) {
   const fiber = ctx.plugin({ inject: client.inject, apply: client.apply })
   await fiber
   await settle()
-  assert.equal(registrations.length, 4, 'mount 失败也必须注册 4 段 UI')
-  assert.equal(
-    registrations[0].options.name,
-    'conversation.session.header.actions',
-    'header 必须最先注册',
-  )
+  assert.equal(registrations.length, 1, 'B3：mount 失败也必须注册 settings.section')
   const section = registrations.find((r) => r.options.name === 'settings.section')
   const snapshot = await section.options.inject().list()
   assert.equal(snapshot.unavailable.code, 'REMOTE_MOUNT_FAILED')
   assert.match(snapshot.unavailable.message, /mount boom/)
-
-  const header = registrations[0]
-  const props = header.options.inject('sess-smoke')
-  assert.equal(props.remoteReady, false, 'mount 失败时 header 提示远程不可用')
-  const element = header.Component(props)
-  const button = element.props.children.find((c) => c && c.type === 'button')
-  assert.equal(button.props.title, 'remoteUnavailableHint')
-  console.log('PASS C: mount 失败时 header/section/sidebar 仍在，loader 返回 unavailable')
+  console.log('PASS C: mount 失败时 settings.section 仍在，loader 返回 unavailable')
 }
 
 console.log(`\nOK: real Cordis ${extract('dsh/node_modules/@deepseek-ai/cordis/package.json').toString().match(/"version": "([^"]+)"/)?.[1]} from installed app.asar`)
