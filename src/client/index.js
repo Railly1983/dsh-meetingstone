@@ -534,7 +534,9 @@ window.__ModuleLoader__.load({
     }
 
     /** 来源层只认三层继承的固定枚举；其余一律 unknown（不猜）。 */
-    const SOURCE_LAYERS = new Set(['global', 'project', 'session'])
+    // B3（2026-11-12）：角色配置只有全局一层，项目/会话来源已下线。
+    // 只保留 global 与 default 两种，避免 UI 显示「项目」来源这种不存在的层。
+    const SOURCE_LAYERS = new Set(['global', 'default'])
 
     /** 角色字段来源键（与 Host `roleView().fieldSources` 一致）。 */
     const ROLE_SOURCE_FIELDS = [
@@ -940,7 +942,7 @@ window.__ModuleLoader__.load({
       createRole: '创建角色',
       deleteRole: '删除角色',
       confirmDeleteRole:
-        '确认删除该全局角色？只删除 profile 中的全局默认定义；已有会话的覆盖记录不会被改写（可能指向已删角色）。',
+        '确认删除该全局角色？只删除 profile 中的定义。删除后当前会话若仍引用它，会回退到默认路由。',
       confirmDelete: '确认删除',
       roleCount: '角色数量',
       errorWarning: '最近一次错误',
@@ -956,9 +958,9 @@ window.__ModuleLoader__.load({
       remoteUnavailableHint: '远程不可用',
       // U2：设置页两区 + 角色三色二态 + 二级详情
       cliSection: '外部 CLI 连接',
-      rolesSection: '默认角色配置',
+      rolesSection: '全局角色库',
       templateName: '取经五人组',
-      templateDesc: '唐僧、悟空、八戒、沙僧、小白五人各司其职；模型与思考强度按角色单独配置。',
+      templateDesc: '模型与思考强度按角色单独配置。',
       cliSwitchLabel: '启用',
       cliOnFailed: '检测未通过，保持关闭',
       cliRetry: '重新检测',
@@ -1042,7 +1044,7 @@ window.__ModuleLoader__.load({
       createRole: 'Create role',
       deleteRole: 'Delete role',
       confirmDeleteRole:
-        'Delete this global role? Only the global definition in the profile is removed; existing session override records are left untouched (they may point at the deleted role).',
+        'Delete this global role? Only the definition in the profile is removed. Sessions referencing it fall back to the default route.',
       confirmDelete: 'Delete',
       roleCount: 'Role count',
       errorWarning: 'Most recent error',
@@ -1058,9 +1060,9 @@ window.__ModuleLoader__.load({
       remoteUnavailableHint: 'Remote unavailable',
       // U2: settings sections + tri-color role switches + detail view
       cliSection: 'External CLI connections',
-      rolesSection: 'Default role configuration',
+      rolesSection: 'Global roles',
       templateName: 'Journey to the West five',
-      templateDesc: 'Tangtang, Wukong, Bajie, Sashi and Xiaobai share duties; model and channel are configured per role.',
+      templateDesc: 'Model and reasoning effort are configured per role.',
       cliSwitchLabel: 'Enable',
       cliOnFailed: 'Preflight failed; kept off',
       cliRetry: 'Re-check',
