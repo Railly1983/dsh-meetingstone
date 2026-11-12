@@ -2,6 +2,25 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.6] - 2026-11-12
+
+### Changed
+- **去掉会话级角色配置**（用户决定：只有全局角色设定）。会话级覆盖的读写路径、
+  右侧栏「本对话角色」面板、对话页头角色入口全部移除，仅保留设置页内联的全局角色管理。
+  旧 `.meetingstone/sessions/*.json` 不再读取，文件保留不迁移不清除。
+- 角色配置收敛为**全局单层**：项目级 `.meetingstone.json` 的 roleOverrides 不再生效。
+- 能力目录新增 `config` 数据源：只读解析 profile 的 `cordis.patch.yml` provider 行，
+  读取真实 `--model` / `--effort`；优先级 discovered > config > static > unknown。
+
+### Added
+- 设置页角色区返回按钮。
+
+### Fixed
+- **P0 计费事故**：派单静默继承父会话模型路由，导致角色配置的 CLI 完全不生效、
+  实际按父会话的按量计费 provider 扣费。现在 in-process 派单显式下发 `agentOptions`
+  （provider/model/reasoningEffort），外部 CLI 通道不传。
+  安装后实测：43 次调用全部走 workbuddy，deepseek-account 零调用。
+
 ## [0.1.0-alpha] - 2026-11-11
 
 V1 范围冻结（docs/V1-SCOPE.md）：四个工作包 + 不做清单。

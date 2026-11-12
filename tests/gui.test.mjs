@@ -927,7 +927,7 @@ test('Browser half：渲染期错误走统一日志（module/phase/version/stack
   assert.equal(fallback.type, 'p', '渲染失败必须返回回退节点（不抛）')
 
   const errLine = logs.find(([level]) => level === 'error')?.[1] ?? ''
-  assert.match(errLine, /^\[meetingstone\] gui module=sidebar phase=render version=0\.1\.0-alpha /)
+  assert.match(errLine, /^\[meetingstone\] gui module=sidebar phase=render version=\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)? /)
   assert.match(errLine, /error=render boom/)
   assert.match(errLine, /stack=/)
   assert.doesNotMatch(errLine, /token|secret|password|api[_-]?key/i, '日志不记录凭证')
@@ -1403,12 +1403,13 @@ test('B3：slots 缺失时只记录 section 一条注册错误', async () => {
 })
 
 test('B3：注册日志只含 remote/section（无 header/sidebar）', async () => {
-  const { logs } = await loadClientHarness()
+  const { logs, exports } = await loadClientHarness()
+  const CLIENT_VERSION = exports.__test.PLUGIN_VERSION
   const infos = logs.filter(([level]) => level === 'info').map(([, line]) => line)
   for (const [module, phase] of [['remote', 'mount'], ['section', 'register']]) {
     assert.ok(
       infos.includes(
-        `[meetingstone] gui module=${module} phase=${phase} version=0.1.0-alpha status=ok`,
+        `[meetingstone] gui module=${module} phase=${phase} version=${CLIENT_VERSION} status=ok`,
       ),
     )
   }
