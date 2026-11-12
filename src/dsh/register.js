@@ -1361,23 +1361,21 @@ export function registerTools(ctx, deps) {
           }
         }
 
-        // ── 判定「原任务是否已停」的三层证据（2026-11-12 三轮真机测试的结论）──
+        // ── 判定「原任务是否已停」的证据优先级（2026-11-12 四轮真机测试的结论）──
         //
-        // 背景：外部 CLI（ACP）的 `cancelActivation` 在**没有存活句柄**时返回
-        // `stopConfirmed: false`（谨慎行为，不猜），但这对 steer 是误判 ——
-        // 任务可能已经自己结束了，或者 cancel 刚刚把它结束掉。
+        // 踩过的坑（每一轮都是真机暴露的，不是想出来的）：
+        //   alpha.13：只读内存视图 → 判不出 spawn/acp
+        //   alpha.14：只读磁盘 → 重开失败（缺 context.agent 等）
+        //   alpha.15：cancel 后回查看内存 → 被异步 dispose 的窗口期卡住
+        //   alpha.16：cancel 后只看磁盘 → 磁盘还没写完，仍然卡住
         //
-        // 真机实测（childId 0b14ca77）：cancel 之后记录变成
-        // `status=cancelled, stopConfirmed=true`，但适配器的内存 `handles`
-        // 里还留着一个 `running` 的句柄（dispose 是异步的），
-        // 于是回查 `getTask` 仍返回 `running` → 被门禁拦住。
+        // **真实机制**（查 adapter 源码确认）：
+        //   - `rememberFinished()` 先写**内存** `finished`（同步）
+        //   - `emitRunFinish()` 再**异步**写磁盘
+        //   - `cancelActivation` 在「没有存活句柄」时返回 stopConfirmed:false（谨慎）
         //
-        // 结论：**不能只靠单一来源**。按下面的顺序取证据：
-        //   1. 派单前的记录已经终态 → 直接认定已停（不必 cancel）
-        //   2. cancel 的返回值说停成功 → 认定已停（这是适配器的权威回答）
-        //   3. cancel 说「没有句柄」→ 回查磁盘记录，终态即认定已停
-        //      （**不再看内存 liveStatus**，因为 dispose 是异步的，
-        //       内存会在 cancel 后短暂地仍显示 running）
+        // 所以正确顺序是：**内存终态 > cancel 的确认 > 磁盘终态**
+        // （内存是同步写的，比磁盘快；磁盘作为兜底）
         const terminal = ['completed', 'failed', 'cancelled', 'interrupted']
         const statusNow = String(record.liveStatus ?? record.status ?? '')
         const alreadyTerminal = terminal.includes(statusNow) || record.stopConfirmed === true
@@ -1391,18 +1389,32 @@ export function registerTools(ctx, deps) {
           const cancelOutcome = await dispatcher
             .cancel({ childId })
             .catch((error) => ({ stopConfirmed: false, reason: error?.message ?? String(error) }))
-          // 2. 适配器明确说停成功 → 最高优先级证据
           stopConfirmed = cancelOutcome?.stopConfirmed === true
           stopReason = typeof cancelOutcome?.reason === 'string' ? cancelOutcome.reason : ''
-          // 3. 适配器说「没有句柄」→ 回查磁盘（不依赖内存，见上方说明）
-          if (!stopConfirmed && /没有该任务的存活句柄|存活句柄/.test(stopReason)) {
-            const afterDisk = loadPersistedRun
-              ? await loadPersistedRun(exec, childId).catch(() => null)
-              : null
-            const diskStatus = String(afterDisk?.status ?? '')
-            if (terminal.includes(diskStatus) || afterDisk?.stopConfirmed === true) {
+
+          if (!stopConfirmed) {
+            // 证据 2：**内存视图**（cancel 成功后 rememberFinished 已同步写入）。
+            // 这是本轮修复的核心 —— 之前只查磁盘会输给异步写盘的延迟。
+            const afterLive = await resolveRun(exec, childId).catch(() => null)
+            const liveStatus = String(afterLive?.status ?? '')
+            if (terminal.includes(liveStatus)) {
               stopConfirmed = true
-              stopReason = `cancel 后记录已终态（${diskStatus}）`
+              stopReason = `cancel 后内存已终态（${liveStatus}）`
+            } else if (liveStatus === 'running') {
+              // 内存明确说还在跑 → **不再往下查磁盘**。
+              // 磁盘的终态可能是过时快照（比如上一次运行留下的），
+              // 拿它当「已停」的证据会让两个任务真的同时跑。
+              stopReason = stopReason || '内存视图仍显示运行中'
+            } else {
+              // 证据 3：内存也没有明确结论（unknown / 无记录）→ 磁盘兜底。
+              const afterDisk = loadPersistedRun
+                ? await loadPersistedRun(exec, childId).catch(() => null)
+                : null
+              const diskStatus = String(afterDisk?.status ?? '')
+              if (terminal.includes(diskStatus) || afterDisk?.stopConfirmed === true) {
+                stopConfirmed = true
+                stopReason = `cancel 后磁盘已终态（${diskStatus}）`
+              }
             }
           }
         }

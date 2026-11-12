@@ -2,6 +2,26 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.17] - 2026-11-12
+
+### Fixed
+
+- **`steer` 停止判定的证据顺序**（alpha.16 第四轮真机测试暴露）。
+  查 adapter 源码确认真实机制：`rememberFinished()` **同步写内存**，
+  `emitRunFinish()` **异步写磁盘**。之前 cancel 后只查磁盘，输给写盘延迟 → 误判未停。
+
+  最终证据优先级：
+  1. 派单前记录已终态 → 认定已停
+  2. cancel 返回 `stopConfirmed:true` → 认定已停（适配器权威回答）
+  3. cancel 失败 → 查**内存**（同步写，最快）：终态即认定已停
+     **若内存明确是 running 就停在这里**，不再查磁盘 ——
+     磁盘的终态可能是上一次运行的过时快照，拿它当证据会让两个任务真的同时跑
+  4. 内存无明确结论（unknown）→ 磁盘兜底
+
+### 测试
+
+- 629 tests，新增两条区分「内存 running + 磁盘 cancelled」与「内存终态」的用例
+
 ## [0.1.0-alpha.16] - 2026-11-12
 
 ### Fixed

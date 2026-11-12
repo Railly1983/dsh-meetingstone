@@ -1,6 +1,6 @@
 {
   "name": "dsh-meetingstone",
-  "version": "0.1.0-alpha.16",
+  "version": "0.1.0-alpha.17",
   "description": "A lightweight cross-CLI agent role and dispatch plugin for DeepSeek Harness.",
   "type": "module",
   "main": "src/index.js",
