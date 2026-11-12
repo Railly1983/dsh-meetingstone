@@ -1387,12 +1387,14 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 设置页「全局角色管理」（B1）：**内联**在设置页展开，不离开当前页、不打开右侧栏。
+     * 设置页「全局角色管理」（B1）：**内联**在设置页展开，不离开当前页。
      *
      * 数据源是无参 `list()` 快照里的**全局** roles（Host `roleView` 已投影
      * description/prompt/fieldSources）；写路径复用既有 `updateGlobalRole`
-     * （S2 global writer，字段合并），保存前二次确认。会话覆盖与本面板无关，
-     * 仍只在右侧栏「本对话角色」里调整。
+     * （S2 global writer，字段合并），保存前二次确认。
+     *
+     * B3（2026-11-12）：会话级角色覆盖已整体下线 —— 本面板是**唯一**的角色管理入口，
+     * 不再有「会话覆盖在别处调整」这种情况。
      *
      * @param {(key: string) => string} t
      * @param {any} snapshot `normalizeSnapshot()` 的产物
