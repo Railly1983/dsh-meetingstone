@@ -20,7 +20,7 @@ $node = "$env:USERPROFILE\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\nod
 # 或一条：npm run verify
 ```
 
-**门禁不过，不许装进任何真实 profile。** 理由见 `docs/audit/13-incident-tool-schema.md`（一个非法工具 schema 能让整个 profile 的所有会话不可用）。
+**门禁不过，不许装进任何真实 profile。** 理由见 `docs/reference/incident-tool-schema.md`（一个非法工具 schema 能让整个 profile 的所有会话不可用）。
 
 ## 改文件的硬规矩
 
@@ -29,7 +29,7 @@ $node = "$env:USERPROFILE\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\nod
 
 ## 改动守则
 
-1. **复用优先**：团队/项目/任务/会话/权限/统计一律用 DSH 原生，先证明缺口再写代码（`docs/audit/00-summary.md` 的 A/B/C 分类）。
+1. **复用优先**：团队/项目/任务/会话/权限/统计一律用 DSH 原生，先证明缺口再写代码（`docs/reference/stage0-audit-summary.md` 的 A/B/C 分类）。
 2. **不自研 CLI 启动器**：派单经宿主 provider（`docs/audit/03-native-capabilities.md` F2/F3）。
 3. **不假装**：拿不到的值写 `unknown`/`installed:false`；无法强制的权限**拒绝启动**而不是标个标记。
 4. **纯逻辑可测**：解析/合并/并发这类逻辑不要直接依赖 DSH API，用注入的适配器/IO，保证 `node --test` 能覆盖。

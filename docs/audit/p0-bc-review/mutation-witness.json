@@ -1,9 +1,0 @@
-{
-  "mutation": "buildRunBase taskSpec/contextPack = null",
-  "promptContainsAcceptance": true,
-  "persistedTaskSpec": null,
-  "persistedContextPack": null,
-  "recordPath": "D:\\MeetingStone\\.meetingstone\\worktrees\\1cdc02e3-4894-413e-ac5d-2471414ea1ce\\.meetingstone\\runs\\p0-bc-review\\mutant-fixture\\.meetingstone\\runs\\mutant-1794369300217.json",
-  "existingTargetTests": "37/37 passed (mutant survived)",
-  "independentWitness": "confirmed real protection loss"
-}

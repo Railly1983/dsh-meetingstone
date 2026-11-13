@@ -124,7 +124,7 @@ dependencies:
 ## 安装前必做（发布门禁 · 2026-11-10 事故后新增）
 
 > **教训**：一个非法的工具 `parameters` 会让 DeepSeek 对**整个 tools 数组**返回 400，
-> profile 下所有会话每一轮都发不出请求。详见 `docs/audit/13-incident-tool-schema.md`。
+> profile 下所有会话每一轮都发不出请求。详见 `docs/reference/incident-tool-schema.md`。
 
 ```powershell
 # 1) 门禁：全量测试 + 宿主/模型 API 契约校验（不过不许装）

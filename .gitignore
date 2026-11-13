@@ -46,3 +46,11 @@ docs/plan/wt-*.txt
 # 验证脚本的临时解包产物（可随时重解）
 .meetingstone/runs/verify-installed-refresh/
 .meetingstone/runs/refresh-verify/vendor/
+
+# ── 公开发布排除（2026-11-13）────────────────────────────────
+# docs/plan 是开发过程记录（需求分析、实测报告、临时方案），
+# docs/audit 是内部审计（含本机环境细节）。
+# 两者属于内部工作材料，不随产品仓库公开发布。
+# 文件仍保留在本地磁盘，只是不进 git。
+docs/plan/
+docs/audit/

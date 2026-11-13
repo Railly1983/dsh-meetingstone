@@ -13,7 +13,7 @@ DeepSeek Harness 的多 CLI 智能体角色管理与派单插件。
 > **没有**右侧栏「本对话角色」面板，**没有**对话页头角色入口 —— 这两个已在 B3 移除。
 > 角色配置也只有全局一层（项目级/会话级覆盖已下线）。
 
-> **Token 口径**：Subagents 面板的 `tok` 是四桶（uncachedInput+output+cacheRead+cacheWrite）累计、按整条持久日志计算；fork 会话含父历史（`154M / 4 秒` 即此，耗时只算子会话自身）。**不可用于成本/额度/子 Agent 归属**；替代口径见 [Token 统计口径核查](docs/audit/token-stats.md)。
+> **Token 口径**：Subagents 面板的 `tok` 是四桶（uncachedInput+output+cacheRead+cacheWrite）累计、按整条持久日志计算；fork 会话含父历史（`154M / 4 秒` 即此，耗时只算子会话自身）。**不可用于成本/额度/子 Agent 归属**；替代口径见 [Token 统计口径核查](docs/reference/token-stats.md)。
 
 ## 解决什么问题
 
@@ -43,7 +43,7 @@ DSH 本身有完整的任务、子智能体、权限和统计。但"把活分给
 > **多子代理模式会大幅度增加 token 消耗，建议仅在重要长任务情境下启用。**
 
 这是实打实测出来的，不是感觉。对照实验（四方案 × 48 格，全部统一模型）见
-[多平台调度对照](docs/plan/2026-11-13-multi-platform-benchmark.md)：
+[多平台调度对照](docs/reference/benchmark-multi-platform.md)：
 
 | 现象 | 原因 |
 |---|---|
@@ -87,17 +87,17 @@ npm run verify                                              # 1) 门禁，必须
 | [协作效率规范](docs/efficiency.md) | 派单简报、输出、收口、失败标注的协作约定（纯提示词，非配置） |
 | [统一任务/结果协议](docs/task-protocol.md) | 派单四件（名称/目标/范围/验收）、回执四件（状态/结论/证据/报告路径）、六条规则与工具字段映射 |
 | [GUI 只读配置页（0.2.0）](docs/gui-0.2.0.md) | 面板注册、会话角色覆盖、三个原生面板职责与命名规则 |
-| [Token 统计口径核查](docs/audit/token-stats.md) | Subagents 面板 token 的公式、fork 继承、可信边界与替代口径 |
-| [P0-A 真实 A/B 实测](docs/plan/2026-11-11-p0a-ab.md) | dispatch / get_task / list_roles 的真实回执字节对照与 Token 可得性 |
+| [Token 统计口径核查](docs/reference/token-stats.md) | Subagents 面板 token 的公式、fork 继承、可信边界与替代口径 |
+| [P0-A 真实 A/B 实测](docs/reference/p0a-ab-test.md) | dispatch / get_task / list_roles 的真实回执字节对照与 Token 可得性 |
 | [安装/卸载](docs/installation.md) | 门禁、安装、provider、配置、回滚 |
 | [安全与权限](docs/security.md) | 权限边界与"不提供只读通道"的原因 |
 | [工作树隔离（自动 + 手动）](docs/worktree-isolation.md) | 默认每任务独立工作树、失败关闭、人工合并/清理；文件布局隔离≠权限沙箱 |
-| [并行多任务方案（已实现）](docs/plan/2026-11-11-parallel-plan.md) | 悟空裁决、两级额度、失败关闭、不自动清理 |
+| [并行多任务方案（已实现）](docs/reference/parallel-plan.md) | 悟空裁决、两级额度、失败关闭、不自动清理 |
 | [发布检查清单](docs/release-checklist.md) | 通用门禁、隔离环境验证、回滚与发布前安全审查 |
 | [发布清单（0.1.0-alpha）](docs/release/0.1.0-alpha-checklist.md) | 版本同步、门禁、npm/GitHub 发布步骤、回滚与已知限制 |
 | [兼容性](docs/compatibility.md) | 宿主/provider/本机 CLI 的实测组合 |
-| [事故复盘](docs/audit/13-incident-tool-schema.md) | 2026-11-10 工具 schema 事故与门禁 |
-| [阶段 0 审计](docs/audit/00-summary.md) | A/B/C 分类与最小自研范围 |
+| [事故复盘](docs/reference/incident-tool-schema.md) | 2026-11-10 工具 schema 事故与门禁 |
+| [阶段 0 审计](docs/reference/stage0-audit-summary.md) | A/B/C 分类与最小自研范围 |
 
 ## 开发
 

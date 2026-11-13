@@ -2,13 +2,65 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0] - 2026-11-13
+
+首个公开发布版本。
+
+### 它是什么
+
+给 DeepSeek Harness 做**跨 CLI 的角色派单**：把「谁用什么模型、什么强度、什么权限、在哪个目录跑」
+变成一张角色表，一处配置，所有会话生效。
+
+### 实测的模型清单（不是静态表）
+
+| 来源 | 数量 | 获取方式 |
+|---|---|---|
+| DeepSeek Harness | **59** | WorkBuddy 桥 `?all=1`（可选增强）+ 宿主 `ctx.llm.listModels(provider)` |
+| CodeBuddy | **20** | ACP `session/new` 的 `availableModels[]._meta` |
+| Codex | **8** | app-server `model/list`（`result.data[]`） |
+| Claude Code | 3 别名 | 静态（无枚举接口，官方只有 `--model <alias>`） |
+
+`CodeBuddy` 与 `Codex` 的模型带**上下文窗口**与**计费标注**，
+例如 `Hy4（免费 · free）` / `Hy4（x0.29 · std）`，用户能一眼区分免费与收费。
+
+### 关键能力
+
+- **10 个工具**：`dispatch` / `wait` / `get_task` / `cancel_task` / `list_runs` /
+  `get_run_artifact` / `list_roles` / `cli_status` / `steer_task` / `stats`
+- **worktree 隔离**：每个写任务独立工作树，实测并行写入互不干扰
+- **执行记录**：完整落盘，支持按范围读取（`get_run_artifact`）
+- **设置页 UI**：外部 CLI 连接 + 全局角色库，支持增删改、CLI→模型→强度联动
+- **Token 精简**：`get_task` 省 88%、`list_runs` 省 89%、`list_roles` 245 B
+
+### 已知边界（诚实声明）
+
+- **外部 CLI 不支持真插话**：`steer` 对 ACP/Codex/Claude 任务是「停掉原任务 + 带产出重开」，
+  不是中途追加。工具描述与 `list_runs` 的 `steerMode` 会提前告知。
+  （宿主按钮仍叫「插话发送」，那个我们改不了。）
+- **Claude Code 无法枚举模型**：只有 `--model fable/opus/sonnet` 三个别名。
+- **多子代理会显著增加 token 消耗**：实测（48 格对照）并行任务因重复读上下文而放大成本，
+  建议仅在重要长任务场景下启用。详见 `docs/reference/benchmark-multi-platform.md`。
+- **取消的确认有 3–10 秒延迟**：外部 CLI 的 `dispose()` 是异步的，回执如实返回 `false`，
+  记录随后更新。
+
+### 验证状态
+
+- 700 tests / 699 pass
+- 发布门禁 10 PASS（测试 / 客户端注入 / D1 渲染 24 项 / D1 交互 20 项 / 工具 schema / manifest / 发布包）
+- 真机验证：派单、取消、进程清理、worktree 并行写入、模型探测、`refreshCli`
+
+### 未完成
+
+- D1 视觉验收的部分交互（模型下拉、刷新按钮）由作者目视确认，未纳入自动化
+- 槽位泄漏根因（DSH 重启时 `onFinish` 不触发）未修，已用上限 + 诊断缓解
+
 ## [0.1.0-alpha.31] - 2026-11-13
 
 ### Docs
 
 - README 增补「子代理使用建议」：实测多子代理会显著增加 token 消耗，
   建议仅在重要长任务场景下启用。
-  证据见 `docs/plan/2026-11-13-multi-platform-benchmark.md`（四方案 48 格对照）。
+  证据见 `docs/reference/benchmark-multi-platform.md`（四方案 48 格对照）。
 - 纳入两份实测报告：`2026-11-13-cost-and-benchmark-plan.md`（WorkBuddy 记账核查）
   与 `2026-11-13-multi-platform-benchmark.md`（四方案 48 格调度对照）。
 
@@ -826,7 +878,7 @@ V1 范围冻结（docs/V1-SCOPE.md）：四个工作包 + 不做清单。
     `tests/parallel.test.mjs`（额度、跨项目、失败关闭、取消/卸载、重叠、淘汰）
 - 新错误码 `WORKTREE_*` / `WRITE_LIMIT_TOTAL` / `INVALID_ISOLATION`（见 `docs/configuration.md` §5）；
   宿主 `ACTIVATION_LIMIT_REACHED` 原样透传
-- `docs/plan/2026-11-11-parallel-plan.md` 写入悟空裁决；`docs/worktree-isolation.md` 改为
+- `docs/reference/parallel-plan.md` 写入悟空裁决；`docs/worktree-isolation.md` 改为
   「自动隔离 + 手动流程并列」，明确**文件布局隔离 ≠ 权限沙箱**
 - **生命周期正确性（P0）**：取消改为「先 `dispose()`（默认 5s 超时兜底）再释放槽位」；
   落盘按 `childId` 串行（running 一定先于终态）；新增 `runtimeId`，重启后把旧 `running`
@@ -866,7 +918,7 @@ V1 范围冻结（docs/V1-SCOPE.md）：四个工作包 + 不做清单。
 - **Windows 并发读取时的终态丢失**：记录文件被 `readFile` 占用时 `rename` 偶发 `EPERM/EBUSY`，
   导致终态退回 `running`；`run-store` 对 `EPERM` / `EACCES` / `EBUSY` 做短重试
 - **2026-11-10 事故**：工具 `parameters` 未编译成合法 JSON Schema，导致 DeepSeek 对全部会话每轮返回 400。
-  现改为按宿主契约编译，并在注册前 fail-fast 校验；见 `docs/audit/13-incident-tool-schema.md`
+  现改为按宿主契约编译，并在注册前 fail-fast 校验；见 `docs/reference/incident-tool-schema.md`
 - 并发写任务在占槽前就启动（两个写任务可同时成功）；槽位在任务结束后不释放
 - 歧义角色提示"请用 roleId"但 roleId 也被拒
 - `channel` 字段级覆盖会把 `kind` 重置成默认值
