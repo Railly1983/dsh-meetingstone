@@ -377,10 +377,13 @@ record(
 )
 
 // ── 静态核对：角色数据 ────────────────────────────────────
+// 断言「至少 5 个」而不是「正好 5 个」：profile 里的角色数量会随用户
+// 增删变化（包括测试期间临时建的），这不是产品缺陷。
+const enabledRoles = snapshot.roles.filter((r) => r.enabled)
 record(
-  '真实 profile 有 5 个启用角色',
-  snapshot.roles.filter((r) => r.enabled).length === 5,
-  `${snapshot.roles.map((r) => r.name).join('/')}`,
+  '真实 profile 至少有 5 个启用角色',
+  enabledRoles.length >= 5,
+  `${enabledRoles.length} 个：${snapshot.roles.map((r) => r.name).join('/')}`,
 )
 record(
   '所有启用角色的颜色只有 green/gray',

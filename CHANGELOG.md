@@ -2,6 +2,16 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.31] - 2026-11-13
+
+### Docs
+
+- README 增补「子代理使用建议」：实测多子代理会显著增加 token 消耗，
+  建议仅在重要长任务场景下启用。
+  证据见 `docs/plan/2026-11-13-multi-platform-benchmark.md`（四方案 48 格对照）。
+- 纳入两份实测报告：`2026-11-13-cost-and-benchmark-plan.md`（WorkBuddy 记账核查）
+  与 `2026-11-13-multi-platform-benchmark.md`（四方案 48 格调度对照）。
+
 ## [0.1.0-alpha.30] - 2026-11-13
 
 ### Fixed
