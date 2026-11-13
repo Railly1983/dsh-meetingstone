@@ -1564,13 +1564,131 @@ export async function probeWorkbuddyBridgeModels(opts = {}) {
         : []
       return {
         id,
-        label: asString(m.name) || asString(m.displayName) || id,
+        label: buildBridgeModelLabel(id, m),
         ...(ctxRaw > 0 ? { contextWindow: ctxRaw, contextWindowSource: 'workbuddy-bridge' } : {}),
         ...(outRaw > 0 ? { maxOutputTokens: outRaw } : {}),
         ...(efforts.length > 0 ? { strengths: efforts } : {}),
       }
     })
     .filter((/** @type {any} */ m) => Boolean(m))
+}
+
+/**
+ * 从桥生成的 label 里抽出标注段。
+ *
+ * `Hy4（免费 · free）` → `免费 · free`
+ * `GLM-5.3（x0.69）`   → `x0.69`
+ * `Hy4`                → `''`（没有标注）
+ *
+ * 用于把桥的计费/归属信息复用到**别的来源**（如 CodeBuddy 的 ACP 结果），
+ * 让同一个模型在不同入口有一致的可区分标注。
+ *
+ * @param {any} label
+ * @returns {string}
+ */
+function extractLabelMarks(label) {
+  const s = asString(label)
+  const m = s.match(/（(.+)）\s*$/)
+  return m && m[1] ? m[1] : ''
+}
+
+/**
+ * 给桥返回的模型生成**可区分**的显示名。
+ *
+ * ## 为什么需要（2026-11-13 用户反馈）
+ *
+ * 桥上有多组同名模型，直接用 `name` 会让下拉里出现两个一模一样的
+ * 「Hy4 · 动态 · 300K」，用户无法知道哪个免费、哪个扣积分：
+ *
+ * | id | name | credits | official |
+ * |---|---|---|---|
+ * | `hy4free` | Hy4 | **0**（免费） | 官方 |
+ * | `hy4std` | Hy4 | **0.29** | 官方 |
+ * | `hy3` | Hy3 | 0 | 官方 |
+ * | `hy3-x` | Hy3 | **0.05** | 官方 |
+ * | `kimi-k3-2` | Kimi-K3 | 1.62 | 官方 |
+ * | `kimi-k3-1` | Kimi-K3 | 1.62 | **三方** |
+ * | `hy4-preview-*` × 5 | Hy4 preview | 0.29 | 三方 |
+ *
+ * ## 标注规则（只在需要时加，不污染干净的名字）
+ *
+ * 1. **免费**：`credits === 0` → 加「免费」；否则 `x0.29`
+ * 2. **非官方**（`official === false`）→ 加「三方」
+ * 3. **促销**（`tags` 含 `badge:xxx`）→ 加 badge 文本
+ * 4. **同组重名**：当 name 有多个 id 共用时，额外带上 id 里的区分后缀
+ *    （如 `hy3-b` → 「Hy3 · b」），保证任意两条不重复
+ *
+ * 注意：这些只是**显示名**，`id` 保持不变（派单用的还是真 id）。
+ *
+ * @param {string} id
+ * @param {any} raw 桥返回的原始条目
+ * @returns {string}
+ */
+function buildBridgeModelLabel(id, raw) {
+  const base = asString(raw?.name) || asString(raw?.displayName) || id
+  /** @type {string[]} */
+  const marks = []
+
+  // 1) 计费：免费 or 倍率
+  const credits = raw?.credits
+  if (credits === 0 || credits === '0') {
+    marks.push('免费')
+  } else if (Number.isFinite(Number(credits)) && Number(credits) > 0) {
+    marks.push(`x${Number(credits)}`)
+  }
+
+  // 2) 官方 / 三方
+  if (raw?.official === false) marks.push('三方')
+
+  // 3) 促销徽标（tags: ["badge:限时免费:#009273"]）
+  //    若徽标文本与已有的「免费」重复，就不再加（避免「Hy4（免费 · 限时免费）」
+  //    这种冗余；但「限时折扣 / 夜间折扣 / 订阅优先」这类信息要保留）。
+  if (Array.isArray(raw?.tags)) {
+    for (const tag of raw.tags) {
+      const s = String(tag)
+      if (!s.startsWith('badge:')) continue
+      const text = s.slice('badge:'.length).split(':')[0]
+      if (!text) continue
+      const duplicated = marks.includes(text) || (text === '限时免费' && marks.includes('免费'))
+      if (!duplicated) marks.push(text)
+    }
+  }
+
+  // 4) 同组重名时补 id 区分段
+  //    例：hy3 / hy3-b / hy3-c 都叫 Hy3 → 后两个补「b」「c」
+  //        hy4-preview-ctrl / -exp / -x → 补「ctrl」「exp」「x」
+  //
+  //    做法：在**原始 id** 上找 display name 的归一化前缀长度，
+  //    再取剩余部分。不能用 `slice(-4)` 那种取巧写法 ——
+  //    会把 `hy4free` 截成 `ree`、`hy4std` 截成 `td`、`kimi-k3-2` 截成 `i-k3-2`。
+  const displayKey = base.toLowerCase().replace(/[\s_.-]+/g, '')
+  const idKey = id.toLowerCase().replace(/[\s_.-]+/g, '')
+  if (idKey !== displayKey && idKey.startsWith(displayKey)) {
+    // 逐字符对齐，找出原始 id 里「display 名之后」的起点
+    let i = 0
+    let j = 0
+    const lowerId = id.toLowerCase()
+    const lowerBase = base.toLowerCase()
+    while (i < lowerId.length && j < lowerBase.length) {
+      const ch = lowerId[i]
+      if (/[\s_.-]/.test(ch)) {
+        i += 1
+        continue
+      }
+      if (ch === lowerBase[j]) {
+        i += 1
+        j += 1
+        continue
+      }
+      break
+    }
+    const suffix = id.slice(i).replace(/^[\s_.-]+/, '')
+    if (suffix && suffix.length <= 14 && /^[a-z0-9][a-z0-9-]*$/i.test(suffix)) {
+      marks.push(suffix)
+    }
+  }
+
+  return marks.length > 0 ? `${base}（${marks.join(' · ')}）` : base
 }
 
 /**
@@ -1672,7 +1790,33 @@ export function createDefaultProbes(deps = {}) {
       // product.json 只覆盖账号可用列表的一部分（实测 6/20），
       // 剩下的走模型上下文库的智能匹配（厂商官方规格）。
       // fillContextWindows **不覆盖**已有值 —— product.json 优先。
-      return fillContextWindows(withProduct, { cli: 'codebuddy' })
+      const withCtx = fillContextWindows(withProduct, { cli: 'codebuddy' })
+
+      // **显示名可区分化**（2026-11-13 用户反馈）。
+      //
+      // ACP 返回的 `availableModels[].name` 有重名：
+      //   hy4free / hy4std 都叫 `Hy4`；hy3 / hy3-x 都叫 `Hy3`
+      // 用户在下拉里看到两个一模一样的 `Hy4`，无法知道哪个免费。
+      //
+      // 桥（WorkBuddy）里有这些 id 的**计费与归属**信息，用它补标注。
+      // 桥不可用时退化为不标注（保持原样，不编造）。
+      let billing = null
+      try {
+        const bridge = await probeWorkbuddyBridgeModels({ timeoutMs: 6000 })
+        billing = new Map(bridge.map((m) => [m.id, m]))
+      } catch {
+        billing = null
+      }
+      if (!billing) return withCtx
+
+      return withCtx.map((m) => {
+        const b = billing.get(m.id)
+        if (!b) return m
+        // 从桥的 label 里抽出标注段（形如 `Hy4（免费 · free）` → `免费 · free`）
+        const extra = extractLabelMarks(b.label)
+        if (!extra) return m
+        return { ...m, label: `${asString(m.label) || m.id}（${extra}）` }
+      })
     },
     dsh: async () => {
       // **首选：WorkBuddy 桥的完整目录**（2026-11-13 更正）。

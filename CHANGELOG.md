@@ -2,6 +2,51 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.29] - 2026-11-13
+
+### Fixed
+
+- **重名模型无法区分**（用户真机反馈：「hy4 分为收费和免费两个版本，
+  你这里只有一个名字，用户没法区分」）。
+
+  实测桥上有多组同名模型：
+
+  | id | name | credits |
+  |---|---|---|
+  | `hy4free` | Hy4 | **0（免费）** |
+  | `hy4std` | Hy4 | **0.29** |
+  | `hy3` | Hy3 | 0 |
+  | `hy3-x` | Hy3 | **0.05** |
+  | `kimi-k3-2` / `kimi-k3-1` | Kimi-K3 | 1.62（一个官方一个三方） |
+  | `hy4-preview-*` × 5 | Hy4 preview | 0.29 |
+
+  现在显示名带可区分标注：
+  `Hy4（免费 · free）` / `Hy4（x0.29 · std）` / `Hy3（免费）` / `Hy3（x0.05 · x）`
+  `Kimi-K3（x1.62 · 订阅优先 · k3-2）` / `Kimi-K3（x1.62 · 三方 · k3-1）`
+
+  标注来源：桥的 `credits`（0 → 免费，否则 xN）、`official`（false → 三方）、
+  `tags`（`badge:` → 促销文本）。**`id` 保持不变**，派单用的还是真 id。
+
+- **CodeBuddy 的 20 个模型也有同样问题**（`Hy4` 出现两次）。
+  ACP 返回不含计费信息，现在从桥补齐——同一套区分逻辑，两个入口一致。
+
+- 顺带修了一个后缀提取 bug：`slice(-4)` 的取巧写法把 `hy4free` 截成 `ree`、
+  `hy4std` 截成 `td`、`kimi-k3-2` 截成 `i-k3-2`。改为逐字符对齐，
+  现在正确得到 `free` / `std` / `k3-2`。
+
+### Added
+
+- `tests/model-label-distinguishable.test.mjs`（6 条）：
+  任意两条显示名不重复、免费必标注、收费必显示倍率、同组重名带 id 段、
+  `id` 不被污染，以及 CodeBuddy 用同一套逻辑也通过。
+
+### 检查过的其它来源
+
+- **Codex 8 个模型**：显示名本来就不重复（`GPT-6.1-Sol` / `GPT-6-Astra` / ...），无需处理。
+- **Claude 3 别名**：`Fable` / `Opus` / `Sonnet`，本身唯一。
+
+697 tests / 696 pass，门禁 10 PASS。
+
 ## [0.1.0-alpha.28] - 2026-11-13
 
 ### Fixed
