@@ -23,156 +23,201 @@
   "models": [
     {
       "id": "hy4",
-      "aliases": ["hy4free", "hy4std", "hy4-preview", "tencent-hy4", "hunyuan-hy4"],
+      "aliases": [
+        "hy4free",
+        "hy4std",
+        "hy4-preview",
+        "tencent-hy4",
+        "hunyuan-hy4"
+      ],
       "name": "Tencent Hy4",
       "vendor": "Tencent",
-      "contextWindow": 1000000,
+      "contextWindow": 300000,
       "maxInput": 960000,
       "maxOutput": 64000,
-      "source": "https://www.tencentcloud.com/document/product/1300/78934",
-      "note": "官方：1M 上下文，最大输入 960K，输出 64K。hy4free/hy4std 是 CodeBuddy 的免费/标准档，同代模型，按 1M 计。"
+      "source": "workbuddy-bridge（实测）",
+      "note": "桥实测：hy4free/hy4std/hy4-preview-* 默认档都是 300K，上限 960K。hy4free 免费，hy4std 是 x0.29。"
     },
     {
       "id": "hy3",
-      "aliases": ["hy3-x", "tencent-hy3", "hunyuan-hy3"],
+      "aliases": [
+        "hy3-x",
+        "tencent-hy3",
+        "hunyuan-hy3"
+      ],
       "name": "Tencent Hy3",
       "vendor": "Tencent",
-      "contextWindow": 256000,
+      "contextWindow": 192000,
       "maxInput": 192000,
       "maxOutput": 128000,
-      "source": "https://www.tencentcloud.com/document/product/1300/78934",
-      "note": "官方：256K 上下文，最大输入 192K，输出 128K。"
+      "source": "workbuddy-bridge（实测）",
+      "note": "桥实测 context_window=192000（max 也是 192K）。腾讯云文档写 256K，但本机桥的默认档是 192K，以桥为准。hy3-b/hy3-c/hy3-x 同族同值。"
     },
     {
       "id": "deepseek-v4.1-flash",
-      "aliases": ["deepseek-v4-flash", "deepseek-v4.1-flash-1017", "deepseek-flash"],
+      "aliases": [
+        "deepseek-v4-flash",
+        "deepseek-v4.1-flash-1017",
+        "deepseek-flash"
+      ],
       "name": "DeepSeek V4.1 Flash",
       "vendor": "DeepSeek",
-      "contextWindow": 1000000,
+      "contextWindow": 300000,
       "maxInput": 1000000,
       "maxOutput": 384000,
-      "source": "https://www.tencentcloud.com/document/product/1300/78934",
-      "note": "1M 上下文。DeepSeek 官方公告称 V4 起 1M 是标配。"
+      "source": "workbuddy-bridge（实测）",
+      "note": "桥实测默认档 300K（max 1M）。"
     },
     {
       "id": "deepseek-v4-pro",
-      "aliases": ["deepseek-v4-pro-0813", "deepseek-v4-pro-202606"],
+      "aliases": [
+        "deepseek-v4-pro-0813",
+        "deepseek-v4-pro-202606"
+      ],
       "name": "DeepSeek V4 Pro",
       "vendor": "DeepSeek",
-      "contextWindow": 1000000,
+      "contextWindow": 300000,
       "maxInput": 1000000,
       "maxOutput": 384000,
-      "source": "https://www.tencentcloud.com/document/product/1300/78934",
-      "note": "1.6T 总参数；1M 上下文 + 384K 输出。"
+      "source": "workbuddy-bridge（实测）",
+      "note": "桥实测默认档 300K（max 1M）。"
     },
     {
       "id": "glm-5.3",
-      "aliases": ["glm5.3", "zhipu-glm-5.3"],
+      "aliases": [
+        "glm5.3",
+        "zhipu-glm-5.3"
+      ],
       "name": "GLM-5.3",
       "vendor": "Zhipu AI",
-      "contextWindow": 1000000,
+      "contextWindow": 300000,
       "maxInput": 1000000,
       "maxOutput": 128000,
-      "source": "https://convly.ai/model/glm-5-3",
-      "note": "744B MoE / 40B 激活；1M 上下文，128K 输出。"
+      "source": "workbuddy-bridge（实测）",
+      "note": "桥实测默认档 300K（官方 1M 是可调上限，默认 300K）。"
     },
     {
       "id": "glm-5.3-flash",
-      "aliases": ["glm5.3-flash"],
+      "aliases": [
+        "glm5.3-flash"
+      ],
       "name": "GLM-5.3-Flash",
       "vendor": "Zhipu AI",
-      "contextWindow": 1000000,
+      "contextWindow": 300000,
       "maxInput": 1000000,
       "maxOutput": 128000,
-      "source": "https://www.tencentcloud.com/document/product/1300/78934",
-      "note": "320B 总参 / 18B 激活；1M 上下文。"
+      "source": "workbuddy-bridge（实测）",
+      "note": "桥实测默认档 300K（官方 1M 是可调上限，默认 300K）。"
     },
     {
       "id": "glm-5.3-flashx",
-      "aliases": ["glm5.3-flashx"],
+      "aliases": [
+        "glm5.3-flashx"
+      ],
       "name": "GLM-5.3-FlashX",
       "vendor": "Zhipu AI",
-      "contextWindow": 1000000,
+      "contextWindow": 300000,
       "maxInput": 1000000,
       "maxOutput": 128000,
-      "source": "https://www.tencentcloud.com/document/product/1300/78934",
-      "note": "1M 上下文，128K 输出。"
+      "source": "workbuddy-bridge（实测）",
+      "note": "桥实测默认档 300K（官方 1M 是可调上限，默认 300K）。"
     },
     {
       "id": "glm-5.2",
-      "aliases": ["glm5.2"],
+      "aliases": [
+        "glm5.2"
+      ],
       "name": "GLM-5.2",
       "vendor": "Zhipu AI",
-      "contextWindow": 1000000,
+      "contextWindow": 300000,
       "maxInput": 1000000,
       "maxOutput": 128000,
-      "source": "https://www.tencentcloud.com/document/product/1300/78934",
-      "note": "1M 上下文，128K 输出。"
+      "source": "workbuddy-bridge（实测）",
+      "note": "桥实测默认档 300K（官方 1M 是可调上限，默认 300K）。"
     },
     {
       "id": "kimi-k3.1-pro",
-      "aliases": ["kimi-k3.1-pro-highspeed", "kimi-k3-1-pro", "moonshot-kimi-k3.1-pro"],
+      "aliases": [
+        "kimi-k3.1-pro-highspeed",
+        "kimi-k3-1-pro",
+        "moonshot-kimi-k3.1-pro"
+      ],
       "name": "Kimi K3.1 Pro",
       "vendor": "Moonshot AI",
-      "contextWindow": 1000000,
+      "contextWindow": 300000,
       "maxInput": 1000000,
       "maxOutput": 1000000,
-      "source": "https://kimi.moonshot.cn/code/docs/kimi-code/models.html",
-      "note": "3T 级参数；官方 1M 上下文（1048576）。highspeed 版本能力一致、速度快、消耗约两倍。"
+      "source": "workbuddy-bridge（实测）",
+      "note": "桥实测默认档 300K（官方文档说 1M，但桥的 context_window 是 300K，以实际可用的默认档为准）。"
     },
     {
       "id": "kimi-k3",
-      "aliases": ["kimi-k3-2", "kimi-k3-256k", "moonshot-kimi-k3"],
+      "aliases": [
+        "kimi-k3-2",
+        "kimi-k3-256k",
+        "moonshot-kimi-k3"
+      ],
       "name": "Kimi K3",
       "vendor": "Moonshot AI",
-      "contextWindow": 1000000,
+      "contextWindow": 300000,
       "maxInput": 1000000,
       "maxOutput": 1000000,
-      "source": "https://www.tencentcloud.com/document/product/1300/78934",
-      "note": "2.8T 参数；1M 上下文。k3-2 是 256K 档的变体（官方 kimi-code 文档：最高 262144），保守取 1M 上限。"
+      "source": "workbuddy-bridge（实测）",
+      "note": "桥实测默认档 300K（官方文档说 1M，但桥的 context_window 是 300K，以实际可用的默认档为准）。"
     },
     {
       "id": "kimi-k2.8-preview",
-      "aliases": ["kimi-k2-8-preview"],
+      "aliases": [
+        "kimi-k2-8-preview"
+      ],
       "name": "Kimi K2.8 Preview",
       "vendor": "Moonshot AI",
-      "contextWindow": 1000000,
+      "contextWindow": 300000,
       "maxInput": 1000000,
       "maxOutput": 1000000,
-      "source": "https://www.tencentcloud.com/document/product/1300/78934",
+      "source": "workbuddy-bridge（实测）",
       "note": "1M 上下文。"
     },
     {
       "id": "minimax-m3",
-      "aliases": ["minimax-m3-pay", "minimax-m3.1-flash", "minimax-m3-1-flash"],
+      "aliases": [
+        "minimax-m3-pay",
+        "minimax-m3.1-flash",
+        "minimax-m3-1-flash"
+      ],
       "name": "MiniMax M3",
       "vendor": "MiniMax",
-      "contextWindow": 1000000,
+      "contextWindow": 300000,
       "maxInput": 1000000,
       "maxOutput": 128000,
-      "source": "https://www.minimax.io/platform",
-      "note": "官方：前沿多模态编程模型，1M 上下文窗口。m3.1-flash 是同代轻量版。"
+      "source": "workbuddy-bridge（实测）",
+      "note": "桥实测 300K（不是 MiniMax 文档的 1M——桥的默认档是 300K）。"
     },
     {
       "id": "minimax-m2.7",
-      "aliases": ["minimax-m2-7"],
+      "aliases": [
+        "minimax-m2-7"
+      ],
       "name": "MiniMax M2.7",
       "vendor": "MiniMax",
-      "contextWindow": 205000,
+      "contextWindow": 200000,
       "maxInput": 205000,
       "maxOutput": 128000,
-      "source": "https://standardcompute.com/best-ai-model/minimax-m2-1-vs-step-5-preview",
+      "source": "workbuddy-bridge（实测）",
       "note": "M2 系列 200K/205K 档。官方 M2 文档：200k 上下文、128k 输出。M2.7 沿用该档。"
     },
     {
       "id": "step-5-preview",
-      "aliases": ["step-5", "stepfun-step-5-preview"],
+      "aliases": [
+        "step-5",
+        "stepfun-step-5-preview"
+      ],
       "name": "Step 5 Preview",
       "vendor": "StepFun",
-      "contextWindow": 1000000,
+      "contextWindow": 300000,
       "maxInput": 1000000,
       "maxOutput": 128000,
-      "source": "https://stepfun.com/step-5-preview",
+      "source": "workbuddy-bridge（实测）",
       "note": "600B 总参 / 27B 激活；官方 1M 上下文，支持视觉输入。"
     },
     {
@@ -180,26 +225,31 @@
       "aliases": [],
       "name": "Space Bunny",
       "vendor": "unknown",
-      "contextWindow": null,
-      "source": null,
+      "contextWindow": 300000,
+      "source": "workbuddy-bridge（实测）",
       "note": "无公开规格，保持未知。"
     },
     {
       "id": "mimo-v2.6-pro",
-      "aliases": ["mimo-v2-6-pro", "xiaomi-mimo-v2.6-pro"],
+      "aliases": [
+        "mimo-v2-6-pro",
+        "xiaomi-mimo-v2.6-pro"
+      ],
       "name": "Xiaomi MiMo V2.6 Pro",
       "vendor": "Xiaomi",
-      "contextWindow": 256000,
+      "contextWindow": 300000,
       "maxInput": 256000,
       "maxOutput": 64000,
-      "source": "community",
+      "source": "workbuddy-bridge（实测）",
       "note": "小米 MiMo 系列公开规格约 256K；未找到官方页面，按保守值。"
     }
   ],
   "codexModels": [
     {
       "id": "gpt-6-astra",
-      "aliases": ["gpt6-astra"],
+      "aliases": [
+        "gpt6-astra"
+      ],
       "name": "GPT-6 Astra",
       "vendor": "OpenAI",
       "contextWindow": 1050000,
@@ -210,7 +260,9 @@
     },
     {
       "id": "gpt-6.1-sol",
-      "aliases": ["gpt6-1-sol"],
+      "aliases": [
+        "gpt6-1-sol"
+      ],
       "name": "GPT-6.1 Sol",
       "vendor": "OpenAI",
       "contextWindow": 1050000,
@@ -221,7 +273,9 @@
     },
     {
       "id": "gpt-6.1-terra",
-      "aliases": ["gpt6-1-terra"],
+      "aliases": [
+        "gpt6-1-terra"
+      ],
       "name": "GPT-6.1 Terra",
       "vendor": "OpenAI",
       "contextWindow": 1050000,
@@ -232,7 +286,9 @@
     },
     {
       "id": "gpt-6-sol",
-      "aliases": ["gpt6-sol"],
+      "aliases": [
+        "gpt6-sol"
+      ],
       "name": "GPT-6 Sol",
       "vendor": "OpenAI",
       "contextWindow": 1050000,
@@ -243,7 +299,9 @@
     },
     {
       "id": "gpt-6-luna",
-      "aliases": ["gpt6-luna"],
+      "aliases": [
+        "gpt6-luna"
+      ],
       "name": "GPT-6 Luna",
       "vendor": "OpenAI",
       "contextWindow": 1050000,
@@ -254,7 +312,9 @@
     },
     {
       "id": "gpt-5.6-sol",
-      "aliases": ["gpt5-6-sol"],
+      "aliases": [
+        "gpt5-6-sol"
+      ],
       "name": "GPT-5.6 Sol",
       "vendor": "OpenAI",
       "contextWindow": 1050000,
@@ -265,7 +325,9 @@
     },
     {
       "id": "gpt-5.6-terra",
-      "aliases": ["gpt5-6-terra"],
+      "aliases": [
+        "gpt5-6-terra"
+      ],
       "name": "GPT-5.6 Terra",
       "vendor": "OpenAI",
       "contextWindow": 1050000,
@@ -276,7 +338,9 @@
     },
     {
       "id": "gpt-5.6-luna",
-      "aliases": ["gpt5-6-luna"],
+      "aliases": [
+        "gpt5-6-luna"
+      ],
       "name": "GPT-5.6 Luna",
       "vendor": "OpenAI",
       "contextWindow": 1050000,

@@ -1787,36 +1787,40 @@ export function createDefaultProbes(deps = {}) {
         if (!meta) return m
         return { ...m, contextWindow: meta.maxInputTokens, contextWindowSource: 'product.json' }
       })
-      // product.json 只覆盖账号可用列表的一部分（实测 6/20），
-      // 剩下的走模型上下文库的智能匹配（厂商官方规格）。
-      // fillContextWindows **不覆盖**已有值 —— product.json 优先。
-      const withCtx = fillContextWindows(withProduct, { cli: 'codebuddy' })
 
-      // **显示名可区分化**（2026-11-13 用户反馈）。
+      // **优先用桥的真实数据**（2026-11-13）。
       //
-      // ACP 返回的 `availableModels[].name` 有重名：
-      //   hy4free / hy4std 都叫 `Hy4`；hy3 / hy3-x 都叫 `Hy3`
-      // 用户在下拉里看到两个一模一样的 `Hy4`，无法知道哪个免费。
+      // 桥里恰好有 CodeBuddy 这 20 个模型的**真实** context_window 与计费信息
+      //（实测 20/20 命中）。它比 product.json（6/20）和查表（可能是官方上限
+      // 而非默认档）都准 —— 例如 hy3-x 桥上是 192K，查表会得到 256K。
       //
-      // 桥（WorkBuddy）里有这些 id 的**计费与归属**信息，用它补标注。
-      // 桥不可用时退化为不标注（保持原样，不编造）。
-      let billing = null
+      // 所以顺序是：桥 > product.json > 上下文库查表。
+      let bridgeMap = null
       try {
         const bridge = await probeWorkbuddyBridgeModels({ timeoutMs: 6000 })
-        billing = new Map(bridge.map((m) => [m.id, m]))
+        bridgeMap = new Map(bridge.map((m) => [m.id, m]))
       } catch {
-        billing = null
+        bridgeMap = null
       }
-      if (!billing) return withCtx
 
-      return withCtx.map((m) => {
-        const b = billing.get(m.id)
+      const merged = withProduct.map((m) => {
+        const b = bridgeMap?.get(m.id)
         if (!b) return m
-        // 从桥的 label 里抽出标注段（形如 `Hy4（免费 · free）` → `免费 · free`）
-        const extra = extractLabelMarks(b.label)
-        if (!extra) return m
-        return { ...m, label: `${asString(m.label) || m.id}（${extra}）` }
+        /** @type {any} */
+        const next = { ...m }
+        // 计费/归属标注
+        const marks = extractLabelMarks(b.label)
+        if (marks) next.label = `${asString(m.label) || m.id}（${marks}）`
+        // 上下文：桥的值最权威（它是账号实际可用的默认档）
+        if (Number.isFinite(b.contextWindow) && b.contextWindow > 0) {
+          next.contextWindow = b.contextWindow
+          next.contextWindowSource = 'workbuddy-bridge'
+        }
+        return next
       })
+
+      // 桥没覆盖到的，再走上下文库查表
+      return fillContextWindows(merged, { cli: 'codebuddy' })
     },
     dsh: async () => {
       // **首选：WorkBuddy 桥的完整目录**（2026-11-13 更正）。
