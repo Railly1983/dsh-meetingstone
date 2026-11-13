@@ -265,3 +265,61 @@ test('resolveJsEntry：.cmd 路径能反推出 npm 包内的 JS 入口', async (
     'codebuddy 的 probe 必须对原始路径调用 resolveJsEntry —— 否则 Windows 上会 SyntaxError',
   )
 })
+
+
+// ── 不依赖外部插件的桥（2026-11-13 用户指出的架构错误）─────────────────
+//
+// 用户原话：「我因为装了插件才有这个桥，问题是别的用户没有这个桥怎么办呢」
+//
+// 这是对的：WorkBuddy 桥是 **另一个插件**（workbuddy-to-dsh）的产物。
+// 没装它的用户就没有桥。任何数据都不能把桥当唯一来源。
+//
+// 我一度把 CodeBuddy 的计费/上下文完全改成从桥取 —— 那是错的。
+// ACP 的 `_meta` 里本来就有这些数据（credits / maxInputTokens）。
+
+test('源码契约：codebuddy 的 probe 不得依赖 WorkBuddy 桥', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../src/cli/capabilities.js', import.meta.url), 'utf8')
+
+  // 找到 codebuddy probe 的函数体范围
+  const start = src.indexOf('codebuddy: async (')
+  assert.ok(start > 0, '必须找到 codebuddy probe')
+  const tail = src.slice(start)
+  const end = tail.indexOf('dsh: async (')
+  const body = end > 0 ? tail.slice(0, end) : tail.slice(0, 2500)
+
+  assert.doesNotMatch(
+    body,
+    /probeWorkbuddyBridgeModels/,
+    'codebuddy probe 不能调用 WorkBuddy 桥 —— 没装 WorkBuddy 的用户就没有桥。' +
+      'ACP 的 _meta 里已有 credits/maxInputTokens，用它就够。',
+  )
+})
+
+test('源码契约：dsh probe 里桥只能是可选增强（宿主优先）', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../src/cli/capabilities.js', import.meta.url), 'utf8')
+  const start = src.indexOf('dsh: async (')
+  assert.ok(start > 0)
+  const body = src.slice(start, start + 3500)
+
+  // 宿主 llm 调用必须出现在桥调用之前
+  const hostIdx = body.indexOf('llm.listModels')
+  const bridgeIdx = body.indexOf('probeWorkbuddyBridgeModels')
+  if (bridgeIdx >= 0) {
+    assert.ok(
+      hostIdx > 0 && hostIdx < bridgeIdx,
+      'dsh probe 必须先问宿主（ctx.llm.listModels），桥只能作为补充 —— ' +
+        '反过来会让没装 WorkBuddy 的用户看不到模型',
+    )
+  }
+})
+
+test('ACP 的 _meta 提供了 credits 与 maxInputTokens（不依赖桥的依据）', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../src/cli/capabilities.js', import.meta.url), 'utf8')
+  // 解析逻辑里必须读 _meta
+  assert.match(src, /_meta/, '必须从 ACP 的 _meta 读数')
+  assert.match(src, /maxInputTokens/, '必须读 _meta.maxInputTokens 作为上下文')
+  assert.match(src, /credits/, '必须读 _meta.credits 区分免费/收费')
+})

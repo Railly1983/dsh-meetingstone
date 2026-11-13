@@ -641,7 +641,19 @@ export function extractHostModels(value) {
             : ''
       if (effortId && !strengths.includes(effortId)) strengths.push(effortId)
     }
-    models.push({ id, label, strengths })
+    // 宿主有时会带 contextWindow / maxInputTokens；有就保留（不覆盖上游的值）。
+    const hostCtx =
+      Number(raw.contextWindow) ||
+      Number(raw.context_window) ||
+      Number(raw.maxInputTokens) ||
+      Number(raw.max_input_tokens) ||
+      0
+    models.push({
+      id,
+      label,
+      strengths,
+      ...(hostCtx > 0 ? { contextWindow: hostCtx, contextWindowSource: 'host' } : {}),
+    })
   }
   return { models, notes }
 }
@@ -1313,15 +1325,24 @@ export async function probeCodebuddyModels({
           : []
         const configOptions = Array.isArray(result.configOptions) ? result.configOptions : []
         const thoughtOption = configOptions.find((/** @type {any} */ o) => o && o.id === 'thought_level')
-        const strengths = Array.isArray(thoughtOption?.options)
+        const strengthsFromGlobal = Array.isArray(thoughtOption?.options)
           ? thoughtOption.options.map((/** @type {any} */ o) => String(o?.value ?? o)).filter(Boolean)
           : []
-        // **关键**：`availableModels[].id` 是**显示名**（如 `Hy4`、`Kimi-K3.1-Pro`），
-        // 不是能传给 `--model` 的 id。真正可用的是 `configOptions` 里
-        // `id === 'model'` 那一项的 `options[].value`（如 `hy4free`、`kimi-k3.1-pro`）。
+        // **关键**：`availableModels[].modelId` 才是能传给 `--model` 的 id。
+        // 早期版本读 `id`，拿到的是显示名（`Hy4`），是个 bug；现在两种都认。
         //
-        // 2026-11-12 实测：两者按顺序一一对应，数量相同（各 20 个）。
-        // 如果数量不一致，退回用 availableModels 的 id（至少能显示，标 unknown 来源）。
+        // **每个模型的元数据在 `_meta` 里**（2026-11-13 实测）：
+        //   _meta: {
+        //     credits: "x0.00 credits",        ← 计费倍率（x0.00 = 免费）
+        //     maxInputTokens: 960000,          ← 上下文窗口
+        //     supportsImages: true,
+        //     supportsReasoning: true,
+        //     effortOptions: [{ value: 'high', name: 'High' }]
+        //   }
+        //
+        // **这是 ACP 自带的数据，不需要任何外部依赖。**
+        // 之前我用 WorkBuddy 桥补这些信息，那是错的：桥是另一个插件的产物，
+        // 没装 WorkBuddy 的用户就没有它。所有信息必须从 ACP 本身拿。
         const modelOption = configOptions.find((/** @type {any} */ o) => o && o.id === 'model')
         const wireIds = Array.isArray(modelOption?.options)
           ? modelOption.options.map((/** @type {any} */ o) => String(o?.value ?? o ?? '')).filter(Boolean)
@@ -1330,13 +1351,23 @@ export async function probeCodebuddyModels({
 
         done(
           available.map((/** @type {any} */ m, /** @type {number} */ index) => {
-            const displayId = String(m?.id ?? m?.name ?? '')
+            const displayId = String(m?.modelId ?? m?.id ?? m?.name ?? '')
             const wireId = useWireIds ? wireIds[index] : displayId
+            const meta = m && typeof m._meta === 'object' && m._meta ? m._meta : {}
+            const displayName = String(m?.name ?? m?.modelId ?? m?.id ?? '')
+            const creditsRaw = meta.credits ?? m?.description ?? ''
+            const perModelEfforts = Array.isArray(meta.effortOptions)
+              ? meta.effortOptions.map((/** @type {any} */ e) => String(e?.value ?? e)).filter(Boolean)
+              : []
+            const strengths = perModelEfforts.length > 0 ? perModelEfforts : strengthsFromGlobal
+            const ctx = Number(meta.maxInputTokens)
             return {
               // id 用于派单（--model 的值）；label 用于界面显示
               id: wireId || displayId,
-              label: displayId || wireId,
-              description: typeof m?.description === 'string' ? m.description : undefined,
+              label: buildAcpModelLabel(displayName || wireId, creditsRaw, meta, wireId || displayId),
+              ...(Number.isFinite(ctx) && ctx > 0
+                ? { contextWindow: ctx, contextWindowSource: 'acp' }
+                : {}),
               ...(strengths.length > 0 ? { strengths: [...strengths] } : {}),
             }
           }),
@@ -1574,23 +1605,86 @@ export async function probeWorkbuddyBridgeModels(opts = {}) {
 }
 
 /**
- * 从桥生成的 label 里抽出标注段。
+ * 用 **ACP 自带**的字段生成可区分的模型显示名。
  *
- * `Hy4（免费 · free）` → `免费 · free`
- * `GLM-5.3（x0.69）`   → `x0.69`
- * `Hy4`                → `''`（没有标注）
+ * ## 为什么需要
  *
- * 用于把桥的计费/归属信息复用到**别的来源**（如 CodeBuddy 的 ACP 结果），
- * 让同一个模型在不同入口有一致的可区分标注。
+ * ACP 的 `availableModels` 里有多组同名：
+ *   `hy4free` 与 `hy4std` 都叫 `Hy4`；`hy3` 与 `hy3-x` 都叫 `Hy3`。
+ * 用户在下拉里看到两个一模一样的 `Hy4`，不知道哪个免费。
  *
- * @param {any} label
+ * ## 数据来源（全部来自 ACP，无外部依赖）
+ *
+ * ACP 的每个模型条目带：
+ * - `modelId`：可传给 `--model` 的真 id（如 `hy4free`）
+ * - `name`：显示名（如 `Hy4`）
+ * - `description`：`x0.00 credits` / `x0.29 credits`
+ * - `_meta.credits`：同上的结构化形式
+ *
+ * 所以「免费 / 倍率」信息 **ACP 自己就有**（在 `_meta.credits` 或 `description`），
+ * 不需要 WorkBuddy 桥 —— 那是另一个插件的产物，不能作为本插件的依赖。
+ *
+ * @param {string} name 显示名
+ * @param {any} creditsRaw `x0.00 credits` 这样的原始串
+ * @param {any} meta ACP 的 `_meta`
  * @returns {string}
  */
-function extractLabelMarks(label) {
-  const s = asString(label)
-  const m = s.match(/（(.+)）\s*$/)
-  return m && m[1] ? m[1] : ''
+function buildAcpModelLabel(name, creditsRaw, meta, modelId) {
+  const base = asString(name) || 'unknown'
+  /** @type {string[]} */
+  const marks = []
+
+  // 1) 计费：从 "x0.00 credits" 里抽数字；0 → 免费
+  const creditText = asString(creditsRaw) || asString(meta?.credits)
+  const creditMatch = creditText.match(/x?\s*([0-9]+(?:\.[0-9]+)?)/i)
+  if (creditMatch) {
+    const value = Number(creditMatch[1])
+    if (Number.isFinite(value)) {
+      marks.push(value === 0 ? '免费' : `x${value}`)
+    }
+  }
+
+  // 2) 同族重名时补 id 区分段（`hy4free` → `free`、`hy3-x` → `x`）
+  //
+  //    为什么需要：`hy4free`（免费）与 `hy4std`（x0.29）都叫 `Hy4`。
+  //    只加计费标注虽然能区分（「免费」vs「x0.29」），但同一家族里
+  //    `hy3` / `hy3-b` / `hy3-c` 三个都是「免费」，仍然分不开。
+  //    补上 id 的差异段后，任意两条都唯一。
+  //
+  //    做法：在**原始 modelId** 上找 display name 的归一化前缀长度，取剩余部分。
+  //    只用于显示，id 本身不动。
+  const displayKey = base.toLowerCase().replace(/[\s_.-]+/g, '')
+  const rawId = asString(modelId)
+  const idKey = rawId.toLowerCase().replace(/[\s_.-]+/g, '')
+  if (rawId && idKey !== displayKey && idKey.startsWith(displayKey)) {
+    // 逐字符对齐，找出原始 id 里「display 名之后」的起点
+    let i = 0
+    let j = 0
+    const lowerId = rawId.toLowerCase()
+    const lowerBase = base.toLowerCase()
+    while (i < lowerId.length && j < lowerBase.length) {
+      const ch = lowerId[i]
+      if (/[\s_.-]/.test(ch)) {
+        i += 1
+        continue
+      }
+      if (ch === lowerBase[j]) {
+        i += 1
+        j += 1
+        continue
+      }
+      break
+    }
+    const suffix = rawId.slice(i).replace(/^[\s_.-]+/, '')
+    if (suffix && suffix.length <= 14 && /^[a-z0-9][a-z0-9-]*$/i.test(suffix)) {
+      marks.push(suffix)
+    }
+  }
+
+  return marks.length > 0 ? `${base}（${marks.join(' · ')}）` : base
 }
+
+
 
 /**
  * 给桥返回的模型生成**可区分**的显示名。
@@ -1777,145 +1871,112 @@ export function createDefaultProbes(deps = {}) {
       // 直接交给 node 会 SyntaxError。必须解析回真正的 JS 入口。
       const exe = resolveJsEntry(raw, 'codebuddy')
       const models = await probeCodebuddyModels({ executable: exe, spawnImpl: deps.spawnImpl })
-      // 补上下文窗口（2026-11-13）。
-      // ACP 的 configOptions 已不再包含 context_window（实测 20 个模型都没有），
-      // 改从安装包自带的 product.json 取 maxInputTokens。
-      // **只对命中的模型补**；不命中的保持 undefined，UI 显示「未知」。
+
+      // 上下文的补全顺序（2026-11-13 重写，**不依赖 WorkBuddy 桥**）：
+      //   1. ACP 的 `_meta.maxInputTokens`  —— probeCodebuddyModels 已经带出来
+      //   2. 安装包的 `product.json`        —— 厂商随包发布的元数据
+      //   3. 模型上下文库查表                —— 公开规格
+      //
+      // 之前这里用了 WorkBuddy 桥，那是**架构错误**：桥是另一个插件的产物，
+      // 没装 WorkBuddy 的用户根本没有它，不能作为本插件的依赖。
       const productModels = readCodebuddyProductModels(exe)
       const withProduct = models.map((m) => {
+        if (Number.isFinite(m.contextWindow) && m.contextWindow > 0) return m // ACP 已有，最高优先
         const meta = productModels.get(m.id)
         if (!meta) return m
         return { ...m, contextWindow: meta.maxInputTokens, contextWindowSource: 'product.json' }
       })
-
-      // **优先用桥的真实数据**（2026-11-13）。
-      //
-      // 桥里恰好有 CodeBuddy 这 20 个模型的**真实** context_window 与计费信息
-      //（实测 20/20 命中）。它比 product.json（6/20）和查表（可能是官方上限
-      // 而非默认档）都准 —— 例如 hy3-x 桥上是 192K，查表会得到 256K。
-      //
-      // 所以顺序是：桥 > product.json > 上下文库查表。
-      let bridgeMap = null
-      try {
-        const bridge = await probeWorkbuddyBridgeModels({ timeoutMs: 6000 })
-        bridgeMap = new Map(bridge.map((m) => [m.id, m]))
-      } catch {
-        bridgeMap = null
-      }
-
-      const merged = withProduct.map((m) => {
-        const b = bridgeMap?.get(m.id)
-        if (!b) return m
-        /** @type {any} */
-        const next = { ...m }
-        // 计费/归属标注
-        const marks = extractLabelMarks(b.label)
-        if (marks) next.label = `${asString(m.label) || m.id}（${marks}）`
-        // 上下文：桥的值最权威（它是账号实际可用的默认档）
-        if (Number.isFinite(b.contextWindow) && b.contextWindow > 0) {
-          next.contextWindow = b.contextWindow
-          next.contextWindowSource = 'workbuddy-bridge'
-        }
-        return next
-      })
-
-      // 桥没覆盖到的，再走上下文库查表
-      return fillContextWindows(merged, { cli: 'codebuddy' })
+      return fillContextWindows(withProduct, { cli: 'codebuddy' })
     },
     dsh: async () => {
-      // **首选：WorkBuddy 桥的完整目录**（2026-11-13 更正）。
+      // **顺序很重要（2026-11-13 重写）**：
+      //   1. 宿主 `ctx.llm.listModels(provider)` —— 官方接口，任何环境都有
+      //   2. WorkBuddy 桥 —— **可选增强**：桥上目录更全（59 个 vs 适配层过滤后的少数），
+      //      但桥是另一个插件（`workbuddy-to-dsh`）的产物，**没装就没有**。
       //
-      // 实测：桥上有 59 个模型且每个都带 context_window / max_output / reasoning_efforts；
-      // 而 `ctx.llm.listModels(provider)` 只返回适配层过滤后的子集（本机实测 1~3 个）。
-      // 用户反馈「我接的起码有 20 个模型」——桥才是真相源。
-      //
-      // 桥不可用（没装 WorkBuddy / 桥没起 / 无令牌）时，回退到宿主 ctx.llm。
-      let bridgeModels = null
-      let bridgeError = ''
-      try {
-        bridgeModels = await probeWorkbuddyBridgeModels({ timeoutMs: 8000 })
-      } catch (error) {
-        bridgeError = error instanceof Error ? error.message : String(error)
-      }
-      if (Array.isArray(bridgeModels) && bridgeModels.length > 0) {
-        return fillContextWindows(bridgeModels, { cli: 'dsh' })
-      }
-
-      // 回退：宿主 llm 服务
-      const ctx = deps.ctx
-      if (!ctx) throw new Error(bridgeError ? `桥不可用（${bridgeError}），且宿主 ctx 不可用` : '宿主 ctx 不可用')
-      let llm = null
-      try {
-        llm = ctx.llm ?? (typeof ctx.get === 'function' ? ctx.get('llm') : null)
-      } catch {
-        llm = null
-      }
-      if (!llm || typeof llm.listModels !== 'function') {
-        throw new Error(bridgeError ? `桥不可用（${bridgeError}），且宿主 llm.listModels 不可用` : '宿主 llm.listModels 不可用')
-      }
-
-      // **关键修复（2026-11-13）**：宿主 `llm.listModels(provider)` **需要 provider 参数**。
-      //
-      // 取证：`app.asar: dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js`
-      //   async listModels(provider) {
-      //     return this.dependencies.discoverModels?.(provider) ?? []
-      //   }
-      //
-      // 之前我们调 `llm.listModels()`（无参）→ `discoverModels(undefined)` → 返回空，
-      // 于是 DSH 的模型列表只剩配置里的那一个。用户反馈「我接的起码有 20 个模型」
-      // 就是这个原因。
-      //
-      // 现在：先问宿主有哪些 provider，再逐个 `listModels(provider)` 并合并去重。
-      // 拿不到 provider 清单时退回无参调用（保持旧行为，不至于完全失效）。
-      /** @type {string[]} */
-      let providers = []
-      try {
-        // 宿主的 llm 服务通常有 providers() / listProviders()；两种都试。
-        if (typeof llm.providers === 'function') {
-          const raw = await llm.providers()
-          if (Array.isArray(raw)) providers = raw.map((p) => asString(p?.id ?? p?.name ?? p)).filter(Boolean)
-        } else if (typeof llm.listProviders === 'function') {
-          const raw = await llm.listProviders()
-          if (Array.isArray(raw)) providers = raw.map((p) => asString(p?.id ?? p?.name ?? p)).filter(Boolean)
-        }
-      } catch {
-        providers = []
-      }
-
+      // 所以桥只能用来**补**宿主给不出的模型，不能当唯一来源。
+      // 早前把桥当首选是架构错误：那会让「没装 WorkBuddy 的用户一个模型都看不全」。
       /** @type {Map<string, any>} */
       const merged = new Map()
+
+      // 1) 宿主（权威，必走）
+      const ctx = deps.ctx
       /** @type {string[]} */
-      const errors = []
-
-      const takeFrom = (value) => {
-        const { models } = extractHostModels(value)
-        for (const m of models) {
-          if (m && m.id && !merged.has(m.id)) merged.set(m.id, m)
+      const hostErrors = []
+      if (ctx) {
+        let llm = null
+        try {
+          llm = ctx.llm ?? (typeof ctx.get === 'function' ? ctx.get('llm') : null)
+        } catch {
+          llm = null
         }
-        return models.length
-      }
-
-      if (providers.length > 0) {
-        for (const provider of providers) {
+        if (llm && typeof llm.listModels === 'function') {
+          // 宿主 `listModels(provider)` 需要 provider 参数（取证：
+          // dsh-llm-deepseek/lib/index.js: `async listModels(provider) { return
+          // this.dependencies.discoverModels?.(provider) ?? [] }`）。
+          // 无参调用会返回空 —— 这是「DSH 只有 1 个模型」的成因之一。
+          /** @type {string[]} */
+          let providers = []
           try {
-            const value = await llm.listModels(provider)
-            takeFrom(value)
-          } catch (error) {
-            errors.push(`${provider}: ${error instanceof Error ? error.message : String(error)}`)
+            if (typeof llm.listProviders === 'function') {
+              const raw = llm.listProviders()
+              const list = raw && typeof raw.then === 'function' ? await raw : raw
+              if (Array.isArray(list)) {
+                providers = list.map((p) => asString(p?.id ?? p?.name ?? p)).filter(Boolean)
+              }
+            } else if (typeof llm.providers === 'function') {
+              const raw = await llm.providers()
+              if (Array.isArray(raw)) {
+                providers = raw.map((p) => asString(p?.id ?? p?.name ?? p)).filter(Boolean)
+              }
+            }
+          } catch {
+            providers = []
+          }
+          const takeFrom = (value) => {
+            const { models } = extractHostModels(value)
+            for (const m of models) {
+              if (m && m.id && !merged.has(m.id)) merged.set(m.id, m)
+            }
+          }
+          if (providers.length > 0) {
+            for (const provider of providers) {
+              try {
+                takeFrom(await llm.listModels(provider))
+              } catch (error) {
+                hostErrors.push(`${provider}: ${error instanceof Error ? error.message : String(error)}`)
+              }
+            }
+          } else {
+            try {
+              takeFrom(await llm.listModels())
+            } catch (error) {
+              hostErrors.push(error instanceof Error ? error.message : String(error))
+            }
           }
         }
-      } else {
-        // 拿不到 provider 清单：退回无参（旧行为）
-        const value = await llm.listModels()
-        takeFrom(value)
+      }
+
+      // 2) 桥（可选增强，失败静默 —— 它本来就不是必需依赖）
+      try {
+        const bridge = await probeWorkbuddyBridgeModels({ timeoutMs: 6000 })
+        for (const m of bridge) {
+          if (!m?.id) continue
+          // 宿主已有的不覆盖（宿主是权威）；缺的补上。
+          if (!merged.has(m.id)) merged.set(m.id, m)
+        }
+      } catch {
+        /* 桥不可用是正常情况（用户没装 WorkBuddy），不影响功能 */
       }
 
       const models = [...merged.values()]
-      if (models.length === 0 && errors.length > 0) {
-        throw new Error(`宿主 llm.listModels 全部失败：${errors.slice(0, 3).join(' | ')}`)
+      if (models.length === 0) {
+        throw new Error(
+          hostErrors.length > 0
+            ? `宿主 llm.listModels 全部失败：${hostErrors.slice(0, 3).join(' | ')}`
+            : '宿主 llm 没有返回任何模型（listProviders/listModels 均不可用）',
+        )
       }
-      // 宿主 listModels 不保证带 contextWindow，用模型上下文库补。
-      // 已经有值的不覆盖。
       return fillContextWindows(models, { cli: 'dsh' })
     },
   }
