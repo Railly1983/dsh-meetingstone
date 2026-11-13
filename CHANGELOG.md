@@ -2,6 +2,66 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.27] - 2026-11-13
+
+### Fixed
+
+- **DSH 模型数是 59 不是 1**。之前只问宿主 `ctx.llm.listModels(provider)`，
+  返回的是适配层**过滤后**的子集。真相源是 WorkBuddy 本地桥：
+  `GET /v1/models` 只有 3 个，`GET /v1/models?all=1` 有 **59 个**（含 context_window、
+  max_output_tokens、reasoning_efforts、credits）。新增 `probeWorkbuddyBridgeModels()`，
+  桥优先、宿主 llm 回退。令牌在 `~/.workbuddy-bridge/bridge-token`。
+
+- **Codex 是 8 个不是 2 个**。之前报的 2 个来自静态表，从未实测。
+  真相：`codex app-server` 的 `model/list` 返回 8 个（在 `result.data`），
+  每个带 6 档思考强度。之前探不到的根因是**路径解析失败**：
+  Codex 桌面应用把 CLI 放在 `~/.codex/.sandbox-bin/codex.exe`，
+  不在 PATH / Appx / 三个固定目录里。给 CLI_SPECS 加 `knownDirs` 并让
+  `createKnownDirResolver` 支持它。
+
+- **`refresh()` 里没有 codebuddy 分支**。所以即使写了 probe，刷新时也永不调用，
+  CodeBuddy 一直只显示配置里的 4 个模型。这是「只有我之前用的选项」的第二个成因。
+
+- **`steer` 承诺了做不到的事**。用户点宿主「插话发送」后两个任务被中止。
+  入口是宿主的改不了，但我们的工具描述把「中途插话」放在第一句、
+  真相埋在第 4 句、还说「回执里的 mode 会明确区分」（把披露推到事后）。
+  现在改为「⚠️ 调用前必读」+ 前置后果；`list_runs`/`get_task` 加 `steerMode`/`steerNote`
+  事前标注。
+
+### Added
+
+- **模型上下文库 + 智能匹配**（`src/cli/model-context-catalog.json` + `model-context-library.js`）。
+  当语法探测拿不到 contextWindow 时，按五级策略匹配（归一化/别名/去后缀/前缀/家族），
+  每条记录带 `aliases`/`source`/`note` 可追溯。匹配不上返回 null，**不瞎猜**。
+  覆盖：DSH 57/59、CodeBuddy 19/20、Codex 8/8。
+
+- `scripts/probe-codebuddy-models.mjs` / `probe-codex-models.mjs` /
+  `probe-workbuddy-bridge.mjs`：三个独立探测器，可单独跑。
+- `scripts/verify-installed-refreshcli.mjs`：验证**已安装版本**的 refreshCli
+  （悟空方法产品化，含两个负对照，11 PASS）。
+- `scripts/verify-steer-disclosure.mjs`：31 项披露验证（悟空写）。
+- `tests/host-remote-impl.test.mjs`：桩掉 Typert 协议让 refreshCli **真正执行**。
+  已验证能抓到原 bug（注入后 6 条全红，修复后全绿）。
+- `tests/model-context-library.test.mjs`：11 条（含保守边界：查不到必须返回 null）。
+- `tests/capability-source-truth.test.mjs`：8 条（没有 probe 的 CLI 来源不能是 discovered）。
+
+### Changed
+
+- **刷新策略改「首次 + 手动」**。之前 5 分钟 TTL，每次打开设置页可能静默起
+  一个 `codebuddy --acp` 子进程（约 5 秒）。现在只在本进程首次读快照时刷一次，
+  之后只在点「刷新能力」时刷。
+
+### 模型清单（实测）
+
+| 来源 | 数量 | 方式 |
+|---|---|---|
+| DSH（WorkBuddy 桥） | **59** | `/v1/models?all=1` |
+| CodeBuddy | **20** | ACP `session/new` |
+| Codex | **8** | app-server `model/list` |
+| Claude Code | 3 别名 | 静态（无枚举接口） |
+
+689 tests / 688 pass，门禁 10 PASS。
+
 ## [0.1.0-alpha.26] - 2026-11-12
 
 ### Fixed
