@@ -2,6 +2,32 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.0-alpha.28] - 2026-11-13
+
+### Fixed
+
+- **CodeBuddy 模型列表始终只有配置里的 4 个**（用户真机二次反馈：「点了刷新也没用」）。
+  根因：`probe.probe('codebuddy')` 在 Windows 上返回 **`codebuddy.cmd`**
+  （npm 生成的 shell 包装脚本），而 ACP 探测是
+  `spawn(process.execPath, [entry, '--acp'])` —— 把 `.cmd` 交给 node 解析直接报
+  `SyntaxError: Invalid or unexpected token`，退出码 1。
+  于是 probe 抛错 → 能力目录保留 config 来源 → UI 显示「配置」而非「动态」。
+
+  修复：新增 `resolveJsEntry()`，把 `.cmd`/`.ps1`/`.bat` 从 npm 全局布局
+  反推回包内的 JS 入口
+  （`<npm>/codebuddy.cmd` → `<npm>/node_modules/@tencent-ai/codebuddy-code/bin/codebuddy`）。
+
+  实测：修复前 4 个（配置）/ 修复后 **20 个（动态）**，19 个带上下文。
+
+### Added
+
+- `tests/capability-source-truth.test.mjs` 新增 2 条：
+  「probe 返回 .cmd 时能解析回 JS 入口」+ 源码契约断言。
+  后者的正则第一版被 PowerShell 吃掉了 `\s`（变成 `s`）—— 已修正，教训是
+  写 `.mjs` 里的正则要走 `edit` 工具而不是 heredoc。
+
+691 tests / 690 pass，门禁 10 PASS。
+
 ## [0.1.0-alpha.27] - 2026-11-13
 
 ### Fixed

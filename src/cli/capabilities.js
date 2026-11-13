@@ -1395,6 +1395,65 @@ export async function probeCodebuddyModels({
 }
 
 /**
+ * 把 CLI 的探测路径解析成「能用 `node` 直接跑的 JS 入口」。
+ *
+ * ## 为什么需要（2026-11-13 真机暴露）
+ *
+ * `probe.probe('codebuddy')` 在 Windows 上返回的是 **`codebuddy.cmd`**
+ * （`C:\Users\<u>\AppData\Roaming\npm\codebuddy.cmd`）—— 那是 npm 生成的
+ * shell 包装脚本，**不是** JavaScript。
+ *
+ * 我们的 ACP 探测是 `spawn(process.execPath, [entry, '--acp'])`，
+ * 把 `.cmd` 交给 node 解析会直接报：
+ *   `SyntaxError: Invalid or unexpected token` → 退出码 1
+ * → probe 抛错 → 能力目录保留 config 来源
+ * → UI 显示「配置」而不是「动态」→ 用户看到只有 4 个模型。
+ *
+ * ## 解析规则
+ *
+ * - `.js` / `.mjs` / `.cjs` → 原样
+ * - `.cmd` / `.ps1` / `.bat` → 从 npm 全局布局反推：
+ *   `<npm>/codebuddy.cmd` → `<npm>/node_modules/@tencent-ai/codebuddy-code/bin/codebuddy`
+ * - 其他（`.exe`）→ 原样返回，由调用方决定（外部 CLI 可执行文件本来就该直接跑）
+ *
+ * @param {string} cliPath
+ * @param {string} cli
+ * @returns {string}
+ */
+function resolveJsEntry(cliPath, cli) {
+  const p = String(cliPath || '')
+  if (!p) return p
+  const lower = p.toLowerCase()
+  if (lower.endsWith('.js') || lower.endsWith('.mjs') || lower.endsWith('.cjs')) return p
+  if (!/\.(cmd|ps1|bat)$/.test(lower)) return p
+
+  // Windows npm 全局布局：<prefix>/<name>.cmd → <prefix>/node_modules/<pkg>/<bin>
+  const dir = dirname(p)
+  const NPM_PKG = {
+    codebuddy: '@tencent-ai/codebuddy-code',
+    codex: '@openai/codex',
+    claude: '@anthropic-ai/claude-code',
+  }
+  const pkg = NPM_PKG[cli]
+  if (pkg) {
+    // 该包的入口脚本（从 package.json 的 bin 字段实测）
+    const BIN_REL = {
+      codebuddy: ['bin', 'codebuddy'],
+    }
+    const rel = BIN_REL[cli] || []
+    if (rel.length > 0) {
+      const candidate = join(dir, 'node_modules', ...pkg.split('/'), ...rel)
+      try {
+        if (readFileSync(candidate)) return candidate
+      } catch {
+        /* 不存在就往下走 */
+      }
+    }
+  }
+  return p
+}
+
+/**
  * 从 WorkBuddy 本地桥读取**完整**模型目录。
  *
  * ## 为什么需要（2026-11-13 用户反馈）
@@ -1594,8 +1653,11 @@ export function createDefaultProbes(deps = {}) {
     // CodeBuddy：走 ACP session/new 拿账号实际可用的模型（2026-11-12 实测 20 个）。
     // 之前没有这个 probe，模型只来自 profile 配置（用户看到 4 个）。
     codebuddy: async ({ executable }) => {
-      const exe = executable || (await resolveExecutable('codebuddy'))
-      if (!exe) throw new Error('codebuddy 入口脚本不可用')
+      const raw = executable || (await resolveExecutable('codebuddy'))
+      if (!raw) throw new Error('codebuddy 入口脚本不可用')
+      // **关键**：probe 在 Windows 上返回的是 `codebuddy.cmd`（npm 包装脚本），
+      // 直接交给 node 会 SyntaxError。必须解析回真正的 JS 入口。
+      const exe = resolveJsEntry(raw, 'codebuddy')
       const models = await probeCodebuddyModels({ executable: exe, spawnImpl: deps.spawnImpl })
       // 补上下文窗口（2026-11-13）。
       // ACP 的 configOptions 已不再包含 context_window（实测 20 个模型都没有），

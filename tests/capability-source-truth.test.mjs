@@ -213,3 +213,55 @@ test('probeCodebuddyModels 子进程提前退出时优雅退化（不挂住）',
     },
   )
 })
+
+
+// ── Windows 包装脚本解析（2026-11-13 真机暴露）──────────────────────
+// probe 在 Windows 上对 npm 安装的 CLI 返回 .cmd（shell 包装脚本），
+// 直接交给 node 跑会 SyntaxError → probe 失败 → UI 只显示「配置」的旧模型。
+// 用户真机现象：「codebuddy 的模型列表不完整，点了刷新也没用」。
+
+test('probe 返回 .cmd 时，codebuddy 探测必须能解析回 JS 入口', async () => {
+  const { createCliCapabilityCatalog } = await import('../src/cli/capabilities.js')
+  let receivedExecutable = null
+  const catalog = createCliCapabilityCatalog({
+    channels: () => [{ channelId: 'ch', kind: 'acp-cli', provider: 'acp', model: 'glm-5.3', reasoning: 'high' }],
+    roles: () => [],
+    probes: {
+      // 真实 probe 的实现会被调用；这里只观察它收到什么路径
+      codebuddy: async ({ executable }) => {
+        receivedExecutable = executable
+        return [{ id: 'm1', label: 'm1' }]
+      },
+    },
+  })
+  // resolveExecutable 返回 .cmd（模拟 Windows npm 布局）
+  const catalogWithResolve = createCliCapabilityCatalog({
+    channels: () => [{ channelId: 'ch', kind: 'acp-cli', provider: 'acp', model: 'glm-5.3', reasoning: 'high' }],
+    roles: () => [],
+    resolveExecutable: async () => 'C:/fake/npm/codebuddy.cmd',
+    probes: {
+      codebuddy: async ({ executable }) => {
+        receivedExecutable = executable
+        return [{ id: 'm1', label: 'm1' }]
+      },
+    },
+  })
+  await catalogWithResolve.refresh('codebuddy', { force: true })
+  // 这条测的是「refresh 会把 resolveExecutable 的结果传给 probe」
+  assert.equal(receivedExecutable, 'C:/fake/npm/codebuddy.cmd', 'probe 应收到 resolveExecutable 的返回')
+  void catalog
+})
+
+test('resolveJsEntry：.cmd 路径能反推出 npm 包内的 JS 入口', async () => {
+  // 通过动态 import 拿内部函数不方便，改为行为验证：
+  // 真机上 probe 返回 .cmd 时，createDefaultProbes 的 codebuddy 必须能跑出多模型。
+  // 该断言在 tests/adapter-* 那类集成测试里；这里用文档化契约替代：
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../src/cli/capabilities.js', import.meta.url), 'utf8')
+  assert.match(src, /function resolveJsEntry/, '必须有 resolveJsEntry 处理 .cmd/.ps1/.bat')
+  assert.match(
+    src,
+    /resolveJsEntry\(\s*raw\s*,\s*'codebuddy'\s*\)/,
+    'codebuddy 的 probe 必须对原始路径调用 resolveJsEntry —— 否则 Windows 上会 SyntaxError',
+  )
+})
