@@ -26,30 +26,13 @@ jobs:
       - name: 安装开发依赖（测试用：zod / cordis / yaml）
         run: npm install --no-audit --no-fund
 
-      - name: 诊断（CI 环境差异排查）
-        run: |
-          node --version
-          npm --version
-          node -e "console.log('zod:', (()=>{try{return require.resolve('zod')}catch(e){return 'MISSING'}})())"
-          node -e "console.log('cordis:', (()=>{try{return require.resolve('@deepseek-ai/cordis')}catch(e){return 'MISSING'}})())"
-          node -e "console.log('yaml:', (()=>{try{return require.resolve('yaml')}catch(e){return 'MISSING'}})())"
-        shell: bash
-
       - name: 语法检查
         run: node --check src/index.js
 
+      # 用包装脚本而不是裸 `npm test`：CI 日志要认证才能读，而 annotation 是公开的。
+      # 失败时它会把失败的测试名写成 annotation，否则只能看到 "exit code 1"。
       - name: 单元测试
         run: node scripts/ci-test.mjs
-        continue-on-error: false
-
-      - name: 诊断 · 直接跑 run-tests
-        if: failure()
-        run: |
-          echo "--- direct run ---"
-          node scripts/run-tests.mjs 2>&1 | tail -40
-          echo "--- exit: $? ---"
-        shell: bash
-        continue-on-error: true
 
       - name: 发布门禁 · 工具 schema 契约
         run: node scripts/verify-host-schema.mjs
