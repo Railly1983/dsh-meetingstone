@@ -54,14 +54,12 @@ emit(
 
 if (status !== 0) {
   const lines = combined.split(/\r?\n/)
-  // 优先抓真正的失败信号，而不是普通日志行。
-  const signals = lines.filter((line) =>
-    /✖|not ok |ERR_MODULE_NOT_FOUND|Cannot find (module|package)|AssertionError|Error:|error code|✖ failing/i.test(
-      line,
-    ),
-  )
-  const picked = (signals.length > 0 ? signals : lines.slice(-30)).slice(0, 25)
-  emit('error', 'TESTS-FAILED', picked.join('\n'))
+  // 只抓「测试失败」本身，排除被测代码自己打到 stderr 的噪音
+  // （例如 GUI 注册失败时会 warn，那是被测行为，不是失败原因）。
+  const failLines = lines.filter((line) => /^✖\s|^not ok \d+ -/.test(line))
+  const assertLines = lines.filter((line) => /AssertionError|ERR_MODULE_NOT_FOUND|Cannot find (module|package)/.test(line))
+  const picked = [...failLines, ...assertLines].slice(0, 25)
+  emit('error', 'FAILED-TESTS', picked.length > 0 ? picked.join('\n') : lines.slice(-30).join('\n'))
 } else {
   const summary = combined.split(/\r?\n/).filter((line) => /^# (tests|pass|fail|skipped)/.test(line))
   emit('notice', 'TESTS-PASSED', summary.join(' | '))
