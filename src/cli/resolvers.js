@@ -13,7 +13,7 @@
  * 所有函数都接受注入的 `exists` / `run`，便于测试；不在这里做缓存（由 probe.js 管）。
  */
 import { existsSync } from 'node:fs'
-import { win32, posix, isAbsolute } from 'node:path'
+import { win32, posix } from 'node:path'
 import { spawn } from 'node:child_process'
 
 
@@ -186,7 +186,10 @@ export function createAppxResolver(deps = {}) {
     const out = []
     for (const line of res.stdout.split(/\r?\n/)) {
       const location = line.trim()
-      if (!location || !isAbsolute(location)) continue
+      // 必须用 win32.isAbsolute：Appx 只会出现在 Windows，路径形如 `C:\...`。
+      // 用运行平台的 isAbsolute 会在 Linux/macOS（CI、跨平台开发机）上把
+      // `C:\Program Files\...` 判成相对路径而全部跳过 —— 2026-11-14 CI 全红根因之一。
+      if (!location || !win32.isAbsolute(location)) continue
       // 排除同族但没有 CLI 的包（如 CodexPrimaryRuntime）
       const pkgName = location.split(/[\\/]/).pop() ?? ''
       if (spec.appxPattern && !spec.appxPattern.test(pkgName)) continue

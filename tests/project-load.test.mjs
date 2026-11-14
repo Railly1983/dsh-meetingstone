@@ -1,7 +1,7 @@
 // @ts-check
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { win32 } from 'node:path'
+import { win32, join } from 'node:path'
 
 import { createProjectConfigStore } from '../src/project/load.js'
 
@@ -27,7 +27,10 @@ function makeFs(initial = {}) {
   return { files, reads, deps }
 }
 
-const root = win32.join('D:/proj', 'x')
+// 用运行平台的 join：产品实现 src/project/load.js:77 也用它。
+// 之前这里写 win32.join，在 Linux/macOS 上生成的键与产品算出的不一致，
+// Map 查不到文件 → 测试只在 Windows 成立（2026-11-14 CI 全红根因之一）。
+const root = join('proj', 'x')
 
 test('没有项目根 → 空配置 + PROJECT_ROOT_UNKNOWN', () => {
   const { deps } = makeFs()
@@ -49,7 +52,7 @@ test('文件不存在 → 空配置且**不算错误**', () => {
 })
 
 test('正常读取：解析出项目角色与覆盖', () => {
-  const path = win32.join(root, '.meetingstone.json')
+  const path = join(root, '.meetingstone.json')
   const { deps } = makeFs({
     [path]: {
       text: JSON.stringify({
@@ -69,7 +72,7 @@ test('正常读取：解析出项目角色与覆盖', () => {
 })
 
 test('坏 JSON → 降级为空配置 + INVALID_JSON，不抛异常', () => {
-  const path = win32.join(root, '.meetingstone.json')
+  const path = join(root, '.meetingstone.json')
   const { deps } = makeFs({ [path]: { text: '{ oops', mtimeMs: 5 } })
   const store = createProjectConfigStore(deps)
   const res = store.get(root)
@@ -79,7 +82,7 @@ test('坏 JSON → 降级为空配置 + INVALID_JSON，不抛异常', () => {
 })
 
 test('读取抛错 → PROJECT_CONFIG_READ_FAILED，不抛异常', () => {
-  const path = win32.join(root, '.meetingstone.json')
+  const path = join(root, '.meetingstone.json')
   const { deps } = makeFs({ [path]: { text: '{}', mtimeMs: 5 } })
   const broken = { ...deps, readFile: () => { throw new Error('EACCES') } }
   const store = createProjectConfigStore(broken)
@@ -88,7 +91,7 @@ test('读取抛错 → PROJECT_CONFIG_READ_FAILED，不抛异常', () => {
 })
 
 test('缓存：签名不变不重读；mtime 变化后重读', () => {
-  const path = win32.join(root, '.meetingstone.json')
+  const path = join(root, '.meetingstone.json')
   const { files, reads, deps } = makeFs({
     [path]: { text: JSON.stringify({ version: 1, roles: [] }), mtimeMs: 5 },
   })
@@ -106,7 +109,7 @@ test('缓存：签名不变不重读；mtime 变化后重读', () => {
 })
 
 test('invalidate 清缓存后重读', () => {
-  const path = win32.join(root, '.meetingstone.json')
+  const path = join(root, '.meetingstone.json')
   const { reads, deps } = makeFs({ [path]: { text: '{}', mtimeMs: 5 } })
   const store = createProjectConfigStore(deps)
   store.get(root)
@@ -116,7 +119,7 @@ test('invalidate 清缓存后重读', () => {
 })
 
 test('未知版本 → 降级并报 UNSUPPORTED_VERSION', () => {
-  const path = win32.join(root, '.meetingstone.json')
+  const path = join(root, '.meetingstone.json')
   const { deps } = makeFs({
     [path]: { text: JSON.stringify({ version: 99, roles: [{ roleId: 'role-x', name: 'X' }] }), mtimeMs: 1 },
   })
