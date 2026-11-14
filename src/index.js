@@ -12,6 +12,7 @@
  */
 import { Config, normalizeConfig } from './config.js'
 import { createRegistry } from './roles/registry.js'
+import { resolveEffectiveRoles } from './roles/defaults.js'
 import { createDispatcher } from './dispatch/dispatcher.js'
 import { createProbe } from './cli/probe.js'
 import { createDefaultResolvers, runCommand } from './cli/resolvers.js'
@@ -74,7 +75,7 @@ export const name = 'meetingstone'
 /** 包名，与 package.json 的 name 一致（补丁按包名解析入口）。 */
 export const PACKAGE_NAME = 'dsh-meetingstone'
 
-export const PLUGIN_VERSION = '0.1.0'
+export const PLUGIN_VERSION = '0.1.1'
 
 /**
  * 插件入口。
@@ -102,8 +103,17 @@ export function apply(ctx, config = {}) {
   // 角色来源（B3）：全局配置 + 项目根 `.meetingstone.json`；会话级覆盖已整体下线。
   const projectStore = createNodeProjectConfigStore()
 
+  /**
+   * 角色表：用户配过就用用户的，**一个都没有**时才注入开箱即用的默认角色。
+   *
+   * 默认角色只存在于内存，不写进 `cfg`，因此不会被持久化到 profile ——
+   * 用户不点保存就永远不会被固化，升级插件时默认值还能继续改进。
+   * 详见 src/roles/defaults.js。
+   */
+  const effectiveGlobalRoles = resolveEffectiveRoles(cfg.roles ?? [])
+
   /** @type {import('./roles/registry.js').RoleRegistry} */
-  const globalRegistry = createRegistry({ globalRoles: cfg.roles ?? [] })
+  const globalRegistry = createRegistry({ globalRoles: effectiveGlobalRoles })
 
   // 本机 CLI 探测：多源解析（PATH → Appx → npm 全局 → 常见目录）。
   // 设置在 GUI 之前创建：设置页「CLI 连接」直接复用同一探测器与 5 分钟缓存。
@@ -168,7 +178,8 @@ export function apply(ctx, config = {}) {
   /** P0-S2 配置写 API（Host 侧；strict Remote 端点由 U1 接线）。 */
   const configApi = createConfigGuiApi({ cfg, globalWriter, projectWriter, preflight })
 
-  // GUI 只读数据（Host half）：与工具共用同一份 registry / channels / cfg，不另建数据源。
+  // GUI 快照（Host half）：与工具共用同一份 registry / channels / cfg，不另建数据源；
+  // 角色增删改与 CLI 开关的写路径由 configApi 提供，不是只读页。
   // 最近错误由注册表错误初始化，随后由项目配置加载、派单失败、落盘失败更新。
   //
   // `sources` 必须用**原始** config 计算：Config() 会把 `enabled` 默认填成 true，
@@ -208,7 +219,8 @@ export function apply(ctx, config = {}) {
       globalRaw: config,
     })
     // 生效角色表已经合并完毕；注册表只负责解析与别名冲突判定。
-    const registry = createRegistry({ globalRoles: resolved.effective.roles })
+    // 与 globalRegistry 同一套默认角色规则：用户没配角色时注入默认角色。
+    const registry = createRegistry({ globalRoles: resolveEffectiveRoles(resolved.effective.roles) })
     // 项目文件解析错误 + 继承/覆盖错误 + 注册表语义错误
     const projectErrors = [
       ...(loaded.errors ?? []),
@@ -400,7 +412,7 @@ export function apply(ctx, config = {}) {
 
   /**
    * 工具层用的派单器：只是给 dispatch 加一个“最近错误”观察，不改变任何返回值。
-   * cancel/getTask/stats 等原样透传。GUI 只读页因此能看到真实的派单失败。
+   * cancel/getTask/stats 等原样透传。设置页因此能看到真实的派单失败。
    */
   const toolDispatcher = {
     ...dispatcher,

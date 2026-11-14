@@ -23,11 +23,14 @@ jobs:
           node-version: ${{ matrix.node }}
 
 
+      - name: 安装开发依赖（测试用：zod / cordis / yaml）
+        run: npm install --no-audit --no-fund
+
       - name: 语法检查
         run: node --check src/index.js
 
       - name: 单元测试
-        run: node --test "tests/**/*.test.mjs"
+        run: npm test
 
       - name: 发布门禁 · 工具 schema 契约
         run: node scripts/verify-host-schema.mjs

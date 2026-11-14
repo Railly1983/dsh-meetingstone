@@ -25,6 +25,7 @@
  */
 
 import { isValidRoleId } from '../roles/ids.js'
+import { DEFAULT_ROLES, hasUserRoles } from '../roles/defaults.js'
 import { CLI_PREFERENCE, applyCliPreference, isKnownCli } from '../cli/preferences.js'
 import { sanitizeRolePatch } from '../session/config.js'
 
@@ -46,6 +47,47 @@ export const GLOBAL_CONFIG_ERRORS = Object.freeze({
 
 /** @param {unknown} value */
 const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+
+/**
+ * 取「可写副本」的角色列表，并补齐开箱即用的默认角色。
+ *
+ * ## 为什么需要这个函数（2026-11-14）
+ *
+ * 默认角色只存在于内存，磁盘上的 `roles` 是空的。如果用户直接编辑或删除
+ * 一个默认角色（设置在界面上是看得见、可点的），写入器按 roleId 在磁盘数组里
+ * 找不到它，就会报 `ROLE_NOT_FOUND` —— 用户看得见却改不了，违背开箱即用。
+ *
+ * 处理方式：写之前先把默认角色**物化**进当前角色表（深拷贝，避免常量被改），
+ * 这样「编辑/删除一个默认角色」就等价于「先落盘再改」，语义自然。
+ * 注意只在写路径这样做：**读取**路径仍然只是内存注入，不会主动写盘。
+ *
+ * @param {any} current 当前全局配置
+ * @returns {any[]} 可直接修改的角色数组（已拷贝）
+ */
+function currentRoleListForUpdate(current) {
+  const raw = current && Array.isArray(current.roles) ? current.roles : []
+  const copied = raw.map((role) => {
+    if (!isPlainObject(role)) return role
+    const next = { ...role }
+    if (isPlainObject(role.channel)) next.channel = { ...role.channel }
+    if (Array.isArray(role.aliases)) next.aliases = [...role.aliases]
+    return next
+  })
+  // 用户已经配过角色：完全按用户的来，不掺默认值。
+  if (hasUserRoles(copied)) return copied
+  const existingIds = new Set(
+    copied
+      .filter(isPlainObject)
+      .map((role) => (typeof role.roleId === 'string' ? role.roleId : ''))
+      .filter(Boolean),
+  )
+  const materialized = DEFAULT_ROLES.filter((role) => !existingIds.has(role.roleId)).map((role) => ({
+    ...role,
+    aliases: [...role.aliases],
+    channel: { ...role.channel },
+  }))
+  return [...copied, ...materialized]
+}
 
 /** @param {unknown} a @param {unknown} b */
 function deepEqual(a, b) {
@@ -224,9 +266,7 @@ export function createGlobalConfigWriter(deps = {}) {
     }
 
     return update((current) => {
-      const roles = Array.isArray(current.roles)
-        ? current.roles.map((role) => (isPlainObject(role) ? { ...role } : role))
-        : []
+      const roles = currentRoleListForUpdate(current)
       const index = roles.findIndex((role) => isPlainObject(role) && role.roleId === roleId)
       if (index < 0) {
         throw Object.assign(new Error(`全局角色不存在：${roleId}`), {
@@ -284,7 +324,9 @@ export function createGlobalConfigWriter(deps = {}) {
     }
 
     return update((current) => {
-      const roles = Array.isArray(current.roles) ? current.roles.slice() : []
+      // 与 updateRole/deleteRole 同一套角色表语义：默认角色已物化，
+      // 因此「新增一个与默认角色同 ID 的角色」会正确报 ROLE_EXISTS 而不是产生重复。
+      const roles = currentRoleListForUpdate(current)
       if (roles.some((role) => isPlainObject(role) && role.roleId === roleId)) {
         throw Object.assign(new Error(`全局角色已存在：${roleId}`), {
           code: GLOBAL_CONFIG_ERRORS.ROLE_EXISTS,
@@ -316,7 +358,7 @@ export function createGlobalConfigWriter(deps = {}) {
       return fail(GLOBAL_CONFIG_ERRORS.INVALID_ROLE_ID, `角色 id 不合法：${String(roleId)}`)
     }
     return update((current) => {
-      const roles = Array.isArray(current.roles) ? current.roles.slice() : []
+      const roles = currentRoleListForUpdate(current)
       const index = roles.findIndex((role) => isPlainObject(role) && role.roleId === roleId)
       if (index < 0) {
         throw Object.assign(new Error(`全局角色不存在：${roleId}`), {

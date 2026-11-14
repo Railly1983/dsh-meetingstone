@@ -253,7 +253,7 @@ function toRoleView(role, ctx, options = {}) {
  * 角色可用性。用的是**已确认**的 `ctx.subagents.getProvider(name)`（出处见文件头第 3 条）。
  * 拿不到查询能力就返回 'unknown'——不猜、不假装可用。
  *
- * 导出供 GUI 只读快照（src/gui/host.js）复用，避免工具与设置页两处实现漂移。
+ * 导出供 GUI 快照（src/gui/host.js）复用，避免工具与设置页两处实现漂移。
  * @param {object} role
  * @param {object} ctx
  * @returns {'disabled' | 'ambiguous' | 'available' | 'provider-unavailable' | 'unknown'}
@@ -372,7 +372,7 @@ function taskResultView(record, full) {
 }
 
 /**
- * 注册八个工具。
+ * 注册十个工具（工具数由 scripts/verify-host-schema.mjs 断言，改动需同步门禁）。
  *
  * @param {object} ctx 宿主 Context（需 `ctx.tools.register`）
  * @param {object} deps

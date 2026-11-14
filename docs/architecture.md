@@ -20,7 +20,7 @@ src/index.js            装配层：读 Config → 建注册表/探测/适配器
 │   └── dispatcher.js   角色解析、并发纪律、失败回滚
 └── src/dsh/            DSH 接线层
     ├── adapter.js      ctx.subagents 适配器（provider 查询、startActivation、parent）
-    └── register.js     八个工具的注册与返回值整形
+    └── register.js     十个工具的注册与返回值整形（工具数由 verify-host-schema 门禁断言）
 ```
 
 ## 2. 一次派单的数据流

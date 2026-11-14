@@ -1419,7 +1419,7 @@ export async function probeCodebuddyModels({
       params: {
         protocolVersion: 1,
         clientCapabilities: {},
-        clientInfo: { name: 'meetingstone-probe', version: '0.1.0' },
+        clientInfo: { name: 'meetingstone-probe', version: '0.1.1' },
       },
     })
   })

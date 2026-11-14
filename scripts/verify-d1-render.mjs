@@ -1,224 +1,40 @@
 // @ts-check
 /**
- * D1 视觉验收的**自动化替代**：把设置页真实渲染出来，逐项核对。
+ * D1 视觉验收的**自动化替代**：静态核对 + 生产契约核对。
  *
- * 为什么需要它：D1 的 46 步里，有一部分本质是「渲染出来的东西对不对」，
- * 不需要人眼看 —— 只要能把真实快照喂给真实的渲染函数，检查返回的节点树即可。
+ * 2026-11-14 修正：原实现声称「把设置页真实渲染出来」，实际上从未把快照
+ * 喂给任何渲染函数；还硬编码读取开发者私有 profile，断言「至少 5 个角色」、
+ * 「CodeBuddy / Codex 必须有模型」等某台机器某时刻的状态。用户删角色就红、
+ * 产品代码改坏却可能绿 —— 属于伪测试。现改为：
+ *   - 静态核对：client 源码里的用户可见文案与控件结构（不依赖任何机器路径）
+ *   - 生产契约核对：直接 import 生产模块，验证 CLI_IDS / STATIC_CATALOG /
+ *     QUOTA / ROLE_COLOR / deriveRoleColor 的真实导出
+ * 这些断言能因生产代码回归而失败；负对照见 docs/review/independent-recheck-2026-11-14.md。
  *
  * 本脚本能自动验证的：
- * - 设置页只有两个区（外部 CLI 连接 / 全局角色库）
- * - 角色列表每行有 Switch + 角色名
- * - 两色：Switch 的 color 只有 green/gray
- * - 无「右侧栏」「本对话角色」文案
- * - 无「通道」用户可见文案
- * - 有「管理角色」按钮（页内联）
- * - 有返回按钮
- * - 模型/思考强度下拉有值
+ * - 设置页两个区（外部 CLI 连接 / 全局角色库）、角色管理按钮与二次确认
+ * - 无「右侧栏」「本对话角色」等已下线文案
+ * - 两色（green/gray）、额度枚举不含 exhausted、颜色派生不依赖额度
+ * - 能力目录固定 4 个 CLI、静态表不伪造 DSH 模型
  *
- * 不能自动验证的（仍需人眼）：
- * - 视觉布局、间距、对齐
- * - 交互手感
- * - 颜色实际呈现（我们只能验证 token 名，不能验证最终像素）
+ * 不能自动验证的（仍需人眼 / 真机）：
+ * - 视觉布局、间距、对齐、颜色实际像素
+ * - 交互手感、宿主 Gateway 真实往返
+ * （动态交互核对由 verify-d1-interaction.mjs 承担）
  *
  * 用法：node scripts/verify-d1-render.mjs
  */
 
 import { readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { dirname, join } from 'node:path'
 
-const require = createRequire(import.meta.url)
+const root = dirname(dirname(fileURLToPath(import.meta.url)))
 
-/** 极简 React 替身：只需要能构造节点树。 */
-const fakeReact = {
-  createElement(type, props, ...children) {
-    return { type, props: { ...(props ?? {}), children: children.length === 1 ? children[0] : children } }
-  },
-  Fragment: 'Fragment',
-}
-const jsx = fakeReact.createElement
-const jsxs = fakeReact.createElement
-
-/** 极简 zod 替身（client 只在 typert 契约用）。 */
-const zodStub = {
-  z: {
-    object: () => ({ strict: () => ({}) }),
-    string: () => ({ min: () => ({ max: () => ({}) }) }),
-    number: () => ({}),
-    boolean: () => ({}),
-    array: () => ({ min: () => ({}) }),
-    unknown: () => ({}),
-    enum: () => ({}),
-    literal: () => ({}),
-    union: () => ({}),
-    nullable: () => ({}),
-    optional: () => ({}),
-  },
-}
-
-/** 把返回的节点树压成可搜索的纯文本。 */
-function flatten(node, out = []) {
-  if (node === null || node === undefined || node === false) return out
-  if (typeof node === 'string' || typeof node === 'number') {
-    out.push(String(node))
-    return out
-  }
-  if (Array.isArray(node)) {
-    for (const item of node) flatten(item, out)
-    return out
-  }
-  if (typeof node === 'object') {
-    // 属性里的字符串也算（title / aria-label 等会给用户看到）
-    for (const [key, value] of Object.entries(node.props ?? {})) {
-      if (key === 'children') continue
-      if (typeof value === 'string' && value) out.push(value)
-    }
-    flatten(node.props?.children, out)
-  }
-  return out
-}
-
-/** 收集所有节点（用于按 type 查找）。 */
-function collectNodes(node, out = []) {
-  if (!node || typeof node !== 'object') return out
-  if (Array.isArray(node)) {
-    for (const item of node) collectNodes(item, out)
-    return out
-  }
-  out.push(node)
-  collectNodes(node.props?.children, out)
-  return out
-}
-
-/** 从真实 profile 提取 channels / roles，转成 host 快照形状。 */
-function buildSnapshot() {
-  const yml = readFileSync(
-    'C:/Users/30673/.dsh/profiles/desktop/cordis.patch.yml',
-    'utf8',
-  )
-  const lines = yml.split('\n')
-
-  // 解析 channels
-  const channels = []
-  let cur = null
-  const chStart = lines.findIndex((l) => /^\s+channels:\s*$/.test(l))
-  for (let i = chStart; i < lines.length; i += 1) {
-    const l = lines[i]
-    if (i > chStart && /^\s{0,6}\w+:/.test(l) && !/^\s{8,}/.test(l)) break
-    const m = l.match(/^\s+(- )?(\w+):\s*(.*)$/)
-    if (!m) continue
-    const [, , key, valRaw] = m
-    const val = valRaw.trim()
-    if (key === 'channelId') {
-      cur = { channelId: val }
-      channels.push(cur)
-    } else if (cur && val) {
-      cur[key] = val
-    }
-  }
-
-  // 解析 roles
-  const roles = []
-  cur = null
-  const roleStart = lines.findIndex((l) => /^\s+roles:\s*$/.test(l))
-  if (roleStart >= 0) {
-    for (let i = roleStart; i < lines.length; i += 1) {
-      const l = lines[i]
-      if (i > roleStart && /^\s{0,6}\w+:/.test(l) && !/^\s{8,}/.test(l)) break
-      const m = l.match(/^\s+(- )?(\w+):\s*(.*)$/)
-      if (!m) continue
-      const [, , key, valRaw] = m
-      const val = valRaw.trim()
-      if (key === 'roleId') {
-        cur = { roleId: val }
-        roles.push(cur)
-      } else if (cur && val) {
-        cur[key] = val
-      }
-    }
-  }
-
-  // 转成 host 快照的 roles 形状
-  const hostRoles = roles
-    .filter((r) => r.roleId && r.roleId.startsWith('role-'))
-    .map((r) => ({
-      roleId: r.roleId,
-      name: r.name ?? '',
-      aliases: [],
-      enabled: r.enabled !== 'false',
-      availability: r.enabled === 'false' ? 'disabled' : 'available',
-      channelId: r.channelId ?? '',
-      provider: r.provider ?? '',
-      model: r.model ?? '',
-      reasoning: r.reasoning ?? '',
-      state: {
-        userPreference: r.enabled === 'false' ? 'disabled' : 'enabled',
-        readiness: 'ready',
-        readinessReason: '',
-        quota: 'unknown',
-        color: r.enabled === 'false' ? 'gray' : 'green',
-      },
-    }))
-
-  // 能力目录：从 channels 推导（与 capabilities.js 同源）
-  const kindToCli = { 'in-process': 'dsh', 'acp-cli': 'codebuddy', codex: 'codex', 'claude-code': 'claude' }
-  const catalog = {}
-  for (const ch of channels) {
-    const cli = kindToCli[ch.kind ?? '']
-    if (!cli) continue
-    const model = ch.llmModel || ch.model
-    const bucket = catalog[cli] ?? { models: [], strengths: [], rows: [] }
-    catalog[cli] = bucket
-    if (model) {
-      bucket.models.push({ id: model, label: model, provider: ch.provider ?? null, strengths: ch.reasoning ? [ch.reasoning] : [] })
-    }
-    if (ch.reasoning) bucket.strengths.push(ch.reasoning)
-    bucket.rows.push(ch.channelId)
-  }
-
-  const CLI_IDS = ['dsh', 'claude', 'codex', 'codebuddy']
-  const CLI_LABELS = {
-    dsh: 'DeepSeek Harness',
-    claude: 'Claude Code',
-    codex: 'Codex',
-    codebuddy: 'CodeBuddy',
-  }
-  const capabilities = CLI_IDS.map((id) => ({
-    id,
-    label: CLI_LABELS[id],
-    models: catalog[id]?.models ?? [],
-    strengths: [...new Set(catalog[id]?.strengths ?? [])],
-    source: catalog[id]?.models?.length ? 'config' : 'unknown',
-  }))
-
-  return {
-    roles: hostRoles,
-    channels: channels.map((c) => ({ channelId: c.channelId, kind: c.kind ?? '' })),
-    global: {
-      defaultRoleId: 'role-bajie',
-      cli: CLI_IDS.filter((id) => id !== 'dsh').map((id) => ({
-        cli: id,
-        label: CLI_LABELS[id],
-        enabled: true,
-        state: { installed: true, version: '', source: 'probe' },
-      })),
-      capabilities,
-      limits: { maxParallelWritesTotal: 8, maxParallelWritesPerSession: 4 },
-      lastError: null,
-    },
-    locale: 'zh',
-    lastError: null,
-  }
-}
-
-const snapshot = buildSnapshot()
-
-// 加载真实的 client 模块
-const clientPath = 'D:/MeetingStone/src/client/index.js'
+// 加载真实的 client 源码做静态核对；生产契约断言则直接 import 生产模块。
+// 不模拟宿主 Cordis（真实渲染由 verify-d1-interaction.mjs 与真机验收负责）。
+const clientPath = join(root, 'src', 'client', 'index.js')
 const source = readFileSync(clientPath, 'utf8')
-
-// client 是 CommonJS-ish 的模块工厂（用 require 包了一层），直接 import 会失败。
-// 这里用最直接的办法：把 src 的 __test 从已安装版本拿不到，改为**静态分析 + 渲染追踪**。
-// 说明：完整渲染需要模拟宿主 Cordis，成本高于收益；本脚本做**结构性核对**。
 
 const checks = []
 const record = (name, pass, detail) => {
@@ -345,50 +161,69 @@ record(
   /onClick:\s*opts\.on/  .test(source) ? '存在 onClick: opts.onXxx 绑定' : '未找到回调绑定',
 )
 
-// ── 静态核对：能力目录 ────────────────────────────────────
-const cats = snapshot.global.capabilities
-record(
-  '能力目录有 4 个 CLI',
-  cats.length === 4,
-  `实际 ${cats.length} 个：${cats.map((c) => c.label).join(' / ')}`,
+// ── 契约核对：生产代码的能力目录 / 状态模型 ──────────────
+//
+// 原实现在这里断言的是 buildSnapshot() 自己造的假数据（「至少 5 个角色」
+// 「CodeBuddy 必须有模型」…），既绑定开发者私有 profile，又从未把快照喂给
+// 任何渲染函数 —— 产品代码改坏它照样绿，用户删个角色反而红。
+// 改为直接验证**生产导出**：这些断言会因生产代码回归而失败。
+const { CLI_IDS, CLI_LABELS, STATIC_CATALOG } = await import(
+  pathToFileURL(join(root, 'src', 'cli', 'capabilities.js')).href
 )
-const dsh = cats.find((c) => c.id === 'dsh')
-record(
-  'DeepSeek Harness 有模型值',
-  Boolean(dsh?.models?.length),
-  dsh?.models?.length ? dsh.models.map((m) => m.id).join(', ') : '❌ 空',
-)
-const cb = cats.find((c) => c.id === 'codebuddy')
-record(
-  'CodeBuddy 有模型值',
-  Boolean(cb?.models?.length),
-  cb?.models?.length ? cb.models.map((m) => m.id).join(', ') : '❌ 空',
-)
-const cx = cats.find((c) => c.id === 'codex')
-record(
-  'Codex 有模型值',
-  Boolean(cx?.models?.length),
-  cx?.models?.length ? cx.models.map((m) => m.id).join(', ') : '❌ 空',
-)
-record(
-  'DeepSeek Harness 与 CodeBuddy 都有 high',
-  (dsh?.strengths ?? []).includes('high') && (cb?.strengths ?? []).includes('high'),
-  `dsh=${JSON.stringify(dsh?.strengths)} codebuddy=${JSON.stringify(cb?.strengths)}`,
+const { QUOTA, ROLE_COLOR, deriveRoleColor } = await import(
+  pathToFileURL(join(root, 'src', 'gui', 'state-model.js')).href
 )
 
-// ── 静态核对：角色数据 ────────────────────────────────────
-// 断言「至少 5 个」而不是「正好 5 个」：profile 里的角色数量会随用户
-// 增删变化（包括测试期间临时建的），这不是产品缺陷。
-const enabledRoles = snapshot.roles.filter((r) => r.enabled)
 record(
-  '真实 profile 至少有 5 个启用角色',
-  enabledRoles.length >= 5,
-  `${enabledRoles.length} 个：${snapshot.roles.map((r) => r.name).join('/')}`,
+  '生产 CLI_IDS 固定为 4 个且顺序稳定',
+  CLI_IDS.length === 4 && CLI_IDS.join(',') === 'dsh,claude,codex,codebuddy',
+  `${CLI_IDS.length} 个：${CLI_IDS.join(' / ')}`,
 )
 record(
-  '所有启用角色的颜色只有 green/gray',
-  snapshot.roles.every((r) => r.state.color === 'green' || r.state.color === 'gray'),
-  [...new Set(snapshot.roles.map((r) => r.state.color))].join(', '),
+  '4 个 CLI 都有用户可见名称',
+  CLI_IDS.every((id) => typeof CLI_LABELS[id] === 'string' && CLI_LABELS[id].length > 0),
+  CLI_IDS.map((id) => `${id}=${CLI_LABELS[id] ?? '❌'}`).join(', '),
+)
+record(
+  '静态目录覆盖全部 4 个 CLI（缺项必须显式为空而不是漏掉）',
+  CLI_IDS.every((id) => Object.hasOwn(STATIC_CATALOG, id)),
+  CLI_IDS.map((id) => `${id}:${Object.hasOwn(STATIC_CATALOG, id) ? 'ok' : '❌ 缺'}`).join(' '),
+)
+record(
+  '静态目录没有伪造的 dsh 模型（DSH 模型必须走宿主 / 探测，不写死）',
+  (STATIC_CATALOG.dsh?.models ?? []).length === 0,
+  `dsh 静态模型数=${(STATIC_CATALOG.dsh?.models ?? []).length}`,
+)
+record(
+  'Claude 静态别名与强度档位非空',
+  (STATIC_CATALOG.claude?.models ?? []).length > 0 && (STATIC_CATALOG.claude?.strengths ?? []).length > 0,
+  `models=${(STATIC_CATALOG.claude?.models ?? []).length} strengths=${(STATIC_CATALOG.claude?.strengths ?? []).length}`,
+)
+
+// 状态模型：两色 + 三档额度，且颜色只由「偏好 / 就绪」决定，不碰额度。
+record(
+  'QUOTA 只有三档且不含 exhausted',
+  QUOTA.AVAILABLE === 'available' &&
+    QUOTA.UNKNOWN === 'unknown' &&
+    QUOTA.NOT_APPLICABLE === 'not_applicable' &&
+    QUOTA.EXHAUSTED === undefined,
+  JSON.stringify(QUOTA),
+)
+record(
+  'ROLE_COLOR 只有 green/gray',
+  Object.values(ROLE_COLOR).join(',') === 'gray,green',
+  JSON.stringify(ROLE_COLOR),
+)
+record(
+  '启用+就绪派生绿色，禁用派生灰色（负对照）',
+  deriveRoleColor({ userPreference: 'enabled', readiness: 'ready' }) === 'green' &&
+    deriveRoleColor({ userPreference: 'disabled', readiness: 'blocked' }) === 'gray',
+  `enabled/ready=${deriveRoleColor({ userPreference: 'enabled', readiness: 'ready' })} disabled=${deriveRoleColor({ userPreference: 'disabled', readiness: 'blocked' })}`,
+)
+record(
+  '额度不影响颜色（颜色契约不受 quota 干扰）',
+  deriveRoleColor({ userPreference: 'enabled', readiness: 'ready', quota: 'unknown' }) === 'green',
+  `quota=unknown → ${deriveRoleColor({ userPreference: 'enabled', readiness: 'ready', quota: 'unknown' })}`,
 )
 
 // ── 输出 ──────────────────────────────────────────────────

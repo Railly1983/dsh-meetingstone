@@ -2,6 +2,55 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.1] - 2026-11-14
+
+**开箱即用版本。** 相对 `0.1.0` 无破坏性变更。
+
+### Added
+
+- **内置 3 个默认角色**：`role-worker`（执行者）/ `role-reviewer`（审查员）/
+  `role-researcher`（调研员）。全部走 DSH 原生子 Agent（`in-process`），
+  **不绑定任何外部 CLI 或模型**，装完不需要先配 CLI 就能直接派单；
+  子 Agent 跟随用户自己的会话默认路由。
+- **默认角色不覆盖用户配置**：只在用户**没有任何角色**时生效；
+  一旦用户配过任意角色就完全不介入（不合并、不覆盖、不追加）。
+- **默认角色只在内存注入、不写盘**：用户不点保存就不会被固化到 profile。
+- `src/roles/defaults.js`：默认角色的唯一定义处，含 10 项契约测试。
+
+### Fixed
+
+- **编辑/删除默认角色报 `ROLE_NOT_FOUND`**：默认角色在设置页可见可点，
+  但磁盘 `roles` 为空，写入器找不到就报错——用户「看得见却改不了」。
+  现在写路径会先把默认角色物化进配置再改，语义自然。
+- **公开仓库 CI 全红**：4 个 GUI 测试 `import zod`，而 CI 从不安装依赖，
+  干净环境必然 `ERR_MODULE_NOT_FOUND`。CI 补 `npm install` 并改用 `npm test`
+  （统一到 `scripts/run-tests.mjs` 入口）。
+- **发布门禁 D1 渲染核对是伪测试**：脚本硬编码维护者私有 profile，
+  断言「至少 5 个角色」「CodeBuddy 必须有模型」，且它造的 snapshot 从未喂给
+  任何渲染函数——产品代码改坏照样绿，用户删角色反而红。
+  改为直接 import 生产模块的契约断言（CLI_IDS / STATIC_CATALOG / QUOTA /
+  ROLE_COLOR / deriveRoleColor），并用负对照证明断言会失败。
+- 槽位泄漏「根因未修」的结论修正：`active` 是 dispatcher 实例内 Map，
+  进程级重启不会继承旧槽位；新增运行级探针守护。
+
+### Docs
+
+- README 中/英双版重写，围绕「解决什么问题 → 典型场景 → 与 DSH 原生的区别 → 三步试用」。
+- 新增 [5 分钟快速开始](docs/getting-started.zh-CN.md)（中/英）、
+  [典型场景](docs/scenarios.zh-CN.md)、[常见问题](docs/faq.zh-CN.md)。
+- [安装与连接 CLI](docs/installation.md) 重写：去掉开发机绝对路径、
+  旧 `0.0.1.tgz` 与「第一版不做 UI」等过期内容。
+- [配置说明](docs/configuration.md) 重写：现行只有全局角色层，
+  项目/会话级覆盖已下线，旧文归档到 `docs/reference/legacy-configuration.md`。
+- 子代理建议只保留结论（多子代理会大幅增加 token 消耗），
+  **移除 48 格对照实验引用**——样本不足以代表真实使用，挂出来是误导。
+
+### Removed
+
+- 仓库根 `.meetingstone.json`（维护者个人角色分工，曾被误读成插件默认配置）
+- 仓库根 `personas.json`（全仓零引用，同样易被误读）
+- 文档中对不严谨对照实验的引用
+
 ## [0.1.0] - 2026-11-13
 
 首个公开发布版本。
@@ -10,6 +59,28 @@
 
 给 DeepSeek Harness 做**跨 CLI 的角色派单**：把「谁用什么模型、什么强度、什么权限、在哪个目录跑」
 变成一张角色表，一处配置，所有会话生效。
+
+### 开箱即用：内置 3 个默认角色
+
+首次安装、且用户**还没有任何角色**时，自动提供三个可直接派单的角色：
+
+| 角色 | roleId | 用途 |
+|---|---|---|
+| 执行者 | `role-worker` | 实现与修改，交付改动文件与验证证据 |
+| 审查员 | `role-reviewer` | 独立复核他人改动，只报有证据的问题 |
+| 调研员 | `role-researcher` | 只读调研，区分事实与推测 |
+
+- 全部走 DSH 原生子 Agent（`in-process`），**不绑定任何外部 CLI 或模型**，
+  因此装完不需要先配 CLI 就能派单；子 Agent 跟随用户自己的会话默认路由。
+- **只在内存生效，不写盘**：用户不点保存就不会被固化到 profile。
+- **用户一旦配置过任意角色，默认角色完全不介入**：不合并、不覆盖、不追加。
+- 用户可以直接在设置页编辑或删除默认角色；写路径会先把默认角色物化进配置再改，
+  不会出现「看得见却改不了」的 `ROLE_NOT_FOUND`。
+
+### 仓库清理
+
+- 移除仓库根的 `.meetingstone.json` 与 `personas.json`：前者是本维护者自己的角色分工，
+  后者全仓零引用，两者都曾被误读成「插件默认配置」。
 
 ### 实测的模型清单（不是静态表）
 
@@ -38,29 +109,28 @@
   不是中途追加。工具描述与 `list_runs` 的 `steerMode` 会提前告知。
   （宿主按钮仍叫「插话发送」，那个我们改不了。）
 - **Claude Code 无法枚举模型**：只有 `--model fable/opus/sonnet` 三个别名。
-- **多子代理会显著增加 token 消耗**：实测（48 格对照）并行任务因重复读上下文而放大成本，
-  建议仅在重要长任务场景下启用。详见 `docs/reference/benchmark-multi-platform.md`。
+- **多子代理会显著增加 token 消耗**：并行任务会重复读取上下文而放大成本，
+  建议仅在重要长任务场景下启用。
 - **取消的确认有 3–10 秒延迟**：外部 CLI 的 `dispose()` 是异步的，回执如实返回 `false`，
   记录随后更新。
 
 ### 验证状态
 
-- 700 tests / 699 pass
-- 发布门禁 10 PASS（测试 / 客户端注入 / D1 渲染 24 项 / D1 交互 20 项 / 工具 schema / manifest / 发布包）
+- 721 tests / 719 pass / 2 skipped
+- 发布门禁 10 PASS（测试 / 客户端注入 / D1 渲染 / D1 交互 / 工具 schema / manifest / 发布包）
 - 真机验证：派单、取消、进程清理、worktree 并行写入、模型探测、`refreshCli`
 
 ### 未完成
 
 - D1 视觉验收的部分交互（模型下拉、刷新按钮）由作者目视确认，未纳入自动化
-- 槽位泄漏根因（DSH 重启时 `onFinish` 不触发）未修，已用上限 + 诊断缓解
+- 取消→重开的真实 Windows 进程树清理、各 provider 的真实计费矩阵仍待真机验收
 
 ## [0.1.0-alpha.31] - 2026-11-13
 
 ### Docs
 
-- README 增补「子代理使用建议」：实测多子代理会显著增加 token 消耗，
+- README 增补「子代理使用建议」：多子代理会显著增加 token 消耗，
   建议仅在重要长任务场景下启用。
-  证据见 `docs/reference/benchmark-multi-platform.md`（四方案 48 格对照）。
 - 纳入两份实测报告：`2026-11-13-cost-and-benchmark-plan.md`（WorkBuddy 记账核查）
   与 `2026-11-13-multi-platform-benchmark.md`（四方案 48 格调度对照）。
 
@@ -542,7 +612,7 @@
 
 ### Added
 
-- `meetingstone_stats`：诊断并发槽位占用（重启后泄漏时靠它定位）
+- `meetingstone_stats`：诊断当前进程内的并发槽位占用
 - 两档并发上限：全局 8 / 单会话 4（`limits.maxParallelWritesPerSession`）
 - run 记录新增生效路由字段：`effectiveProvider` / `effectiveModel` / `reasoningEffort`
 
@@ -552,7 +622,7 @@
 - **外部 CLI 的 restart-with-output 完全不工作**（三处 bug，详见下）
 - **重放块边界可被伪造逃逸**（安全，中危）
 - **项目/会话角色覆盖**从「靠纪律不传」改为「代码层剥掉」
-- 并发槽位泄漏：上限放宽 + 可诊断（根因未修）
+- 并发槽位诊断：上限放宽 + 可诊断（当时推测的根因后经复核不成立，见 0.1.0 条目）
 
 ### Changed
 
@@ -586,13 +656,18 @@
 - 「模型列表刷新不正常」：外部 CLI 通道被整个跳过 + 角色绑定模型没进目录
   （详见 0.1.0-alpha.12 条目）。
 
-### Known Issue（未修）
+### Known Issue（历史记录，2026-11-14 独立复核已修正结论）
 
-- **槽位泄漏**：`active` 是纯内存 Map，槽位只在 `onFinish`（完成/失败/取消）时释放。
-  DSH 重启时任务被强杀，`onFinish` 永不触发 → 每次重启必然泄漏槽位，
-  重启后可能直接「已达上限」无法派单。
-  本版只是把上限放宽到 8 缓解，**根因未修**。
-  详见 `docs/plan/2026-11-12-slot-leak-critical.md`。
+- **一次未复现的派单阻塞**：曾观察到重启后所有派单返回 `WRITE_LIMIT_TOTAL`。
+  当时的推断是「`onFinish` 未触发导致槽位跨重启泄漏」，但该推断从未被证实，
+  事故文档自身也列为「需要进一步确认」。
+  2026-11-14 用生产代码做运行级复核（`tests/restart-slot-reconciliation.test.mjs`，含负对照）：
+  `active` 是 dispatcher 实例内的内存 Map，插件每次 apply 都新建实例，
+  无任何从磁盘回填 active 的路径 → **进程级重启不会继承旧槽位**，
+  `onFinish` 缺失只会影响**当前进程内**的槽位（负对照可复现）。
+  因此本版不新增 reconciliation 逻辑，保留上限放宽与 `meetingstone_stats` 诊断。
+  仍需真机验收：Windows Electron 真重启 + 任务在跑的端到端场景。
+  详见 `docs/review/independent-recheck-2026-11-14.md` 与 `docs/plan/2026-11-12-slot-leak-critical.md`。
 
 ### 测试
 

@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 
 import { apply, inject, name, PLUGIN_VERSION } from '../src/index.js'
 import { registerTools } from '../src/dsh/register.js'
+import { DEFAULT_ROLE_IDS } from '../src/roles/defaults.js'
 
 /** 记录注册了哪些工具，并提供最小可用的 ctx 形状。 */
 function makeCtx() {
@@ -178,11 +179,31 @@ test('dispose 幂等，且在 dispose 后再次 dispose 不报错', () => {
   for (const d of disposers) assert.doesNotThrow(() => d())
 })
 
-test('空配置也能加载（roles=0）', () => {
+test('空配置也能加载（注入开箱即用的默认角色）', () => {
   const { ctx, tools, logs } = makeCtx()
   assert.doesNotThrow(() => apply(ctx, {}))
   assert.equal(tools.length, 10)
-  assert.ok(logs.some((l) => l.includes('roles=0')))
+  // 2026-11-14 用户决策：空配置不再等于 0 角色，而是注入默认角色，保证开箱即用。
+  // 断言具体条数（而不是「>0」），这样默认角色被误删或重复注入都会被抓到。
+  assert.ok(
+    logs.some((l) => l.includes(`roles=${DEFAULT_ROLE_IDS.length}`)),
+    `启动日志应报告 roles=${DEFAULT_ROLE_IDS.length}，实际：${logs.join(' | ')}`,
+  )
+})
+
+test('用户自带角色时不注入默认角色（启动日志反映用户的实际条数）', () => {
+  const { ctx, logs } = makeCtx()
+  const mine = [{ roleId: 'role-mine', name: '我的角色', channel: { kind: 'in-process' }, enabled: true }]
+  assert.doesNotThrow(() => apply(ctx, { roles: mine }))
+  assert.ok(
+    logs.some((l) => l.includes('roles=1')),
+    `应只报告用户的 1 个角色，实际：${logs.join(' | ')}`,
+  )
+  // 负对照：绝不能出现默认角色的条数。
+  assert.ok(
+    !logs.some((l) => l.includes(`roles=${DEFAULT_ROLE_IDS.length}`)),
+    '用户已有角色时不得混入默认角色',
+  )
 })
 
 test('插件标识与版本', () => {

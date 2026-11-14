@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * 角色状态模型（P0-S1）：偏好 / 就绪 / 额度 三字段 + 三色派生。
+ * 角色状态模型（P0-S1）：偏好 / 就绪 / 额度 三字段 + 两色派生（绿 / 灰）。
  *
  * 边界（勿破坏）：
  * - 纯函数：不读文件、不探测 CLI、不写盘；所有输入由调用方注入
@@ -262,7 +262,7 @@ export function deriveReadiness(role, ctx = {}) {
  *
  * @param {any} role
  * @param {any} [ctx]
- * @returns {'available' | 'exhausted' | 'unknown' | 'not_applicable'}
+ * @returns {'available' | 'unknown' | 'not_applicable'}（`exhausted` 已删除）
  */
 export function deriveQuota(role, ctx = {}) {
   const rejectedSources = ['failure', 'inferred', 'guess', 'estimated']
@@ -330,7 +330,7 @@ function legacyAvailability(role, userPreference, readiness, reason) {
  *   userPreference: 'unset' | 'enabled' | 'disabled',
  *   readiness: 'ready' | 'blocked' | 'unknown',
  *   readinessReason: string,
- *   quota: 'available' | 'exhausted' | 'unknown' | 'not_applicable',
+ *   quota: 'available' | 'unknown' | 'not_applicable',
  *   color: 'gray' | 'green',
  *   availability: string,
  * }}

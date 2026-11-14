@@ -1,114 +1,102 @@
-# 集合石 · MeetingStone
+# 集合石 MeetingStone
 
-[English](README.md) | 中文
+**让 DeepSeek Harness 知道：这件事应该交给哪个 AI 来做。**
 
-DeepSeek Harness 的多 CLI 智能体角色管理与派单插件。
+你可能已经在使用 Codex、Claude Code、CodeBuddy 或 DeepSeek Harness。它们各有优势，但在一个项目里协作时，往往需要你反复记住模型、执行入口和分工，再手动传递任务。
 
-> **状态（2026-11-12）**：`0.1.0-alpha.20`。核心派单、角色配置、跨 CLI 路由、worktree 隔离、
-> 执行记录均已实现并在真机验证；**十个工具**可用。
-> 外部 CLI 派单需额外安装官方 provider bundle；配置写在 profile 的 `cordis.patch.yml`。
->
-> **V1 UI（已实现）**：设置页 → 集合石。两个区：外部 CLI 连接 + 全局角色库。
-> 「管理角色」页内联展开，支持增改删、每行启用开关、CLI→模型→思考强度联动、能力刷新。
-> **没有**右侧栏「本对话角色」面板，**没有**对话页头角色入口 —— 这两个已在 B3 移除。
-> 角色配置也只有全局一层（项目级/会话级覆盖已下线）。
+**集合石是 DeepSeek Harness 的跨 CLI 角色派单插件。** 你只要配置一次「谁负责什么、用哪个 CLI 和模型」，之后就能在 DSH 对话中按角色分配工作。执行仍交给各 CLI / DSH 的原生能力，集合石专注于连接、派单、隔离与交接。
 
-> **Token 口径**：Subagents 面板的 `tok` 是四桶（uncachedInput+output+cacheRead+cacheWrite）累计、按整条持久日志计算；fork 会话含父历史（`154M / 4 秒` 即此，耗时只算子会话自身）。**不可用于成本/额度/子 Agent 归属**；替代口径见 [Token 统计口径核查](docs/reference/token-stats.md)。
+> **一句话理解**：DSH 是指挥中心，各 CLI 是执行者，集合石负责把正确的任务交给正确的执行者。
 
-## 解决什么问题
+[English](README.en.md) · [5 分钟快速开始](docs/getting-started.zh-CN.md) · [应用场景](docs/scenarios.zh-CN.md) · [常见问题](docs/faq.zh-CN.md)
 
-DSH 本身有完整的任务、子智能体、权限和统计。但"把活分给不同 CLI 的不同模型"仍要人记：谁用什么模型、什么强度、什么权限、在哪个目录跑。
+**当前发布版本：`0.1.1`。** 兼容 DSH `>=0.2.2-rc.1 <0.3.0-0`。
 
-集合石把这件事变成一张角色表：
+**开箱即用**：装完自带 3 个默认角色（执行者 / 审查员 / 调研员），全部走 DSH 原生子 Agent，
+不需要先配任何外部 CLI 就能直接派单。它们只在你还没有自己的角色时出现，不会覆盖你的配置。
 
-| 角色 | 通道 | 模型 / 强度 | 职责 |
-| --- | --- | --- | --- |
-| 唐僧 | Codex | `gpt-6-astra` / high | 架构、关键决策、终审（最贵，慎用） |
-| 悟空 | Codex | `gpt-6.1-sol` / high | 疑难、复核、长任务 |
-| 八戒 | DSH 原生子 Agent | — | 调度、监工、整合 |
-| 沙僧 | CodeBuddy(ACP) | `deepseek-v4.1-flash` / high | 主力开发 |
-| 小白 | CodeBuddy(ACP) | `hy4free` / high | 主力开发、文档、杂活 |
+## 你能用它做什么？
 
-之后就可以说："让沙僧重构这个模块"、"叫悟空复核这段并发逻辑"。
+**同一个项目，不同 AI 各司其职。**
 
-## 设计原则
+| 你想做的事 | 在 DSH 里这样说 | 集合石承担的工作 |
+| --- | --- | --- |
+| 把常规开发交给主力模型 | 「让执行者实现这个接口并运行测试。」 | 按角色找到配置的 CLI / 模型并派单 |
+| 让另一模型独立复核 | 「请审查员检查这次改动的并发安全。」 | 将审核任务交给另一角色（需独立派单） |
+| 使用现有 CLI 登录与能力 | 「让使用 Codex 的角色评估这个架构。」 | 通过已配置的执行通道调用相应 CLI |
+| 并行处理独立模块 | 「将两个不重叠模块分别交给执行者处理。」 | 在允许并发时使用独立工作树降低文件冲突 |
+| 查清任务执行结果 | 「查看刚才的任务是否完成、产物在哪。」 | 提供任务状态、执行记录和产物读取 |
 
-1. **复用优先**：团队、项目、任务、子智能体、权限、用量统计全部用 DSH 原生，不重建。
-2. **只补真缺口**：自研范围只有两处——本机 CLI 探测（`src/cli/`，官方明确不做）与并行写任务的 Git 工作树管理（`src/worktree.js`；宿主 `ctx.worktrees.create()` 会切走调用方 cwd，不能直接用于后台派单，详见 `docs/worktree-isolation.md`）。
-3. **不伪造**：模型/强度/用量只显示真实拿到的值；做不到的能力就不提供——**本项目不提供只读通道**（宿主 subagent spec 没有权限字段），不标假标记。
-4. **薄**：不自研任务队列、不建数据库、不做独立工作台、不自研 CLI 启动器。
+这些是典型工作方式示例；实际模型、权限、思考强度及是否能执行，取决于你的 CLI 登录状态、provider 配置和宿主能力。集合石不会保证所有 CLI 订阅额度都可用，也不会自动完成独立审核之外的额外工作。
 
-## 子代理使用建议（实测结论）
+## 为什么不用 DSH 自带的子代理 / Agent Teams？
+
+**因为它们解决的是不同层次的问题，而且可以配合使用。**
+
+| | DSH 原生能力 | 集合石 |
+| --- | --- | --- |
+| 子代理生命周期、权限和任务执行 | **负责** | 复用，不重造 |
+| Agent Teams 的成员、任务板、协作消息 | **负责（启用时）** | 可配合使用，不依赖实验性团队功能 |
+| 按「角色名」绑定不同 CLI、模型和职责 | 需要自行组合设置 | **核心功能** |
+| 检测本机 CLI 和查看角色是否可派单 | 依具体配置而定 | **提供统一入口与诊断** |
+| 跨 CLI 执行记录、结果与交接 | 分散在执行工具中 | **统一派单与查询** |
+| 并行写入的工作树隔离 | 取决于宿主工作流 | **提供任务级 Git worktree 方案** |
+
+集合石不是另一套任务管理系统，也不替代 Codex、Claude Code 或 CodeBuddy。它尽量保留原生能力，让你少做一层手动协调。
+
+## 三步试用
+
+1. **安装插件**：在 DSH 插件管理 / 市场搜索 `dsh-meetingstone` 并安装；也可用 DSH CLI：
+   ```powershell
+   dsh plugin --profile desktop add dsh-meetingstone
+   ```
+   `desktop` 是 Profile 名示例，请换成你实际使用的 Profile。完整步骤见 [快速开始](docs/getting-started.zh-CN.md)。
+2. **检查连接、配置角色**：打开 DSH 设置中的「集合石」，检查已安装的 CLI。**插件自带 3 个开箱即用的默认角色**（执行者 / 审查员 / 调研员），全部走 DSH 原生子 Agent，装完就能直接派单，不需要先配任何外部 CLI。需要更多角色，或想换成外部 CLI / 指定模型时，再自己添加。
+3. **在聊天里派单**：例如「让执行者分析这个仓库的登录模块，列出可复现的问题和证据。」完成后再按需让审查员复核。
+
+**不必一开始就组建五人团队。** 默认的三个角色已经覆盖「干活 / 复核 / 调研」三类最常见的用法，
+一个执行者就能体验到价值，以后再加。
+**默认角色只在你自己还没有任何角色时出现，不会覆盖你已经配置好的角色。**
+
+## 它最适合哪些人？
+
+- 已经使用两种或更多 AI CLI，希望在 DSH 中统一派工的开发者。
+- 希望把高价值模型留给架构和审核、把常规任务交给其他模型的团队。
+- 想要利用不同 CLI 的原生工具、登录方式和模型选择，但不想自己搭建一套多 Agent 平台的人。
+- 需要可查询的任务结果和独立工作树来降低并行写入冲突的项目。
+
+如果你只使用一个模型、几乎不需要跨 CLI 协作，DSH 原生子代理可能已经足够。
+
+## 设计取舍
+
+- **先把一个任务做完，再考虑并行。** 多实例不会天然省 Token；小任务并行反而可能增加上下文与协调开销。
+- **结果和证据优先。** 保留执行记录，避免把所有过程都堆进调度会话。
+- **不会伪造状态。** 额度无法确定时显示未知；开关开启不等于服务端保证有额度。
+- **工作树不是安全沙箱。** 它隔离默认工作目录，但外部 CLI 仍受实际系统权限约束；工作树中的改动需要检查与合并。
+- **不做另一套工作台。** 任务、团队、权限及后台运行优先使用 DSH 官方能力。
+
+## 子代理使用建议
 
 > **多子代理模式会大幅度增加 token 消耗，建议仅在重要长任务情境下启用。**
 
-这是实打实测出来的，不是感觉。对照实验（四方案 × 48 格，全部统一模型）见
-[多平台调度对照](docs/reference/benchmark-multi-platform.md)：
+原因很直接：每个子代理都要重新读一遍上下文，子任务越碎、放大越明显；
+而并行省下的时间通常抵不上多花的 token。
 
-| 现象 | 原因 |
-|---|---|
-| 并行子代理的 token 总量显著高于串行 | 每个子代理都要**重新读一遍上下文**，父会话的 KV cache 命中率下降 |
-| 任务越碎，放大越明显 | 拆成 N 个子任务 ≈ N 次上下文重建 |
-| 耗时收益远小于成本增长 | 并行省下的墙钟时间，往往抵不上多花的 token |
+**实践建议**：默认串行；只有「任务很长 + 子任务之间不需要共享上下文 + 愿意多付 token」
+三条同时满足时才考虑并行。需要并行时用 `limits.maxParallelWritesTotal` 显式放开，
+并配合 `worktree` 隔离避免写冲突。
 
-**实践建议**：
+## 文档导航
 
-- **默认串行**。一次派一个任务，完成后再派下一个。
-- 只有同时满足下面三条时才考虑并行：
-  1. 任务确实很长（单项就要跑几十分钟）
-  2. 子任务之间**没有共享上下文**（不需要互相看到对方的产出）
-  3. 你愿意为缩短墙钟时间多付 token
-- 需要并行时，用 `limits.maxParallelWritesTotal` 显式放开，
-  并配合 `worktree` 隔离（每任务独立工作树），避免写冲突。
+- [5 分钟快速开始](docs/getting-started.zh-CN.md)：安装、连接、第一次派单
+- [四种常见协作场景](docs/scenarios.zh-CN.md)：编码、交叉审核、调研、并行
+- [常见问题与限制](docs/faq.zh-CN.md)：额度、费用、权限、Worktree、续聊
+- [安装与连接 CLI](docs/installation.md)：市场/CLI 安装、provider、排障
+- [配置说明](docs/configuration.md)：全局角色、CLI→模型→强度、高级参数
+- [工作树隔离](docs/worktree-isolation.md)：文件布局隔离≠权限沙箱、人工合并与清理
+- [安全与权限](docs/security.md)：权限边界与「不提供只读通道」的原因
+- [变更记录](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md)
 
-子代理相关工具（`meetingstone_dispatch` 的 autoRoute、`steer` 等）能力保留，
-但**不要因为"能并行"就默认并行**。
+MIT License。MeetingStone 是独立社区项目，不隶属于 DeepSeek、OpenAI、Anthropic 或腾讯。
 
-## 快速开始
-
-```powershell
-$dsh = "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
-
-npm run verify                                              # 1) 门禁，必须通过
-& $dsh plugin --profile desktop add "D:\MeetingStone"        # 2) 安装
-# 3) 参考 examples/meetingstone.desktop.yml 配角色，重启 DSH
-```
-
-安装、provider、配置与回滚详见 [安装文档](docs/installation.md)。
-
-## 文档
-
-| 文档 | 内容 |
-| --- | --- |
-| [开发计划](docs/开发计划.md) | 环境基线、架构、阶段路线、风险登记、决策记录 |
-| [任务清单](docs/任务清单.md) | WBS 与验收状态 |
-| [架构](docs/architecture.md) | 分层与数据流、设计不变量 |
-| [配置参考](docs/configuration.md) | 全部字段、合并规则、错误码 |
-| [协作效率规范](docs/efficiency.md) | 派单简报、输出、收口、失败标注的协作约定（纯提示词，非配置） |
-| [统一任务/结果协议](docs/task-protocol.md) | 派单四件（名称/目标/范围/验收）、回执四件（状态/结论/证据/报告路径）、六条规则与工具字段映射 |
-| [GUI 只读配置页（0.2.0）](docs/gui-0.2.0.md) | 面板注册、会话角色覆盖、三个原生面板职责与命名规则 |
-| [Token 统计口径核查](docs/reference/token-stats.md) | Subagents 面板 token 的公式、fork 继承、可信边界与替代口径 |
-| [P0-A 真实 A/B 实测](docs/reference/p0a-ab-test.md) | dispatch / get_task / list_roles 的真实回执字节对照与 Token 可得性 |
-| [安装/卸载](docs/installation.md) | 门禁、安装、provider、配置、回滚 |
-| [安全与权限](docs/security.md) | 权限边界与"不提供只读通道"的原因 |
-| [工作树隔离（自动 + 手动）](docs/worktree-isolation.md) | 默认每任务独立工作树、失败关闭、人工合并/清理；文件布局隔离≠权限沙箱 |
-| [并行多任务方案（已实现）](docs/reference/parallel-plan.md) | 悟空裁决、两级额度、失败关闭、不自动清理 |
-| [发布检查清单](docs/release-checklist.md) | 通用门禁、隔离环境验证、回滚与发布前安全审查 |
-| [发布清单（0.1.0-alpha）](docs/release/0.1.0-alpha-checklist.md) | 版本同步、门禁、npm/GitHub 发布步骤、回滚与已知限制 |
-| [兼容性](docs/compatibility.md) | 宿主/provider/本机 CLI 的实测组合 |
-| [事故复盘](docs/reference/incident-tool-schema.md) | 2026-11-10 工具 schema 事故与门禁 |
-| [阶段 0 审计](docs/reference/stage0-audit-summary.md) | A/B/C 分类与最小自研范围 |
-
-## 开发
-
-```powershell
-npm run verify     # 测试 + 工具 schema 契约 + manifest + 发布包内容
-```
-
-提交守则见 [CONTRIBUTING](CONTRIBUTING.md)。
-
-## 许可
-
-MIT，见 [LICENSE](LICENSE)。
-
-**命名声明**：本项目的 "集合石 / MeetingStone" 与魔兽世界的同名插件**没有任何关系**（那个是游戏内组队找队伍工具）。本项目与 DeepSeek、OpenAI、Anthropic、腾讯等厂商无隶属或背书关系；文中出现的模型与 CLI 名称归各自权利人所有。
+**命名声明**：本项目的「集合石 / MeetingStone」与魔兽世界的同名插件**没有任何关系**（那个是游戏内组队找队伍工具）。本项目与 DeepSeek、OpenAI、Anthropic、腾讯等厂商无隶属或背书关系；文中出现的模型与 CLI 名称归各自权利人所有。

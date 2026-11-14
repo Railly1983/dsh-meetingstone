@@ -1,5 +1,5 @@
 /**
- * 集合石 0.2.0 · GUI 只读 section（浏览器 half，接真实 Host 数据）。
+ * 集合石 · 设置页 section（浏览器 half，接真实 Host 数据；支持角色增删改与 CLI 开关写入）。
  *
  * 本文件不是 Node 模块，而是宿主 client module system 直接当脚本加载的
  * lazy-CJS factory。格式与注册 API 全部取证于本机 app.asar（0.2.2-rc.1）：
@@ -87,7 +87,7 @@ window.__ModuleLoader__.load({
      * 与 package.json / src/index.js 的 PLUGIN_VERSION 保持一致，供统一注册日志
      * 使用。升级版本时三处同步。
      */
-    const PLUGIN_VERSION = '0.1.0'
+    const PLUGIN_VERSION = '0.1.1'
 
     // Remote namespace / method 必须与 Host src/gui/host.js 的 GUI_REMOTE_SERVICE 对齐。
     const REMOTE_PACKAGE = 'dsh-meetingstone'
@@ -1026,11 +1026,13 @@ window.__ModuleLoader__.load({
       sourceUnknown: '未知',
       renderFailed: '面板渲染失败，详情见宿主日志',
       remoteUnavailableHint: '远程不可用',
-      // U2：设置页两区 + 角色三色二态 + 二级详情
+      // U2：设置页两区 + 角色两色二态 + 二级详情
       cliSection: '外部 CLI 连接',
       rolesSection: '全局角色库',
-      templateName: '取经五人组',
-      templateDesc: '模型与思考强度按角色单独配置。',
+      // 卡片只描述「当前全局角色库」。插件自带 3 个默认角色，但仅在用户
+      // 还没有任何角色时生效，绝不覆盖用户已有配置（见 src/roles/defaults.js）。
+      templateName: '我的角色',
+      templateDesc: '角色与 CLI、模型、思考强度按角色单独配置；未配置时使用内置默认角色。',
       cliSwitchLabel: '启用',
       cliOnFailed: '检测未通过，保持关闭',
       cliRetry: '重新检测',
@@ -1128,11 +1130,13 @@ window.__ModuleLoader__.load({
       sourceUnknown: 'Unknown',
       renderFailed: 'Failed to render this panel; see host logs',
       remoteUnavailableHint: 'Remote unavailable',
-      // U2: settings sections + tri-color role switches + detail view
+      // U2: settings sections + two-tone role switches + detail view
       cliSection: 'External CLI connections',
       rolesSection: 'Global roles',
-      templateName: 'Journey to the West five',
-      templateDesc: 'Model and reasoning effort are configured per role.',
+      // Describes the current global role library. Three default roles apply only
+      // when the user has none; existing configuration is never overwritten.
+      templateName: 'My roles',
+      templateDesc: 'Each role sets its own CLI, model and reasoning effort; built-in defaults apply until you configure your own.',
       cliSwitchLabel: 'Enable',
       cliOnFailed: 'Preflight failed; kept off',
       cliRetry: 'Re-check',
@@ -2238,7 +2242,7 @@ window.__ModuleLoader__.load({
                   : { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '配置远程未装配' } },
               // 区 2「管理角色」：设置页**内联**全局角色管理（B1）。
               // 写路径复用 S2 global writer（字段合并 + 二次确认），不新建写 API；
-              // 会话覆盖仍只走右侧栏，两个入口不再互相跳转。
+              // 会话级角色覆盖已下线（B3），本面板是唯一的角色管理入口。
               updateGlobalRole: (roleId, patch) =>
                 typeof configActions.updateGlobalRole === 'function'
                   ? configActions.updateGlobalRole(roleId, patch)
@@ -2337,7 +2341,8 @@ window.__ModuleLoader__.load({
 
     /**
      * 详情页字段行：字段名 + 来源 Tag + 控件 + 恢复继承。
-     * `canRestore` 只在字段来源 = session（会话覆盖存在）时为 true。
+     * 现行配置为全局一层；`canRestore` 保留 session 来源判断以兼容旧快照，
+     * 但会话级角色覆盖已下线（B3），正常路径下不会为 true。
      */
     function detailField(t, opts) {
       const source = sourceMeta(opts.source)
