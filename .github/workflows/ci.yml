@@ -26,11 +26,20 @@ jobs:
       - name: 安装开发依赖（测试用：zod / cordis / yaml）
         run: npm install --no-audit --no-fund
 
+      - name: 诊断（CI 环境差异排查）
+        run: |
+          node --version
+          npm --version
+          node -e "console.log('zod:', (()=>{try{return require.resolve('zod')}catch(e){return 'MISSING'}})())"
+          node -e "console.log('cordis:', (()=>{try{return require.resolve('@deepseek-ai/cordis')}catch(e){return 'MISSING'}})())"
+          node -e "console.log('yaml:', (()=>{try{return require.resolve('yaml')}catch(e){return 'MISSING'}})())"
+        shell: bash
+
       - name: 语法检查
         run: node --check src/index.js
 
       - name: 单元测试
-        run: npm test
+        run: node scripts/ci-test.mjs
 
       - name: 发布门禁 · 工具 schema 契约
         run: node scripts/verify-host-schema.mjs
