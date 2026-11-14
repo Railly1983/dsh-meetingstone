@@ -40,6 +40,16 @@ jobs:
 
       - name: 单元测试
         run: node scripts/ci-test.mjs
+        continue-on-error: false
+
+      - name: 诊断 · 直接跑 run-tests
+        if: failure()
+        run: |
+          echo "--- direct run ---"
+          node scripts/run-tests.mjs 2>&1 | tail -40
+          echo "--- exit: $? ---"
+        shell: bash
+        continue-on-error: true
 
       - name: 发布门禁 · 工具 schema 契约
         run: node scripts/verify-host-schema.mjs
