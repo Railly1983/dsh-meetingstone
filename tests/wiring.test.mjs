@@ -338,7 +338,15 @@ test('dispatch 传入 projectKey（按项目隔离并发）', async () => {
   )
   const spec = registered.get('meetingstone_dispatch')
   await spec.execute({ role: 'SS', task: 'x' }, { agent: { session: { header: { cwd: 'D:/proj-a' } } } })
-  assert.equal(calls[0].projectKey, 'd:/proj-a', '必须把项目根归一化后作为并发计数键（Windows 折叠大小写）')
+  // 归一化按**平台**语义（src/dispatch/dispatcher.js:327）：
+  // Windows 折叠大小写与反斜杠，POSIX 保留原样（反斜杠是合法文件名字符）。
+  // 之前这里硬编码断言小写 'd:/proj-a'，在 Linux/macOS 上必然失败（2026-11-14 CI 全红根因之一）。
+  const expectedKey = process.platform === 'win32' ? 'd:/proj-a' : 'D:/proj-a'
+  assert.equal(
+    calls[0].projectKey,
+    expectedKey,
+    `项目根应归一化为并发计数键（platform=${process.platform}）`,
+  )
 })
 
 test('get_task：running 时以内存为准，不被磁盘快照覆盖', async () => {
