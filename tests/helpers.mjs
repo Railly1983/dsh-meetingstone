@@ -4,11 +4,33 @@
  * 文件名不以 `.test.mjs` 结尾，不会被 scripts/run-tests.mjs 收集为测试。
  */
 import { execFileSync } from 'node:child_process'
+import { realpathSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { sanitizedGitEnv } from '../src/worktree.js'
+
+/**
+ * 把临时目录路径规范成长路径。
+ *
+ * **为什么需要**：GitHub Windows runner 的用户名被折叠成 8.3 短名
+ * （`C:\Users\RUNNER~1\...`），而产品侧用 `fs.realpath` 拿到的是长名
+ * （`C:\Users\runneradmin\...`）。若测试直接用 `mkdtemp` 的结果做期望值，
+ * 在 runner 上必然与产品结果不等 —— 本地因用户名短而碰巧通过。
+ *
+ * `realpathSync.native` 在 Windows 上会展开 8.3 短名（非 native 版本不保证）。
+ *
+ * @param {string} path
+ * @returns {string}
+ */
+function canonicalDir(path) {
+  try {
+    return realpathSync.native(path)
+  } catch {
+    return path
+  }
+}
 
 /**
  * 在 cwd 里执行 git，返回 stdout；非零退出抛错（带 stderr）。
@@ -31,7 +53,8 @@ export function git(cwd, ...args) {
  * @returns {Promise<{ root: string, baseSha: string }>}
  */
 export async function makeRepo(files = { 'a.txt': 'a\n' }) {
-  const root = await mkdtemp(join(tmpdir(), 'mt-git-'))
+  // 规范成长路径：与产品侧 realpath 的结果一致（见 canonicalDir 注释）。
+  const root = canonicalDir(await mkdtemp(join(tmpdir(), 'mt-git-')))
   git(root, 'init', '-q')
   git(root, 'config', 'user.email', 'meetingstone-test@example.invalid')
   git(root, 'config', 'user.name', 'MeetingStone Test')

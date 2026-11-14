@@ -23,13 +23,23 @@ import {
 } from '../src/worktree.js'
 import { git, makeRepo, removeRepo } from './helpers.mjs'
 
-/** Windows 路径比较：大小写不敏感；同时解析 symlink/junction。 */
+/**
+ * Windows 路径比较：大小写不敏感；同时解析 symlink/junction 与 8.3 短名。
+ *
+ * 用 `realpathSync.native`：Windows 上只有 native 版本会展开 8.3 短名
+ * （CI runner 的 `%TEMP%` 形如 `C:\Users\RUNNER~1\...`，产品侧 realpath 给的是长名）。
+ */
 function samePath(a, b) {
-  const left = realpathSync(resolve(a))
-  const right = realpathSync(resolve(b))
-  return process.platform === 'win32'
-    ? left.toLowerCase() === right.toLowerCase()
-    : left === right
+  const canon = (p) => {
+    try {
+      return realpathSync.native(resolve(p))
+    } catch {
+      return resolve(p)
+    }
+  }
+  const left = canon(a)
+  const right = canon(b)
+  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
 }
 
 /** @param {unknown} err @param {string} code */
