@@ -39,28 +39,32 @@ const status = result.status ?? 1
 /** GitHub 的 annotation 单条有长度限制，且换行要编码成 %0A。 */
 function emit(level, title, body) {
   const encoded = String(body).replace(/%/g, '%25').replace(/\r/g, '').replace(/\n/g, '%0A')
-  console.log(`::${level} title=${title}::${encoded.slice(0, 1500)}`)
+  const line = `::${level} title=${title}::${encoded.slice(0, 1500)}`
+  // 同时写 stdout 与 stderr：不同 runner 对两者的缓冲/吞掉行为不一致。
+  console.log(line)
+  console.error(line)
 }
+
+// 先无条件报告环境与结果，确保即使后面判断出错也能看到。
+emit(
+  'notice',
+  'CI-TEST-ENV',
+  `node=${process.version} platform=${process.platform} status=${String(status)} outLen=${stdout.length} errLen=${stderr.length}`,
+)
 
 if (status !== 0) {
   const lines = combined.split(/\r?\n/)
   // 优先抓真正的失败信号，而不是普通日志行。
   const signals = lines.filter((line) =>
-    /✖|not ok |ERR_MODULE_NOT_FOUND|Cannot find (module|package)|AssertionError|Error:|error code/i.test(line),
+    /✖|not ok |ERR_MODULE_NOT_FOUND|Cannot find (module|package)|AssertionError|Error:|error code|✖ failing/i.test(
+      line,
+    ),
   )
-  const picked = (signals.length > 0 ? signals : lines.slice(-25)).slice(0, 20)
+  const picked = (signals.length > 0 ? signals : lines.slice(-30)).slice(0, 25)
   emit('error', 'TESTS-FAILED', picked.join('\n'))
-  // 附带真实开关信息，便于判断是不是环境问题而不是代码问题。
-  const env = [
-    `node=${process.version}`,
-    `platform=${process.platform}`,
-    `cwd=${root}`,
-    `wraps=${status}`,
-  ].join(' , ')
-  emit('notice', 'CI-ENV', env)
 } else {
   const summary = combined.split(/\r?\n/).filter((line) => /^# (tests|pass|fail|skipped)/.test(line))
-  console.log(summary.join('\n'))
+  emit('notice', 'TESTS-PASSED', summary.join(' | '))
 }
 
 process.exit(status)
