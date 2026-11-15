@@ -16,6 +16,7 @@
  *       DSH_ASAR=<path> node scripts/smoke-client-inject.mjs
  */
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -36,7 +37,23 @@ try {
 
 const headerSize = buf.readUInt32LE(12)
 const header = JSON.parse(buf.subarray(16, 16 + headerSize).toString('utf8'))
-const baseOffset = 16 + headerSize
+
+/**
+ * 文件数据区的起点。
+ *
+ * **不能直接用 `16 + headerSize`（2026-11-15 实测修正）**：asar 在 header 之后
+ * 有 4 字节对齐填充，真实数据区起点是 `16 + headerSize` **向上对齐到 4 的倍数**。
+ *
+ * 本机 199 MB 的 app.asar 实测（headerSize=5669961）：
+ *   - 旧算法 `16 + headerSize` = 5669977，比正确值少 3 字节
+ *   - 结果：每个抽出的文件开头都带着上一段代码的尾巴（`);`、`:!0})})();`、`rops };`），
+ *     Node 因此报 `ERR_INVALID_PACKAGE_CONFIG` / `SyntaxError`
+ *   - 新算法 = 5669980，用文件自带的 `integrity.hash` 逐个校验，全部对上
+ *
+ * 这个 bug 会让「客户端注入冒烟」门禁在整个门禁体系里假失败/假通过，
+ * 而它与插件代码无关，纯粹是 asar 解析错误。
+ */
+const baseOffset = Math.ceil((16 + headerSize) / 4) * 4
 
 /** @param {string} innerPath */
 function extract(innerPath) {
@@ -47,20 +64,49 @@ function extract(innerPath) {
     if (!node) throw new Error(`asar 内不存在：${innerPath}`)
   }
   const start = baseOffset + Number(node.offset)
-  return buf.subarray(start, start + Number(node.size))
+  const raw = buf.subarray(start, start + Number(node.size))
+  verifyIntegrity(raw, node, innerPath)
+  return raw
+}
+
+/**
+ * 校验 asar 里的文件与 header 声明的 integrity 一致。
+ *
+ * base 偏移一旦算错，抽出来的内容会带上旁边文件的碎片 —— 表现是
+ * `ERR_INVALID_PACKAGE_CONFIG` 或 `SyntaxError`，很难一眼看出根因。
+ * 有了这个断言，偏移问题会立刻暴露成「hash 不匹配」而不是神秘的语法错误。
+ *
+ * @param {Buffer} raw
+ * @param {any} node
+ * @param {string} innerPath
+ */
+function verifyIntegrity(raw, node, innerPath) {
+  const expected = node?.integrity?.hash
+  if (!expected) return // 老格式 asar 没有 integrity，跳过
+  const actual = createHash('sha256').update(raw).digest('hex')
+  if (actual !== expected) {
+    throw new Error(
+      `asar 解包内容与 integrity 不符：${innerPath}（base 偏移算错会导致这个）`,
+    )
+  }
 }
 
 const root = mkdtempSync(join(tmpdir(), 'mt-cordis-'))
+
+/**
+ * 用**宿主自己的** cordis / cosmokit 做冒烟 —— 这才是这条门禁的意义：
+ * 验证的是安装版宿主的真实 Cordis 行为，不是仓库里手写的 stub。
+ */
 const files = [
-  ['node_modules/@deepseek-ai/cordis/lib/index.js', 'node_modules/@deepseek-ai/cordis/lib/index.js'],
-  ['node_modules/@deepseek-ai/cordis/package.json', 'node_modules/@deepseek-ai/cordis/package.json'],
-  ['node_modules/@deepseek-ai/cosmokit/lib/index.js', 'node_modules/@deepseek-ai/cosmokit/lib/index.js'],
-  ['node_modules/@deepseek-ai/cosmokit/package.json', 'node_modules/@deepseek-ai/cosmokit/package.json'],
+  'node_modules/@deepseek-ai/cordis/lib/index.js',
+  'node_modules/@deepseek-ai/cordis/package.json',
+  'node_modules/@deepseek-ai/cosmokit/lib/index.js',
+  'node_modules/@deepseek-ai/cosmokit/package.json',
 ]
-for (const [inner, rel] of files) {
+for (const rel of files) {
   const target = join(root, rel)
   mkdirSync(dirname(target), { recursive: true })
-  writeFileSync(target, extract(`dsh/${inner}`))
+  writeFileSync(target, extract(`dsh/${rel}`))
 }
 
 const { Context, Service } = await import(
