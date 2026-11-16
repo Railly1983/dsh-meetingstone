@@ -90,26 +90,35 @@ test('写任务串行：第二个写任务被拒，释放后可继续', async ()
   assert.equal(third.ok, true)
 })
 
-test('provider 不可用时给出可诊断错误，而不是抛异常', async () => {
+test('2026-11-16：派单前不再用 canStart 预检（直接派，真失败由 adapter 如实报）', async () => {
+  // 用户裁决：「用户配好一个设置组合……然后按用户的配置派任务，有问题就返回用户错误信息」。
+  // 之前 dispatcher 先调 adapter.canStart 拦截，会出现「配置正确但预检误判」的假失败。
+  // 现在 canStart 即使返回 ok:false 也不拦，派单照常走到 adapter.start。
+  let canStartCalled = false
   const { dispatcher, adapter } = makeDispatcher({
-    canStart: () => ({ ok: false, reason: 'provider acp 未注册' }),
-  })
-  const res = await dispatcher.dispatch({ role: 'SS', task: 'x' })
-  assert.equal(res.ok, false)
-  assert.equal(res.code, DISPATCH_ERRORS.PROVIDER_UNAVAILABLE)
-  assert.match(res.message, /provider acp 未注册/)
-  assert.equal(adapter.calls.length, 0)
-})
-
-test('canStart 抛异常也被兜住', async () => {
-  const { dispatcher } = makeDispatcher({
     canStart: () => {
-      throw new Error('boom')
+      canStartCalled = true
+      return { ok: false, reason: 'provider acp 未注册' }
     },
   })
   const res = await dispatcher.dispatch({ role: 'SS', task: 'x' })
+  assert.equal(res.ok, true, '不再因为预检结论而拒绝派单')
+  assert.equal(adapter.calls.length, 1, '应当真的触达 adapter')
+  assert.equal(canStartCalled, false, '派单路径不应调用 canStart')
+})
+
+test('2026-11-16：真实失败（adapter.start 抛错）如实返回给用户', async () => {
+  // 真跑不通时，错误来自 adapter.start，需要如实透出可诊断信息。
+  const { dispatcher } = makeDispatcher({
+    start: async () => {
+      throw new Error('PROVIDER_UNAVAILABLE: provider codex-sol 未注册')
+    },
+  })
+  const res = await dispatcher.dispatch({ role: 'SS', task: 'x' })
+  assert.equal(res.ok, false)
+  // 错误文本带 PROVIDER_UNAVAILABLE: 前缀时，会被归类成对应错误码（这是正确映射）
   assert.equal(res.code, DISPATCH_ERRORS.PROVIDER_UNAVAILABLE)
-  assert.match(res.message, /boom/)
+  assert.match(res.message, /codex-sol 未注册/, '必须把真实原因告诉用户')
 })
 
 test('适配器失败（throw 或没返回 taskRef）都转成 ADAPTER_FAILED', async () => {

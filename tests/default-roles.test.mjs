@@ -97,13 +97,14 @@ test('默认角色在 spawn 可用时判为 ready/绿色（能直接派单）', 
     assert.equal(view.readiness, 'ready', `${role.name} 应可派单`)
     assert.equal(view.color, 'green')
   }
-  // 负对照：spawn 不可用时必须变灰，说明颜色不是恒绿。
+  // 负对照（2026-11-16 调整）：provider 不可用时 readiness 仍如实报 blocked，
+  // 但**颜色不再是灰** —— 颜色只反映开关，能不能跑由派单结果反馈。
   const blocked = deriveRoleView(resolveEffectiveRoles([])[0], {
     sources: {},
     subagents: { getProvider: () => null },
   })
-  assert.equal(blocked.readiness, 'blocked')
-  assert.equal(blocked.color, 'gray')
+  assert.equal(blocked.readiness, 'blocked', '诊断如实保留')
+  assert.equal(blocked.color, 'green', '已启用就是绿，不用灰点暗示不可用')
 })
 
 test('默认角色各自有可读的职责设定（不是空壳）', () => {

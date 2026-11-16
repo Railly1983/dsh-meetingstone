@@ -87,7 +87,7 @@ window.__ModuleLoader__.load({
      * 与 package.json / src/index.js 的 PLUGIN_VERSION 保持一致，供统一注册日志
      * 使用。升级版本时三处同步。
      */
-    const PLUGIN_VERSION = '0.1.1'
+    const PLUGIN_VERSION = '0.1.2'
 
     // Remote namespace / method 必须与 Host src/gui/host.js 的 GUI_REMOTE_SERVICE 对齐。
     const REMOTE_PACKAGE = 'dsh-meetingstone'
@@ -390,6 +390,10 @@ window.__ModuleLoader__.load({
           // 拿不到就是 null，UI 显示「未知」。**不猜**。
           contextWindow: Number.isFinite(model.contextWindow) ? Number(model.contextWindow) : null,
           contextWindowSource: asString(model.contextWindowSource) || '',
+          // 2026-11-16 缺陷修复：账号可用性（true/false；缺省 = 未验证）。
+          // 只有明确 false 才提示「账号不可用」；未验证（undefined）当作可选，
+          // 避免探测抖动让用户以为模型坏了。
+          ...(typeof model.available === 'boolean' ? { available: model.available } : {}),
         }))
         .filter((model) => model.id)
       const strengths = asArray(source.strengths)
@@ -1006,6 +1010,10 @@ window.__ModuleLoader__.load({
       capabilityUnknown: '能力目录不可用（未知）',
       comboChannelUnsupported:
         '该角色仍引用旧执行组合，无法在全局层直接切换到没有对应实例的 CLI；请选择其它 CLI，或由维护者清理 profile。',
+      // 2026-11-16 缺陷修复：codex 的 model/list 只是「版本认识哪些模型」，
+      // 不含账号授权。实测有模型会返回 model_not_found，在选项里明确标出来。
+      // 2026-11-16：额度耗尽 ≠ 模型不可用。这是账号状态，额度恢复即恢复正常。
+      modelRateLimited: '额度已用尽',
       addRole: '新增角色',
       createRoleTitle: '新建全局角色',
       createRoleHint: '角色 ID 自动生成（role-<名称>，冲突自动加序号）；保存后写入 profile，对所有会话生效。',
@@ -1109,6 +1117,7 @@ window.__ModuleLoader__.load({
       capabilityUnknown: 'Capability catalog unavailable (unknown)',
       comboChannelUnsupported:
         'This role still references an old execution combo, so switching to a CLI without a matching instance is not possible at the global layer; pick another CLI or ask the maintainer to clean the profile.',
+      modelRateLimited: 'rate limit reached',
       addRole: 'Add role',
       createRoleTitle: 'New global role',
       createRoleHint:
@@ -1819,29 +1828,47 @@ window.__ModuleLoader__.load({
         )
       }
 
-      /** 重新检测：只读 preflight（force 绕过缓存），不写配置。 */
+      /**
+       * 重新检测：只读 preflight（force 绕过缓存），不写配置。
+       *
+       * 2026-11-16：同 refreshManagerCapabilities —— 用 try/finally 保证
+       * pending 状态一定复位，否则 Remote 抛异常会让按钮永久「检测中…」。
+       */
       async function retryCli(cli) {
         if (typeof refreshCli !== 'function') return
         setCliPending((previous) => ({ ...previous, [cli]: true }))
-        const result = await refreshCli(cli, true)
-        setCliPending((previous) => ({ ...previous, [cli]: false }))
-        if (result?.ok === true) {
-          const payload = asObject(result.value)
-          const nextState = payload.cli ? normalizeCliState(payload.cli, cli) : null
-          if (nextState) setCliStates((previous) => replaceCliRow(previous, nextState))
-          clearFailure(cli)
-          return
+        try {
+          const result = await refreshCli(cli, true)
+          if (result?.ok === true) {
+            const payload = asObject(result.value)
+            const nextState = payload.cli ? normalizeCliState(payload.cli, cli) : null
+            if (nextState) setCliStates((previous) => replaceCliRow(previous, nextState))
+            clearFailure(cli)
+            return
+          }
+          const error = asObject(result?.error)
+          setCliFailures((previous) => ({
+            ...previous,
+            [cli]: {
+              code: asString(error.code) || 'CLI_PREFLIGHT_FAILED',
+              message: asString(error.message) || t('cliOnFailed'),
+              manualSteps: [],
+              retryable: true,
+            },
+          }))
+        } catch (error) {
+          setCliFailures((previous) => ({
+            ...previous,
+            [cli]: {
+              code: 'CLI_PREFLIGHT_FAILED',
+              message: error instanceof Error ? error.message : String(error),
+              manualSteps: [],
+              retryable: true,
+            },
+          }))
+        } finally {
+          setCliPending((previous) => ({ ...previous, [cli]: false }))
         }
-        const error = asObject(result?.error)
-        setCliFailures((previous) => ({
-          ...previous,
-          [cli]: {
-            code: asString(error.code) || 'CLI_PREFLIGHT_FAILED',
-            message: asString(error.message) || t('cliOnFailed'),
-            manualSteps: [],
-            retryable: true,
-          },
-        }))
       }
 
       // ── B1：设置页内联全局角色管理（不打开右侧栏、不离开设置页） ─────────────
@@ -2054,36 +2081,52 @@ window.__ModuleLoader__.load({
         }
       }
 
-      /** B2c：刷新当前 CLI 的能力目录（模型/强度），只更新本地快照，不写配置。 */
+      /**
+       * B2c：刷新当前 CLI 的能力目录（模型/强度），只更新本地快照，不写配置。
+       *
+       * 2026-11-16 真机缺陷：原来 `setManagerRefreshing(true)` 之后直接
+       * `await refreshCli(...)` —— 只要它**抛异常**（Remote 层超时/崩溃/gateway/internal），
+       * `setManagerRefreshing(false)` 就永远不执行，按钮永久停在「刷新中…」。
+       * 现在用 try/finally 保证状态一定复位。
+       */
       async function refreshManagerCapabilities(cli) {
         if (typeof refreshCli !== 'function' || !cli) return
         setManagerRefreshing(true)
-        const result = await refreshCli(cli, true)
-        setManagerRefreshing(false)
-        if (!result || result.ok !== true) {
-          setManagerError(result?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' })
-          return
-        }
-        const payload = asObject(result.value)
-        const capabilities = normalizeCapabilities(payload.capabilities)
-        if (capabilities.length > 0) {
-          setState((previous) =>
-            previous.status === 'ready'
-              ? {
-                  ...previous,
-                  snapshot: {
-                    ...previous.snapshot,
-                    global: {
-                      ...(previous.snapshot.global ?? {}),
-                      capabilities,
-                      capabilitiesRefreshedAt: Date.now(),
+        try {
+          const result = await refreshCli(cli, true)
+          if (!result || result.ok !== true) {
+            setManagerError(result?.error ?? { code: 'REMOTE_CALL_FAILED', message: '' })
+            return
+          }
+          const payload = asObject(result.value)
+          const capabilities = normalizeCapabilities(payload.capabilities)
+          if (capabilities.length > 0) {
+            setState((previous) =>
+              previous.status === 'ready'
+                ? {
+                    ...previous,
+                    snapshot: {
+                      ...previous.snapshot,
+                      global: {
+                        ...(previous.snapshot.global ?? {}),
+                        capabilities,
+                        capabilitiesRefreshedAt: Date.now(),
+                      },
                     },
-                  },
-                }
-              : previous,
-          )
+                  }
+                : previous,
+            )
+          }
+          setManagerError(null)
+        } catch (error) {
+          // Remote 抛错也要回到可操作状态，并把原因显示出来（不吞）
+          setManagerError({
+            code: 'REFRESH_FAILED',
+            message: error instanceof Error ? error.message : String(error),
+          })
+        } finally {
+          setManagerRefreshing(false)
         }
-        setManagerError(null)
       }
 
       if (state.status === 'loading') {
@@ -2436,6 +2479,8 @@ window.__ModuleLoader__.load({
     /**
      * 新建全局角色 payload（B1b）：roleId 系统生成 + 名称/简称/设定 + B2 的
      * CLI→模型→强度组合解析；组合不唯一/不支持时返回与编辑保存一致的错误（不伪造 channel）。
+     *
+     * 2026-11-16（用户裁决）：不校验「profile 里有没有对应实例」——能力目录才是事实来源。
      */
     function buildCreateRolePayload(t, draft, capabilities, channels, existingRoleIds) {
       const name = asString(draft?.name).trim()
@@ -2546,8 +2591,43 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 在已配置的通道实例里找「能真正派单」的那一条。
+     *
+     * 为什么必须精确匹配（2026-11-16 真机缺陷）：
+     * - 派单侧 `adapter.start()` 会校验「角色声明的 model/reasoning 必须与所引用实例一致」，
+     *   不一致直接抛 `MODEL_UNSUPPORTED`。所以只要实例的 model/reasoning 和角色声明分叉，
+     *   这个角色就永远派不出去。
+     * - 早期这里是**宽松匹配**（实例没声明 model 就算匹配），结果会写出一个
+     *   「保存成功、派单必失败」的角色。
+     *
+     * 另外：`model` 与 `reasoning` **同时为空**时不替用户挑实例 —— 否则「只改设定」
+     * 会把默认角色（`channel: { kind: 'in-process' }`，不声明通道）静默绑到
+     * channels 里的第一条，既违背默认角色「不绑定通道」的设计，也等于偷偷改了执行路径。
+     *
+     * @param {{ kind: string, provider: string, model: string, reasoning: string }} combo
+     * @param {any[]} channels
+     * @returns {any | null}
+     */
+    function matchChannelInstance(combo, channels) {
+      const { kind, provider, model, reasoning } = combo
+      if (!model && !reasoning) return null
+      const candidates = asArray(channels).filter(
+        (item) =>
+          asString(item?.kind) === kind &&
+          asString(item?.provider) === provider &&
+          (!model || asString(item?.model) === model) &&
+          (!reasoning || asString(item?.reasoning) === reasoning) &&
+          asString(item?.channelId),
+      )
+      return candidates.length > 0 ? candidates[0] : null
+    }
+
+    /**
      * B2c：把 draft 的「CLI + 模型 + 强度」映射成内部 B2 channel 形状
      * `{ kind, provider, model, reasoning, channelId? }`（不伪造；目录里没有的组合拒绝保存）。
+     *
+     * 找不到对应实例时**仍然返回组合**（不带 channelId），由调用方判断：
+     * 编辑页据此给出「该组合在 profile 里没有执行组合」的准确错误，而不是写出半套配置。
      * @returns {{ channel: any | null, error: string | null }}
      */
     function channelForCombo(t, draft, capabilities, channels) {
@@ -2568,25 +2648,39 @@ window.__ModuleLoader__.load({
       const modelEntry = modelId ? asArray(entry.models).find((item) => item.id === modelId) : null
       const provider = asString(modelEntry?.provider) || asString(entry.provider)
       if (!kind || !provider) return { channel: null, error: t('pendingConfig') }
-      const instance = asArray(channels).find(
-        (item) =>
-          asString(item?.kind) === kind &&
-          asString(item?.provider) === provider &&
-          (!modelId || !asString(item?.model) || asString(item?.model) === modelId) &&
-          (!strengthId || !asString(item?.reasoning) || asString(item?.reasoning) === strengthId),
+      const instance = matchChannelInstance(
+        { kind, provider, model: modelId, reasoning: strengthId },
+        channels,
       )
+      // 不声明用户没选的东西：只有「命中实例」或「显式选了模型」时才写 provider。
+      // 否则默认角色（channel 只有 kind）保存设定时会被静默加上 provider=spawn，
+      // 等于偷偷改写了执行组合声明。
       /** @type {Record<string, string>} */
-      const channel = {}
-      if (instance && asString(instance.channelId)) channel.channelId = asString(instance.channelId)
-      channel.kind = kind
-      channel.provider = provider
+      const channel = { kind }
+      if (instance || modelId) channel.provider = provider
       if (modelId) channel.model = modelId
-      if (strengthId) channel.reasoning = strengthId
+      if (instance) {
+        const instanceId = asString(instance.channelId)
+        if (instanceId) channel.channelId = instanceId
+        // 强度留空时继承实例声明（派单校验要求两者一致，继承才不会分叉）。
+        const instanceReasoning = asString(instance.reasoning)
+        if (instanceReasoning) channel.reasoning = instanceReasoning
+        else if (strengthId) channel.reasoning = strengthId
+        // 模型留空时同样继承实例声明。
+        const instanceModel = asString(instance.model)
+        if (!channel.model && instanceModel) channel.model = instanceModel
+      } else if (strengthId) {
+        channel.reasoning = strengthId
+      }
       return { channel, error: null }
     }
 
     /**
      * 详情页的「CLI / 模型 / 思考强度」选项（B2c：来自 4 CLI 能力目录，不伪造）。
+     *
+     * 2026-11-16（用户裁决）：**不拿 profile 的 channels 判「哪些能选」**。
+     * 能力目录来自 CLI/宿主的实时探测，它就是唯一事实来源；profile 里的 channels
+     * 只代表「过去配过什么」，不构成合法性白名单。
      * @param {any} view
      * @param {any} role
      * @param {any} draft
@@ -2629,20 +2723,34 @@ window.__ModuleLoader__.load({
         asString(role?.setting) || asString(role?.prompt) || asString(role?.description)
       if (setting !== currentSetting) patch.setting = setting
 
-      // B2c：CLI + 模型 + 强度 → 内部 channel；全局层是字段合并（不能删旧 channelId）。
+      // B2c：CLI + 模型 + 强度 → 内部 channel。
       const current = asObject(role?.channel)
       const built = channelForCombo(t, draft, capabilities, channels)
       if (built.error || !built.channel) return { patch, error: built.error ?? t('pendingConfig') }
       const target = built.channel
-      /** @type {Record<string, string>} */
+
+      // 2026-11-16（用户裁决）：**不再拿 profile 的 channels 当白名单**。
+      //
+      // 用户原话：「你能获取的列表，就一定要让它能配置上去。profile 只能代表之前
+      // 用户配置过，不能代表只有这个配置能用」——这是对的：能力目录来自 CLI/宿主的
+      // 实时探测，profile 的 channels 只是历史配置残留，不构成「哪些组合合法」的权威。
+      //
+      // 因此这里只写用户选中的声明（kind/provider/model/reasoning），不再要求它必须
+      // 命中某条既有实例。
+      //
+      // 但有一个**必须**处理的连带问题：全局配置是字段合并、没有删除语义。用户从一个
+      // 已绑定实例的组合改到「探测到但没有实例」的组合时，旧 channelId 清不掉，会写出
+      // 「channelId=旧实例 + model=新模型」的矛盾组合（派单必失败）。所以这里对
+      // 「旧值存在、新值没有」的键写 `null`，由 global-writer 在合并时删除。
+      /** @type {Record<string, string | null>} */
       const channelPatch = {}
       for (const key of ['channelId', 'kind', 'provider', 'model', 'reasoning']) {
         const next = asString(target[key])
         const previous = asString(current[key])
         if (next === previous) continue
         if (!next) {
-          // 全局字段合并没有删除语义：旧 channelId 无法清空 → 明确拒绝而不是写出半套组合。
-          if (key === 'channelId' && previous) return { patch, error: t('comboChannelUnsupported') }
+          // 新组合没有这个字段，而旧的有 → 显式清空（null），避免残留造成矛盾组合。
+          if (previous) channelPatch[key] = null
           continue
         }
         channelPatch[key] = next
@@ -2664,7 +2772,7 @@ window.__ModuleLoader__.load({
       return { ok: true, view: loaded.view, value: result.value }
     }
 
-    /** 详情页错误行（一行摘要；完整 message 放 title）。 */
+    /** 详情页错误行（完整可读；原始 code 放 title 便于排障）。 */
     function detailErrorLine(t, error) {
       if (!error) return null
       const rawCode = asString(error.code)
@@ -2675,14 +2783,16 @@ window.__ModuleLoader__.load({
       // 现在翻成「发生了什么 + 怎么办」；原始 code 仍放在 title 里便于排障。
       const friendly = explainRemoteError(rawCode, rawMessage)
       const text = rawCode && rawCode !== 'gateway/internal' ? `${rawCode} ${friendly}` : friendly
+      // 2026-11-16：原来这里 `whiteSpace: nowrap` + 省略号，把「怎么办」那半句直接截掉，
+      // 真机截图里用户只看到「…无法在全局层直接切换到没有对应实例的 CLI；…」就没了。
+      // 报错的价值全在后半句，改为可换行完整展示。
       return jsx('p', {
         role: 'alert',
         style: {
           ...noteStyle,
           color: 'var(--dsw-alias-state-error-primary)',
-          whiteSpace: 'nowrap',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
         },
         title: `${rawCode} ${rawMessage}`.trim(),
         children: text,
@@ -2802,11 +2912,23 @@ window.__ModuleLoader__.load({
                   const ctx = Number.isFinite(item.contextWindow)
                     ? ` · ${formatContextWindow(item.contextWindow)}`
                     : ''
+                  // 2026-11-16（用户裁决）：不再标「未配置」。
+                  // 能力目录来自实时探测，它就是可配置的范围；profile 只代表历史配置。
+                  //
+                  // 2026-11-16 修正：**不做任何「模型可用性验证」**。
+                  // 官方 `model/list` 就是「当前客户端+账号的可选模型」权威口径
+                  //（文档原话：可用模型取决于客户端和账户，请使用返回值），
+                  // 而「列表 ≠ 账号授权」是官方承认的限制，不该由插件假装能判定。
+                  // 唯一如实标注的是**额度状态**（免费从 account/rateLimits/read 拿到）：
+                  // 额度耗尽是账号级临时状态，不是模型坏了。
+                  const rateLimited = item.blocked === 'rate-limit'
                   return jsx(
                     'option',
                     {
                       value: item.id,
-                      children: `${item.label || item.id} · ${sourceText(item.source)}${ctx}`,
+                      children:
+                        `${item.label || item.id} · ${sourceText(item.source)}${ctx}` +
+                        (rateLimited ? ` · ${t('modelRateLimited')}` : ''),
                     },
                     `model-${item.id}`,
                   )
@@ -2832,16 +2954,17 @@ window.__ModuleLoader__.load({
               onChange: (event) => onDraft('reasoning', event?.target?.value ?? ''),
               children: [
                 jsx('option', { value: '', children: t('fieldUnset') }, 'reasoning-unset'),
-                ...options.strengths.map((item) =>
-                  jsx(
+                ...options.strengths.map((item) => {
+                  // 2026-11-16（用户裁决）：同模型——不标「未配置」，探测到的就能选。
+                  return jsx(
                     'option',
                     {
                       value: item.id,
                       children: `${item.label || item.id} · ${sourceText(item.source)}`,
                     },
                     `reasoning-${item.id}`,
-                  ),
-                ),
+                  )
+                }),
               ],
             })
 

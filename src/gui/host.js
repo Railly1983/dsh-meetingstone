@@ -92,6 +92,14 @@ export const GUI_REMOTE_METHODS = Object.freeze([
  * 首次冷启动在本机约 0.8s；超时则如实返回 `cli: null`，不编造状态。
  */
 const CLI_PROBE_TIMEOUT_MS = 8000
+/**
+ * 「刷新能力」的整体上限。
+ *
+ * 2026-11-16 真机缺陷：之前 refreshCli 对 capabilityCatalog.refresh() 没有任何超时，
+ * 探测一旦卡住（子进程不退出等），按钮就永久停在「刷新中…」。
+ * 这里给一个明确上限，超时如实报错并让 UI 恢复。
+ */
+const CAPABILITY_REFRESH_TIMEOUT_MS = 15000
 
 /**
  * 读取最近一条注册表错误，作为首次快照的 lastError。
@@ -144,8 +152,9 @@ function normalizeError(value, source, now = Date.now()) {
  * @param {any} role
  * @param {any} ctx
  * @param {any} [sources] `resolveEffectiveConfig(...).sources`（用于区分显式 enabled 与默认值）
+ * @param {Array<any>} [channels] 插件 channels 实例表（F2：与派单同源解析 provider）
  */
-export function roleView(role, ctx, sources = null) {
+export function roleView(role, ctx, sources = null, channels = []) {
   const channel = role?.channel
   let subagents = null
   try {
@@ -155,7 +164,7 @@ export function roleView(role, ctx, sources = null) {
   }
   const state = deriveRoleView(role, {
     subagents,
-    availability: roleAvailability(role, ctx),
+    availability: roleAvailability(role, ctx, channels),
     sources,
   })
   const roleId = typeof role?.roleId === 'string' ? role.roleId : ''
@@ -419,7 +428,7 @@ export function createGuiState({
       roles = []
     }
     return {
-      roles: Array.isArray(roles) ? roles.map((role) => roleView(role, ctx, sources)) : [],
+      roles: Array.isArray(roles) ? roles.map((role) => roleView(role, ctx, sources, channels)) : [],
       channels: Array.isArray(channels) ? channels.map(channelView) : [],
       lastError: lastError ? { ...lastError } : null,
     }
@@ -596,6 +605,32 @@ export function registerGuiRemote(ctx, deps) {
         : null
 
     /**
+     * 打印一段耗时（2026-11-16：定位「刷新要 30 多秒」）。
+     *
+     * 为什么需要：本地直接调用各探测函数只要 1~3 秒，但真机点按钮要 30 秒 ——
+     * 说明差异出在宿主进程内的实际环境（子进程/缓存/串行叠加），
+     * 只靠本地模拟查不出来，必须有真实分段耗时数据。
+     *
+     * 只写日志，不改变任何行为。
+     * @param {string} label
+     * @param {number} startedAt
+     * @param {Record<string, any>} [extra]
+     */
+    function logTiming(label, startedAt, extra) {
+      const ms = Date.now() - startedAt
+      const detail = extra
+        ? ' ' + Object.entries(extra).map(([k, v]) => `${k}=${String(v)}`).join(' ')
+        : ''
+      const line = `[meetingstone] timing ${label} ${ms}ms${detail}`
+      try {
+        if (typeof ctx.logger?.info === 'function') ctx.logger.info(line)
+        else console.log(line)
+      } catch {
+        /* 日志失败不影响刷新 */
+      }
+    }
+
+    /**
      * 把 `deriveCliState` 的结果转成 Remote 可透传的视图。
      * @param {string} cli
      * @param {any} preflight
@@ -665,7 +700,27 @@ export function registerGuiRemote(ctx, deps) {
             '能力目录未装配（插件初始化未传入 capabilities）',
           )
         }
-        const capabilityRefresh = await capabilityCatalog.refresh(cli, { force: true })
+        // 2026-11-16 真机缺陷：这里原本没有超时保护。
+        // 只要能力探测卡住（例如探测内部启动了子进程却没有退出），
+        // 「刷新能力」按钮就会永久卡在「刷新中…」（用户真机反馈）。
+        // 现在统一加超时：超时返回可诊断结果，UI 能恢复，探测在后台自行结束。
+        //
+        // 2026-11-16（用户反馈「刷新要 30 多秒」）：加分段耗时日志，
+        // 直接定位是哪一段慢，不再靠本地模拟猜。
+        const refreshStartedAt = Date.now()
+        const capabilityRefresh = await withTimeout(
+          capabilityCatalog.refresh(cli, { force: true }),
+          CAPABILITY_REFRESH_TIMEOUT_MS,
+        )
+        logTiming('refresh.capabilities', refreshStartedAt, { cli })
+        if (capabilityRefresh === null) {
+          return {
+            ok: false,
+            code: 'MEETINGSTONE_GUI_REFRESH_TIMEOUT',
+            message: `刷新超时（${CAPABILITY_REFRESH_TIMEOUT_MS}ms）：能力探测未在期限内返回，请稍后重试`,
+            cli: cli ?? null,
+          }
+        }
         // dsh：宿主内置通道，无外部 CLI 可 preflight；只回能力目录。
         if (cli === 'dsh') {
           return {
@@ -675,7 +730,21 @@ export function registerGuiRemote(ctx, deps) {
             capabilityRefresh,
           }
         }
-        const checked = await configApi.preflightCli(cli, { force: force === true })
+        const preflightStartedAt = Date.now()
+        const checked = await withTimeout(
+          configApi.preflightCli(cli, { force: force === true }),
+          CLI_PROBE_TIMEOUT_MS,
+        )
+        logTiming('refresh.preflight', preflightStartedAt, { cli })
+        logTiming('refresh.total', refreshStartedAt, { cli })
+        if (checked === null) {
+          return {
+            ok: false,
+            code: 'MEETINGSTONE_GUI_PREFLIGHT_TIMEOUT',
+            message: `CLI 检测超时（${CLI_PROBE_TIMEOUT_MS}ms），请稍后重试`,
+            cli,
+          }
+        }
         if (!checked || checked.ok !== true) return checked
         return {
           ok: true,

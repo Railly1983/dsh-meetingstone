@@ -56,7 +56,7 @@
  *   故 list_roles 的 `source` 标 'unknown'；若 registry 日后补来源标注再透传，不编造。
  */
 
-import { DEFAULT_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS, providerNameFor } from './adapter.js'
+import { DEFAULT_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS, resolveRoleRoute } from './adapter.js'
 import {
   canRestartWithOutput,
   extractPartialOutput,
@@ -216,14 +216,15 @@ function assertHostReadySchema(definition) {
  * @param {object} role
  * @param {object} ctx
  * @param {{ verbose?: boolean }} [options]
+ * @param {Array<any>} [channels] 插件 channels 实例表（F2：与派单同源解析 provider）
  */
-function toRoleView(role, ctx, options = {}) {
+function toRoleView(role, ctx, options = {}, channels = []) {
   const view = {
     roleId: role.roleId,
     name: role.name,
     aliases: Array.isArray(role.aliases) ? [...role.aliases] : [],
     enabled: role.enabled !== false,
-    availability: roleAvailability(role, ctx),
+    availability: roleAvailability(role, ctx, channels),
   }
   if (options.verbose !== true) return view
   // B2：description/prompt 已合并为单一「角色设定」；raw 角色没 setting 时按旧字段兜底。
@@ -253,12 +254,24 @@ function toRoleView(role, ctx, options = {}) {
  * 角色可用性。用的是**已确认**的 `ctx.subagents.getProvider(name)`（出处见文件头第 3 条）。
  * 拿不到查询能力就返回 'unknown'——不猜、不假装可用。
  *
+ * 2026-11-16（用户裁决）：回到官方语义 —— provider 必须真实注册。
+ * codex 的模型固定在 provider 配置行上（官方 `modelSelection` 需要
+ * `capabilities.agentOptions`，而 codex 是 false），所以「角色声明了某个
+ * provider 名但 profile 里没有那一行」就是真不可用，如实报出即可，
+ * 不再自造克隆机制。
+ *
  * 导出供 GUI 快照（src/gui/host.js）复用，避免工具与设置页两处实现漂移。
+ *
+ * 2026-11-16 [F2] 修复：改用与真实派单**同一个**路由解析（resolveRoleRoute），
+ * 不再用 providerNameFor 另算一套。之前 channels 明明能把角色映射到 codex-b，
+ * 可用性却查 codex（不存在）报「不可用」，出现「能派但报不可用」的双口径缺陷。
+ *
  * @param {object} role
  * @param {object} ctx
+ * @param {Array<any>} [channels] 插件 channels 实例表；省略时退回只看角色声明
  * @returns {'disabled' | 'ambiguous' | 'available' | 'provider-unavailable' | 'unknown'}
  */
-export function roleAvailability(role, ctx) {
+export function roleAvailability(role, ctx, channels = []) {
   if (role.enabled === false || role.disabled === true) return 'disabled'
   if (role.ambiguous === true) return 'ambiguous'
   let subagents = null
@@ -268,7 +281,13 @@ export function roleAvailability(role, ctx) {
     subagents = null // 未 inject 时访问会抛，按"未知"处理
   }
   if (!subagents || typeof subagents.getProvider !== 'function') return 'unknown'
-  const provider = providerNameFor(role)
+  let provider
+  try {
+    // 与 start() 完全同源；解析失败（CHANNEL_AMBIGUOUS 等）如实报不可用。
+    provider = resolveRoleRoute(role, channels).provider
+  } catch {
+    return 'provider-unavailable'
+  }
   if (!provider) return 'unknown'
   try {
     return subagents.getProvider(provider) ? 'available' : 'provider-unavailable'
@@ -388,6 +407,8 @@ function taskResultView(record, full) {
  */
 export function registerTools(ctx, deps) {
   const { registry, dispatcher, probe, loadPersistedRun, listPersistedRuns } = deps ?? {}
+  /** channels 实例表（F2）：与派单同源，供 roleAvailability 解析真实 provider。 */
+  const channels = Array.isArray(deps?.channels) ? deps.channels : []
 
   /**
    * 取一次任务的结果（内存优先、磁盘兜底），供上下文重放使用。
@@ -551,7 +572,7 @@ export function registerTools(ctx, deps) {
         const verbose = args?.verbose === true
         const roles = effective.registry
           .list()
-          .map((/** @type {object} */ role) => toRoleView(role, ctx, { verbose }))
+          .map((/** @type {object} */ role) => toRoleView(role, ctx, { verbose }, channels))
         const errors = [
           ...(Array.isArray(effective.registry.errors) ? effective.registry.errors : []),
           ...(effective.projectErrors ?? []),
@@ -696,7 +717,7 @@ export function registerTools(ctx, deps) {
           // 只把 enabled + availability=available 的角色交给路由（失败关闭，不猜）。
           const candidates = effective.registry.list().map((role) => ({
             ...role,
-            availability: roleAvailability(role, ctx),
+            availability: roleAvailability(role, ctx, channels),
           }))
           const decision = routeTask({
             task: args.task,

@@ -150,16 +150,19 @@ test('list_roles 返回配置里的角色', async () => {
 })
 
 test('dispatch 在宿主没有 subagents 时失败关闭，给出可诊断原因', async () => {
+  // 2026-11-16：取消派单前 canStart 预检后，这类环境问题仍然会失败关闭，
+  // 只是失败点后移到真实执行路径（例如先卡在 projectRoot 缺失，或 adapter.start 抛 provider 未注册）。
+  // 关键是：必须失败关闭 + 给可诊断原因，不能静默成功。
   const { ctx, tools } = makeCtx()
   apply(ctx, config)
   const dispatchTool = tools.find((t) => t.name === 'meetingstone_dispatch')
   const res = await dispatchTool.execute({ role: 'SS', task: '改个函数' })
-  assert.equal(res.ok, false)
+  assert.equal(res.ok, false, '必须失败关闭')
   assert.ok(
-    ['PROVIDER_UNAVAILABLE', 'PARENT_AGENT_UNAVAILABLE'].includes(res.code),
+    ['PROVIDER_UNAVAILABLE', 'PARENT_AGENT_UNAVAILABLE', 'PROJECT_ROOT_UNKNOWN'].includes(res.code),
     `应失败关闭，实际 code=${res.code}`,
   )
-  assert.ok(res.message && res.message.length > 0)
+  assert.ok(res.message && res.message.length > 0, '必须有可诊断信息')
 })
 
 test('dispatch 对未知角色报 ROLE_NOT_FOUND（不触达适配器）', async () => {

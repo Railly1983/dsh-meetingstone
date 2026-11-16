@@ -31,9 +31,184 @@ import {
   providerForModel,
   providerRowToCapability,
   providerRowsToCatalog,
+  classifyCodexModelProbeText,
+  probeCodexAccountSnapshot,
   readProviderRowsFromProfileSync,
 } from '../src/cli/capabilities.js'
 import { createGuiState } from '../src/gui/host.js'
+
+// ─── 2026-11-16：模型信息必须零额度消耗地获取（用户裁决） ────────────────────
+//
+// 背景（真实踩坑）：
+// 第一版为判断「账号是否授权某模型」，对 model/list 里每个模型发起一次真实 turn。
+// 这是**严重错误**：8 个模型 = 8 次计费调用；额度耗尽时长时间挂死，
+// 用户真机上「刷新能力」按钮直接卡死。
+//
+// 用户明确要求：**绝对不能用消耗额度的方式去做模型信息获取**。
+//
+// 现在的做法：只用 app-server 的免费只读方法
+//   model/list + account/read + account/rateLimits/read
+// 一次进程、8 秒超时、零 token 消耗。
+//
+// 实测事实（app-server 0.167.2，2026-11-16）：
+// model/list 的 8 个模型字段**完全一致**（isDefault/hidden/availableAccessPrograms
+// 都一样），**无法**从元数据区分账号授权状态。所以插件不假装能判断单模型授权，
+// 而是如实呈现能免费拿到的真相：账号计划 + 实时额度。
+
+test('2026-11-16：classifyCodexModelProbeText 语义（用于派单失败时的文案归类）', () => {
+  // 模型被账号拒绝 → 明确告知用户换模型
+  const notSupported = classifyCodexModelProbeText(
+    "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account.",
+  )
+  assert.equal(notSupported.available, false)
+  assert.match(notSupported.reason, /model_not_found|不支持/)
+  assert.equal(classifyCodexModelProbeText('{"code":"model_not_found"}').available, false)
+
+  // 额度用尽 ≠ 模型不可用（账号状态问题，恢复后照常可用）
+  const quota = classifyCodexModelProbeText(
+    "You've hit your usage limit. Upgrade to Pro ... or try again at 3:57 AM.",
+  )
+  assert.equal(quota.available, null)
+  assert.match(quota.reason, /额度/)
+
+  // 其他错误不猜
+  assert.equal(classifyCodexModelProbeText('some random error').available, null)
+  assert.equal(classifyCodexModelProbeText('').available, null)
+  assert.equal(classifyCodexModelProbeText(undefined).available, null)
+  assert.equal(classifyCodexModelProbeText('429 Too Many Requests').available, null)
+})
+
+test('2026-11-16：probeCodexAccountSnapshot 只调免费只读方法，绝不发起 turn', async () => {
+  const { EventEmitter } = await import('node:events')
+  /** 记录所有被调用的 RPC 方法，用于断言「没有 turn」 */
+  const called = []
+
+  const fakeSpawn = () => {
+    const child = new EventEmitter()
+    child.stdout = new EventEmitter()
+    child.stderr = new EventEmitter()
+    child.kill = () => {}
+    child.stdin = {
+      write(chunk) {
+        const line = String(chunk).split('\n')[0]
+        let msg
+        try {
+          msg = JSON.parse(line)
+        } catch {
+          return
+        }
+        if (msg.method) called.push(msg.method)
+        const reply = (obj) =>
+          setTimeout(() => child.stdout.emit('data', Buffer.from(JSON.stringify(obj) + '\n')), 0)
+        if (msg.id === 1) {
+          reply({ jsonrpc: '2.0', id: 1, result: { userAgent: 'x' } })
+        } else if (msg.method === 'model/list') {
+          reply({
+            jsonrpc: '2.0',
+            id: msg.id,
+            result: { data: [{ model: 'gpt-6-astra', displayName: 'GPT-6-Astra', supportedReasoningEfforts: [{ reasoningEffort: 'high' }], hidden: false, isDefault: true }] },
+          })
+        } else if (msg.method === 'account/read') {
+          reply({
+            jsonrpc: '2.0',
+            id: msg.id,
+            result: { account: { type: 'chatgpt', planType: 'plus', email: 'a@b.c' } },
+          })
+        } else if (msg.method === 'account/rateLimits/read') {
+          reply({
+            jsonrpc: '2.0',
+            id: msg.id,
+            result: {
+              ordinaryUsageAllowed: false,
+              rateLimits: { primary: { usedPercent: 100, resetsAt: 1794808331 } },
+            },
+          })
+        }
+      },
+    }
+    return child
+  }
+
+  const snap = await probeCodexAccountSnapshot({ executable: 'fake', timeoutMs: 3000, spawnImpl: fakeSpawn })
+
+  // 核心断言：除了握手（initialize/initialized），只用了这三个免费方法，
+  // **没有任何 turn/thread**（那些才会计费）。
+  const businessCalls = [...new Set(called)].filter((m) => m !== 'initialize' && m !== 'initialized').sort()
+  assert.deepEqual(businessCalls, ['account/rateLimits/read', 'account/read', 'model/list'], '只能调用免费只读方法')
+  assert.ok(!called.some((m) => /turn|thread/.test(m)), '绝不允许发起 turn/thread（会计费）')
+
+  // 结果正确解析
+  assert.equal(snap.ok, true)
+  assert.equal(snap.models.length, 1)
+  assert.equal(snap.models[0].id, 'gpt-6-astra')
+  assert.equal(snap.account.planType, 'plus')
+  assert.equal(snap.rateLimits.exhausted, true, '额度耗尽要如实反映')
+  assert.equal(snap.rateLimits.usedPercent, 100)
+})
+
+test('2026-11-16：探测失败/超时一律安全返回，不挂死调用方', async () => {
+  // spawn 抛错 → 返回 ok:false 而不是抛
+  const r1 = await probeCodexAccountSnapshot({
+    executable: 'x',
+    timeoutMs: 500,
+    spawnImpl: () => {
+      throw new Error('spawn failed')
+    },
+  })
+  assert.equal(r1.ok, false)
+  assert.match(r1.reason, /CODEX_SPAWN_FAILED/)
+  assert.deepEqual(r1.models, [])
+
+  // 没有 executable
+  const r2 = await probeCodexAccountSnapshot({ executable: '' })
+  assert.equal(r2.ok, false)
+  assert.match(r2.reason, /CODEX_EXECUTABLE_MISSING/)
+
+  // 子进程永不回应 → 必须在 timeoutMs 内返回（这是「卡死」的回归保护）
+  const { EventEmitter } = await import('node:events')
+  const start = Date.now()
+  const r3 = await probeCodexAccountSnapshot({
+    executable: 'x',
+    timeoutMs: 300,
+    spawnImpl: () => {
+      const c = new EventEmitter()
+      c.stdout = new EventEmitter()
+      c.stderr = new EventEmitter()
+      c.kill = () => {}
+      c.stdin = { write() {} } // 永不回应
+      return c
+    },
+  })
+  const elapsed = Date.now() - start
+  assert.equal(r3.ok, false)
+  assert.match(r3.reason, /TIMEOUT/)
+  assert.ok(elapsed < 3000, `必须在超时后返回（实际 ${elapsed}ms）`)
+})
+
+test('2026-11-16：额度耗尽标 blocked=rate-limit（不是 available=false）', async () => {
+  // 额度耗尽 ≠ 模型被禁：用 blocked 表示账号状态，模型仍可选
+  const catalog = createCliCapabilityCatalog({
+    autoRefresh: false,
+    configReader: null,
+    configReaderSync: null,
+    probes: {
+      codex: async () => [
+        { id: 'gpt-6-astra', label: 'Astra', strengths: ['high'], blocked: 'rate-limit' },
+        { id: 'gpt-6-sol', label: 'Sol', strengths: ['high'] },
+      ],
+    },
+  })
+  await catalog.refresh('codex', { force: true })
+  const codex = catalog.snapshot().capabilities.find((c) => c.id === 'codex')
+  const byId = Object.fromEntries(codex.models.map((m) => [m.id, m]))
+  assert.equal(byId['gpt-6-astra'].blocked, 'rate-limit')
+  assert.equal(
+    Object.hasOwn(byId['gpt-6-astra'], 'available'),
+    false,
+    '额度问题是账号状态，不能写成 available=false（那会让用户以为模型坏了）',
+  )
+  assert.equal(Object.hasOwn(byId['gpt-6-sol'], 'blocked'), false)
+})
 
 test('B2b 静态目录：固定 4 CLI、标签正确、来源标注不伪造', () => {
   const catalog = createCliCapabilityCatalog({ autoRefresh: false, configReader: null, configReaderSync: null })
@@ -172,7 +347,12 @@ test('B2b 解析：codex model/list 与宿主 llm.listModels 保守提取', () =
       { label: '既无 id 也无 model，应被忽略' },
     ],
   })
-  assert.deepEqual(codex, [{ id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol', strengths: ['low', 'high'] }])
+  // 2026-11-16：解析结果新增 hidden / isDefault（供 UI 参考，不能当可用性判据）。
+  // 是否真的能用由免费只读方法（account/rateLimits/read）反映账号状态，
+  // 不在目录层臆断单模型授权（实测 model/list 字段无法区分）。
+  assert.deepEqual(codex, [
+    { id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol', strengths: ['low', 'high'], hidden: false, isDefault: false },
+  ])
 
   // 宿主模型：结构不符的条目直接丢弃，不猜
   const host = extractHostModels({

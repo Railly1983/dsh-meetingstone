@@ -6,7 +6,14 @@ import { classifyFailure } from '../dispatch/failure.js'
 import { renderTaskBrief, summarizeContextPack, summarizeTaskSpec } from '../taskspec.js'
 import { parseStructuredResult, renderOutputContract, resultRecordFields } from '../result-contract.js'
 import { buildTaskLabel } from '../naming.js'
-import { resolveRoleChannel } from '../roles/capabilities.js'
+// 路由解析唯一入口（2026-11-16 F1/F2 修复）：派单 / 可用性 / GUI 三处共用，
+// 避免「能派但报不可用」「声明 B 实际跑 A」这类双口径缺陷。
+import {
+  PROVIDER_BY_KIND,
+  providerNameFor,
+  resolveRoleRoute,
+} from './route.js'
+export { PROVIDER_BY_KIND, providerNameFor, resolveRoleRoute }
 /**
  * DSH 接线层 · 适配器（阶段 2）。
  *
@@ -84,18 +91,6 @@ import { resolveRoleChannel } from '../roles/capabilities.js'
  */
 
 /**
- * `channel.kind` → `ctx.subagents` 上的 provider 名。
- * 官方 provider 不解析本机 PATH 的 codex/claude（03-native-capabilities.md F2），
- * 这里只是「注册名」，不是可执行文件路径。
- */
-export const PROVIDER_BY_KIND = Object.freeze({
-  'in-process': 'spawn',
-  'acp-cli': 'acp',
-  codex: 'codex',
-  'claude-code': 'claude-code',
-})
-
-/**
  * 生命周期错误码（取消/卸载时宿主 dispose 的兜底）。
  * 新增错误码必须进常量并写进 `docs/configuration.md`，不要在调用点散落字符串。
  */
@@ -137,23 +132,6 @@ const PROVIDER_HINTS = Object.freeze({
   codex: '需装 @deepseek-ai/dsh-subagent-codex（是 bundle，装完自动成层，10-provider-install.md §4）',
   'claude-code': '需装 @deepseek-ai/dsh-subagent-claude-code',
 })
-
-/**
- * 解析一个角色应该用的 provider 名。
- * 优先用 `role.channel.provider`（role shape 见 src/roles/registry.js 的 RoleChannel，
- * config.js 的 ChannelSchema 也把它定义为「通道需要的 provider 名」）；否则按 kind 映射。
- *
- * @param {object} role
- * @returns {string | null} 未知 kind 返回 null（调用方必须失败关闭）
- */
-export function providerNameFor(role) {
-  const channel = role && typeof role === 'object' ? role.channel : null
-  if (!channel || typeof channel !== 'object') return null
-  if (typeof channel.provider === 'string' && channel.provider.trim()) {
-    return channel.provider.trim()
-  }
-  return /** @type {Record<string, string>} */ (PROVIDER_BY_KIND)[channel.kind] ?? null
-}
 
 /**
  * 宿主原生可查的任务引用。
@@ -633,6 +611,27 @@ export function createDshAdapter(ctx, options = {}) {
   const onRunStart = typeof options.onRunStart === 'function' ? options.onRunStart : null
   const onRunFinish = typeof options.onRunFinish === 'function' ? options.onRunFinish : null
 
+  /**
+   * 2026-11-16（用户裁决）：**移除自造的 provider 克隆机制，回到官方原生能力**。
+   *
+   * 为什么必须移除（查证过官方源码与文档）：
+   * - codex 官方 provider 把 `model` 钉在**配置行**上（`CodexProvider` 内部
+   *   `this.config.model`），官方文档明确「`model` 为本提供方实例的每个线程固定的
+   *   可选非空模型名称」—— 一行一个模型，这是官方设计。
+   * - 官方 `dsh-tool-subagent` 的 `modelSelection`（按任务选模型）要求
+   *   `provider.capabilities.agentOptions === true`，而 codex provider 是 `false`，
+   *   官方直接拒绝：`does not support child model selection`。
+   * - 也就是说「同一个 codex provider 跑不同模型」在官方语义下**不成立**。
+   *
+   * 之前为了满足「用户选了就能跑」，我克隆了已注册的 provider 实例再改 model。
+   * 这个机制是多余的复杂度，而且真机上 turn 阶段会失败（克隆实例在宿主侧行为异常），
+   * 现已全部移除。
+   *
+   * 现在的行为（诚实且简单）：
+   * - 角色声明的 provider 必须是 profile 里**真实存在**的 provider 行；
+   * - 不存在就如实报错，并提示用户按官方方式为需要的模型加一行配置。
+   */
+
   /** @param {any} record */
   function emitRunStart(record) {
     if (!onRunStart) return
@@ -658,15 +657,8 @@ export function createDshAdapter(ctx, options = {}) {
     }
   }
 
-  /** @type {Map<string, any>} */
-  const channelsById = new Map()
-  /** @type {any[]} 已配置执行组合（原样保留顺序，供能力解析使用） */
+  /** @type {any[]} 已配置执行组合（原样保留顺序，供路由解析使用） */
   const channelList = Array.isArray(options.channels) ? options.channels : []
-  for (const instance of channelList) {
-    if (instance && typeof instance.channelId === 'string' && instance.channelId) {
-      channelsById.set(instance.channelId, instance)
-    }
-  }
 
   /** @type {Map<string, { activation: any, controller: AbortController, timer: any, onFinish?: Function, cancelling?: boolean, settled?: boolean, cleaned?: boolean, cancelPromise?: Promise<any>, runBase?: any }>} */
   const handles = new Map()
@@ -963,83 +955,70 @@ export function createDshAdapter(ctx, options = {}) {
   }
 
   /**
-   * 查询 provider 是否注册。**只信宿主返回值，不猜**。
-   * 拿不到查询能力或查不到 provider，一律 ok:false。
+   * 查询 provider 是否可用（**同步**：dispatcher 在 await 之前就要拿到结论）。
+   *
+   * 2026-11-16（用户裁决）：回到官方语义 —— provider 必须**真实注册在宿主上**。
+   * 角色声明的 provider 名如果 profile 里没有对应配置行，就如实报不可用，
+   * 并提示按官方方式补一行配置。不再自造克隆机制（已移除）。
+   *
+   * @param {any} role
    */
   function canStart(role) {
-    // 与 start 用同一套路由解析：实例不一致/不存在时提前给出可诊断原因，而不是等到启动才抛
-    let provider
+    let resolved
     try {
-      provider = resolveRoute(role).provider
+      resolved = resolveRoute(role)
     } catch (err) {
       return { ok: false, reason: errorMessage(err) }
     }
     const subagents = safeService(ctx, 'subagents')
-    if (!provider || !subagents || typeof subagents.getProvider !== 'function') {
+    if (!resolved.provider || !subagents || typeof subagents.getProvider !== 'function') {
       return { ok: false, reason: '无法确认 provider 是否注册' }
     }
     let found
     try {
-      found = subagents.getProvider(provider)
+      found = subagents.getProvider(resolved.provider)
     } catch (err) {
       return { ok: false, reason: `无法确认 provider 是否注册：查询失败 ${errorMessage(err)}` }
     }
-    if (!found) {
-      const hint = PROVIDER_HINTS[provider] ?? '请确认 provider 已安装并挂载'
-      return { ok: false, reason: `provider ${provider} 未注册（${hint}）` }
+    if (found) return { ok: true }
+    const hint = PROVIDER_HINTS[resolved.provider] ?? '请确认 provider 已安装并挂载'
+    return {
+      ok: false,
+      reason:
+        `provider ${resolved.provider} 未注册（${hint}）。` +
+        'codex 的模型只能在 profile 的 provider 行上固定（官方不支持按任务选模型），' +
+        '请为该模型在 cordis.patch.yml 增加一行 subagent-codex 配置',
     }
-    return { ok: true }
   }
 
-  /** 启动一次委派。任何失败都抛，不吞、不降级。 */
   /**
    * 解析一次派单的实际执行路由（B2）。
    *
-   * 规则（fail-closed）：
-   * - 有 channelId：以实例 provider 为准；角色声明的 provider/kind/model/reasoning 与实例不一致就拒绝
-   * - 无 channelId：按「CLI → 模型 → 强度」在已配置实例里找唯一匹配项（能力解析）；
-   *   找不到/多义都拒绝（MODEL_UNSUPPORTED / REASONING_UNSUPPORTED / CHANNEL_AMBIGUOUS）
-   * - 没有配置任何实例（旧路径/测试/极简 profile）：沿用角色声明的 provider/kind
+   * 2026-11-16（用户裁决）：**恢复老版本的 channels 实例表方案**。
+   *
+   * 背景：老版本一直正常工作，核心是「角色只声明能力（CLI + 模型 + 强度），
+   * 由插件在**已配置的 channels 实例表**里匹配出唯一执行组合」——
+   * 角色不需要知道 DSH 里叫什么 provider 名，也就不需要用户去 profile 加 provider 行。
+   *
+   * 后来改成「角色声明 provider 名 → 必须真实存在同名 provider」，
+   * 导致用户配了 codex-sol 却因为 profile 没那行而派不出去。
+   * 现在按用户要求恢复老方案：
+   *
+   * 规则（优先级从高到低）：
+   * 1. 角色引用了 `channelId` 且实例存在 → 用实例（校验声明不自相矛盾）；
+   * 2. 没引用实例 / 实例已不存在 → 在 `channels` 里按「kind + model + reasoning」
+   *    做能力匹配：
+   *    - 恰好一个匹配 → 用它；
+   *    - 多个匹配 → CHANNEL_AMBIGUOUS（让用户消歧，不擅自选）；
+   *    - 没有匹配 → 退回角色声明的 provider（旧路径兼容）。
+   * 3. 都没有 → 拒绝（声明不完整）。
    *
    * @param {any} role
    * @returns {{ provider: string | null, instance: any | null, role: any }}
    */
   function resolveRoute(role) {
-    const list = channelList
-    // 旧路径兼容：没有任何已配置实例时，按角色声明的 kind/provider 解析（不引入新的失败）
-    if (list.length === 0) return { provider: providerNameFor(role), instance: null, role }
-    const resolved = resolveRoleChannel(role, list)
-    if (resolved.error) {
-      throw new Error(`${resolved.error.code}: ${resolved.error.message}`)
-    }
-    const channel = resolved.channel
-    const effectiveRole = channel
-      ? { ...role, channel: { ...(role && typeof role === 'object' ? role.channel : {}), ...channel } }
-      : role
-    const channelId = effectiveRole?.channel?.channelId
-    if (!channelId) {
-      // 实例表存在但角色没引用任何实例：退回 kind/provider（例如 in-process 的默认路径）
-      return { provider: providerNameFor(effectiveRole), instance: null, role: effectiveRole }
-    }
-    const instance = channelsById.get(String(channelId))
-    if (!instance) {
-      throw new Error(`CHANNEL_NOT_FOUND: 角色引用的执行组合 ${channelId} 不存在，拒绝启动`)
-    }
-    const instanceProvider =
-      typeof instance.provider === 'string' && instance.provider.trim()
-        ? instance.provider.trim()
-        : /** @type {Record<string, string>} */ (PROVIDER_BY_KIND)[instance.kind] ?? null
-    if (!instanceProvider) {
-      throw new Error(`CHANNEL_MISMATCH: 执行组合 ${channelId} 既没声明 provider 也没有已知 kind，拒绝启动`)
-    }
-    const declaredProvider = role?.channel?.provider
-    if (typeof declaredProvider === 'string' && declaredProvider.trim() && declaredProvider.trim() !== instanceProvider) {
-      throw new Error(
-        `CHANNEL_MISMATCH: 角色声明的 provider 是 ${declaredProvider}，但执行组合 ${channelId} 实际是 ${instanceProvider}；` +
-          '两者必须一致，否则会出现「配置写的是一个组合、实际跑的是另一个」。已拒绝启动',
-      )
-    }
-    return { provider: instanceProvider, instance, role: effectiveRole }
+    // 唯一解析入口在 src/dsh/route.js；派单 / 可用性 / GUI 三处共用，口径不再分叉。
+    return resolveRoleRoute(role, channelList)
   }
 
   async function start(input) {
@@ -1055,7 +1034,9 @@ export function createDshAdapter(ctx, options = {}) {
     const provider = route.provider
     const subagents = safeService(ctx, 'subagents')
 
-    // 1. 失败关闭：重新查询，不依赖 canStart 是否被上层调用过。
+    // 1. 失败关闭：provider 必须真实注册（2026-11-16 回到官方语义）。
+    //    不再自造克隆/派生机制 —— codex 的模型固定在 provider 配置行上，
+    //    需要别的模型就按官方方式在 profile 加一行 provider。
     if (
       !provider ||
       !subagents ||
@@ -1064,8 +1045,45 @@ export function createDshAdapter(ctx, options = {}) {
     ) {
       throw new Error('PROVIDER_UNAVAILABLE: 无法确认 provider 是否注册')
     }
-    if (!subagents.getProvider(provider)) {
-      throw new Error(`PROVIDER_UNAVAILABLE: provider ${provider} 未注册`)
+    const foundProvider = subagents.getProvider(provider)
+    if (!foundProvider) {
+      throw new Error(
+        `PROVIDER_UNAVAILABLE: provider ${provider} 未注册。` +
+          '请确认 profile 里有对应的 provider 配置行，或检查 channels 里该执行组合的 provider 名',
+      )
+    }
+
+    // 1.5 [F1] 模型执行忠实性校验（2026-11-16 外部审查）。
+    //     非 in-process provider（codex / claude-code / acp）的模型**固定在 provider 配置行上**：
+    //     buildChildAgentOptions 对它返回 {}，模型传不下去，实际跑 provider.config.model。
+    //     因此当角色声明了 model，却没经 channels 匹配到「就是为这个 model 配的实例」时，
+    //     必须核对 provider 实际模型；不一致就拒绝，绝不静默跑成另一个模型（曾经的
+    //     gpt-6.1-sol 声明 → 跑 gpt-6-astra 就是这个缺陷）。
+    //     in-process 走 agentOptions 显式传模型，不受此限。
+    //     [F1 复核修复 v2] 两个来源各司其职：
+    //     - **kind** 必须与 buildChildAgentOptions 完全一致（它用 instance ?? role.channel），
+    //       否则「校验看声明 kind、执行看实例 kind」会留下绕过；
+    //     - **model** 用合并后的 effectiveRole.channel.model（route 已让实例覆盖声明，
+    //       但实例没写 model 时会保留角色的 model）——否则「实例缺省 model」会让
+    //       角色声明的 model-B 被漏掉，静默跑成 provider 固定的 model-A。
+    const execChannel =
+      route.instance && typeof route.instance === 'object' ? route.instance : effectiveRole?.channel
+    // 与 buildChildAgentOptions:402 字面一致（不 trim）：它正是靠这个判断决定传不传 agentOptions。
+    const effectiveKind = typeof execChannel?.kind === 'string' ? execChannel.kind : ''
+    const declaredModel =
+      typeof effectiveRole?.channel?.model === 'string' ? effectiveRole.channel.model.trim() : ''
+    if (declaredModel && effectiveKind && effectiveKind !== 'in-process') {
+      const providerModel =
+        foundProvider.config && typeof foundProvider.config.model === 'string'
+          ? foundProvider.config.model.trim()
+          : ''
+      if (providerModel && providerModel !== declaredModel) {
+        throw new Error(
+          `MODEL_MISMATCH: 角色声明 model=${declaredModel}，但 ${provider} provider 实际固定为 ` +
+            `${providerModel}。非进程内 provider 的模型固定在配置行上、无法按任务覆盖；` +
+            '请在 channels 里配置一个与该模型匹配的实例，或把角色改到承载该模型的 provider',
+        )
+      }
     }
 
     // 2. parent 必须来自**当次执行上下文**（exec.agent），不做全局 holder 回退：
@@ -1079,38 +1097,13 @@ export function createDshAdapter(ctx, options = {}) {
 
     // 2.5 启动前置校验（P2 Gate 复核 P0）：约束不满足就**不启动**，而不是带病启动。
     //
-    // (a) 模型/强度：官方 spec 不收 model/reasoning，模型只能由 **provider 行**承载（DD7 方案 B）。
-    //     角色的声明必须与所引用执行组合的配置一致；不一致就拒绝，避免"配置成功、执行没采用"。
-    //     B2：无 channelId 时已由 resolveRoute 按 CLI→模型→强度解析出唯一组合。
-    const declaredModel = effectiveRole?.channel?.model
-    const declaredReasoning = effectiveRole?.channel?.reasoning
-    if (declaredModel || declaredReasoning) {
-      const channelId = effectiveRole?.channel?.channelId
-      if (!channelId) {
-        throw new Error(
-          'MODEL_UNSUPPORTED: 角色声明了 model/reasoning，但没有可匹配的执行组合。' +
-            '请先在设置里为所选 CLI 配置模型/强度，再让角色选择该组合',
-        )
-      }
-      const instance = channelsById.get(String(channelId))
-      if (!instance) {
-        throw new Error(
-          `MODEL_UNSUPPORTED: 角色引用的通道实例 ${channelId} 不存在，无法确认模型是否已配置`,
-        )
-      }
-      if (declaredModel && instance.model !== declaredModel) {
-        throw new Error(
-          `MODEL_UNSUPPORTED: 角色声明 model=${declaredModel}，但通道实例 ${channelId} 配置的是 ` +
-            `${instance.model ?? '(未配置)'}；两者必须一致（模型只能由 provider 行承载）`,
-        )
-      }
-      if (declaredReasoning && instance.reasoning !== declaredReasoning) {
-        throw new Error(
-          `MODEL_UNSUPPORTED: 角色声明 reasoning=${declaredReasoning}，但通道实例 ${channelId} 配置的是 ` +
-            `${instance.reasoning ?? '(未配置)'}；两者必须一致`,
-        )
-      }
-    }
+    // (a) 模型/强度：**不再要求「必须与 profile 里某条实例一致」**（2026-11-16 用户裁决）。
+    //
+    // 之前的逻辑是「角色声明必须与通道实例一致，不一致就拒绝」，方向错了：
+    // 用户刚在设置里选的值才是意图，profile 里的实例是历史配置。
+    // 现在改为：需要哪个 (kind, model) 组合，就在启动前**按需派生**对应 provider
+    // 
+    // 因此这里不再需要任何 model/reasoning 校验 —— 能派生就能跑。
 
     // (b) 项目边界：cwd 必须在当前会话的项目根之内；拿不到项目根就失败关闭
     if (typeof cwd === 'string' && cwd) {
@@ -1152,22 +1145,40 @@ export function createDshAdapter(ctx, options = {}) {
     //    而文档给的是扁平字段。按文档传扁平对象会得到
     //      `Cannot read properties of undefined (reading 'maxDepth')`
     //    因为 `spec.request` 是 undefined。这里按**实现**的嵌套形状组装。
+    //
+    // **2026-11-15 真机复现并修复的第二个坑**：宿主对 parent 有**两处**读取，
+    // 且层级不同 ——
+    //   - `dsh-subagent/lib/index.js:3024`：`spec.parent.id`（**顶层**，权限校验用）
+    //   - `dsh-subagent/lib/index.js:1598`：`request.parent`（嵌套，实际执行用）
+    // 之前只放了 `request.parent`，顶层没有 → 宿主读 `spec.parent.id` 抛
+    //   `TypeError: Cannot read properties of undefined (reading 'id')`，
+    // 且它发生在 startActivation 内部，被 dispatcher 包成 ADAPTER_FAILED，
+    // 表面看像集合石的错。因此**两处都要给**。
+    // 提示词内容块：顶层 spec.prompt 与嵌套 request.prompt 共用同一份。
+    const promptBlocks = [
+      {
+        type: 'text',
+        text: composePrompt(effectiveRole, task, input?.continuation, input?.taskSpec, input?.contextPack),
+      },
+    ]
+
     const spec = {
       provider,
+      // 顶层 parent：宿主 startActivation 的 live-parent 校验读它（见上）。
+      parent,
       // 官方字段：`SubagentActivationSpec.label` 会写进 `subagent/descriptor` 与
       // `subagent/catalog`，Subagents 面板行标题读的就是这个值（证据见
       // docs/gui-0.2.0.md §6）。命名统一为 `角色简称 · 简短目标（≤14 字）`。
       label: buildTaskLabel(effectiveRole, task, input?.taskSpec),
       delivery: 'caller',
       signal: controller.signal,
+      // 顶层 prompt：宿主 `submitMaterialized(activation, spec.prompt, ...)`
+      // （dsh-subagent/lib/index.js:1557）读的是**顶层** spec.prompt；
+      // 嵌套 request.prompt 是 manager 侧的另一处读取。两处都要给（同 parent 的坑）。
+      prompt: promptBlocks,
       request: {
         parent,
-        prompt: [
-          {
-            type: 'text',
-            text: composePrompt(effectiveRole, task, input?.continuation, input?.taskSpec, input?.contextPack),
-          },
-        ],
+        prompt: promptBlocks,
         ...(typeof cwd === 'string' && cwd ? { cwd } : {}),
         // 不传 maxDepth：实现里 `resolveChildDepth(parent, undefined)` 自带默认上限；
         // 传了反而要求 provider 具备 depthLimit 能力。

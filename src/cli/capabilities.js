@@ -660,11 +660,20 @@ export function extractHostModels(value) {
 
 /**
  * 解析 codex `app-server model/list` 的响应（JSON-RPC `result.data[]`）。
+ *
+ * ⚠️ 重要（2026-11-16 真机实测）：`model/list` 返回的是 **codex 版本声明支持的模型**，
+ * **不等于**当前账号真正可用的模型。实测证据（@openai/codex 0.153.4 + ChatGPT 账号）：
+ *   - `model/list` 列出 `gpt-6-astra / gpt-5.6-sol / gpt-5.6-terra / gpt-5.6-luna`
+ *   - 但 `gpt-6-sol` / `gpt-6.1-sol` / `gpt-6.1-terra` 会返回
+ *     `400 model_not_found: The '<m>' model is not supported when using Codex with a ChatGPT account.`
+ * 因此本函数只负责解析「声明清单」，**是否真的能用必须另行验证**
+ * （见 `probeCodexAccountSnapshot`）。
+ *
  * @param {any} result
  */
 export function parseCodexModelList(result) {
   const data = Array.isArray(result?.data) ? result.data : []
-  /** @type {Array<{ id: string, label?: string, strengths: string[] }>} */
+  /** @type {Array<{ id: string, label?: string, strengths: string[], hidden: boolean, isDefault: boolean }>} */
   const models = []
   for (const item of data) {
     if (!item || typeof item !== 'object') continue
@@ -675,67 +684,143 @@ export function parseCodexModelList(result) {
       const effortId = typeof effort === 'string' ? effort : asString(effort?.reasoningEffort)
       if (effortId && !strengths.includes(effortId)) strengths.push(effortId)
     }
-    models.push({ id, label: asString(item.displayName) || id, strengths })
+    models.push({
+      id,
+      label: asString(item.displayName) || id,
+      strengths,
+      // `hidden` 是 codex 自己的展示偏好（实测全为 false，不能当可用性判据），
+      // 仍然保留下来供 UI 参考，避免二次探测。
+      hidden: item.hidden === true,
+      isDefault: item.isDefault === true,
+    })
   }
   return models
 }
 
 /**
- * 低层 JSON-RPC 探测：启动 codex app-server，initialize → initialized → model/list。
+ * 从 codex 的错误文本里判断「模型是否受当前账号支持」。
  *
- * 实测（2026-11-12，codex-cli 0.167.0-alpha.4.1）：initialize 与 model/list 均可用，
- * 返回 `data[]`（含 `supportedReasoningEfforts`）。**必须**在 initialize 响应后发送
- * `initialized` 通知，否则 model/list 不会返回。
+ * 这是**判据的唯一来源**：codex 对不可用模型返回 400 `model_not_found`，
+ * 原文形如：
+ *   `The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account.`
+ *
+ * 与之相对，额度用尽（`You've hit your usage limit`）**不代表模型不可用** ——
+ * 那是账号状态问题，模型本身是有效的，不能因此把模型标成不可用。
+ *
+ * @param {unknown} text
+ * @returns {{ available: boolean | null, reason: string }}
+ */
+export function classifyCodexModelProbeText(text) {
+  const value = String(text ?? '')
+  if (!value.trim()) return { available: null, reason: '' }
+  // 明确「模型不被账号支持」→ 不可用
+  if (/not supported when using Codex|model_not_found/i.test(value)) {
+    return { available: false, reason: '账号不支持该模型（model_not_found）' }
+  }
+  // 额度/配额问题：模型有效，只是现在跑不了 → 未知（不能判成不可用）
+  if (/usage limit|quota|rate limit|429|upgrade to pro|try again at/i.test(value)) {
+    return { available: null, reason: '额度受限，未能验证可用性' }
+  }
+  return { available: null, reason: value.slice(0, 200) }
+}
+
+/**
+ * 读取 codex 账号快照（**全部是免费只读方法，零 token 消耗**）。
+ *
+ * ## 官方语义（已查证，不要再自己发明判据）
+ *
+ * `model/list` 就是官方提供的「当前客户端 + 账号下可选的模型」接口：
+ *   - 官方文档：「可用模型、推理努力度和默认值取决于客户端和账户；请使用返回值」
+ *     （https://developers.openai.ac.cn/codex/app-server）
+ *   - 默认只返回选择器可见模型；需要全量时传 `includeHidden: true`。
+ *   - OpenClaw 的同类实现明确写着：「Listing does not prove account entitlement」
+ *     —— 列表不等于授权，这是**官方承认的限制**，不是插件该解决的问题。
+ *
+ * 因此本函数**不做任何「验证模型能不能跑」的动作**：
+ * 那需要真实发起 turn（计费调用），8 个模型刷一次就是 8 次调用，
+ * 额度耗尽时还会长时间挂住 —— 用户明确禁止，2026-11-16 已移除。
+ *
+ * 我们只如实呈现能免费拿到的两件事：
+ * - `model/list`             模型清单（官方口径的「可用模型」）
+ * - `account/rateLimits/read` 实时额度（现在能不能发起调用）
+ *
+ * 模型真的跑不了时，由派单失败路径把服务端原文
+ * （`model_not_found` / `usage limit`）如实报给用户，见 `classifyCodexModelProbeText`。
  *
  * @param {object} opts
  * @param {string} opts.executable codex 可执行文件绝对路径
- * @param {number} [opts.timeoutMs] 整体超时（默认 15s）
- * @param {any} [opts.spawnImpl] 测试注入（默认 node:child_process.spawn）
- * @returns {Promise<Array<{ id: string, label?: string, strengths: string[] }>>}
+ * @param {number} [opts.timeoutMs] 整体超时（默认 8s；刷新是交互操作，必须短）
+ * @param {any} [opts.spawnImpl] 测试注入
+ * @returns {Promise<{
+ *   ok: boolean,
+ *   account: { type: string, planType: string, email: string } | null,
+ *   rateLimits: { allowed: boolean, usedPercent: number | null, resetsAt: number | null, exhausted: boolean } | null,
+ *   models: Array<{ id: string, label?: string, strengths: string[] }>,
+ *   reason?: string,
+ * }>}
  */
-export async function probeCodexModels({ executable, timeoutMs = 15_000, spawnImpl = nodeSpawn } = /** @type {any} */ ({})) {
-  if (!executable || typeof executable !== 'string') throw new Error('CODEX_EXECUTABLE_MISSING: 缺少 codex 可执行文件路径')
-  return new Promise((resolve, reject) => {
+export async function probeCodexAccountSnapshot({ executable, timeoutMs = 8_000, spawnImpl = nodeSpawn } = /** @type {any} */ ({})) {
+  /** @type {{ ok: boolean, account: any, rateLimits: any, models: any[], reason?: string }} */
+  const empty = { ok: false, account: null, rateLimits: null, models: [], reason: '' }
+  if (!executable || typeof executable !== 'string') {
+    return { ...empty, reason: 'CODEX_EXECUTABLE_MISSING: 缺少 codex 可执行文件路径' }
+  }
+
+  return new Promise((resolve) => {
+    /** @type {any} */
     let child
     try {
       child = spawnImpl(executable, ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
     } catch (err) {
-      reject(new Error(`CODEX_SPAWN_FAILED: ${err instanceof Error ? err.message : String(err)}`))
+      resolve({ ...empty, reason: `CODEX_SPAWN_FAILED: ${err instanceof Error ? err.message : String(err)}` })
       return
     }
     let buffer = ''
     let settled = false
-    /** @param {Error} error */
-    const fail = (error) => {
+    /** @type {Record<string, any>} */
+    const collected = {}
+    const ids = { modelList: 2, account: 3, rateLimits: 4 }
+    const finish = (/** @type {string} */ reason) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       try {
         child?.kill()
       } catch {
-        /* 忽略 kill 失败 */
+        /* 忽略 */
       }
-      reject(error)
+      const account = collected.account?.account
+      const rl = collected.rateLimits?.rateLimits
+      resolve({
+        ok: Array.isArray(collected.modelList?.data),
+        account: account
+          ? {
+              type: asString(account.type),
+              planType: asString(account.planType),
+              email: asString(account.email),
+            }
+          : null,
+        rateLimits: rl
+          ? {
+              allowed: collected.rateLimits.ordinaryUsageAllowed === true,
+              usedPercent: Number.isFinite(rl?.primary?.usedPercent) ? Number(rl.primary.usedPercent) : null,
+              resetsAt: Number.isFinite(rl?.primary?.resetsAt) ? Number(rl.primary.resetsAt) : null,
+              exhausted:
+                collected.rateLimits.ordinaryUsageAllowed === false ||
+                (Number.isFinite(rl?.primary?.usedPercent) && Number(rl.primary.usedPercent) >= 100),
+            }
+          : null,
+        models: parseCodexModelList(collected.modelList),
+        ...(reason ? { reason } : {}),
+      })
     }
-    /** @param {any} value */
-    const done = (value) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      try {
-        child?.kill()
-      } catch {
-        /* 忽略 kill 失败 */
-      }
-      resolve(value)
-    }
-    const timer = setTimeout(() => fail(new Error('CODEX_MODEL_LIST_TIMEOUT')), timeoutMs)
+    const timer = setTimeout(() => finish('CODEX_ACCOUNT_SNAPSHOT_TIMEOUT'), timeoutMs)
     /** @param {any} message */
     const send = (message) => {
       try {
         child.stdin.write(`${JSON.stringify(message)}\n`)
-      } catch (err) {
-        fail(new Error(`CODEX_STDIN_FAILED: ${err instanceof Error ? err.message : String(err)}`))
+      } catch {
+        finish('CODEX_STDIN_FAILED')
       }
     }
     let initialized = false
@@ -753,15 +838,27 @@ export async function probeCodexModels({ executable, timeoutMs = 15_000, spawnIm
         if (initialized) return
         initialized = true
         send({ jsonrpc: '2.0', method: 'initialized', params: {} })
-        send({ jsonrpc: '2.0', id: 2, method: 'model/list', params: {} })
+        // 三个只读查询一次性并发发出（互不依赖，都是免费的）
+        send({ jsonrpc: '2.0', id: ids.modelList, method: 'model/list', params: {} })
+        send({ jsonrpc: '2.0', id: ids.account, method: 'account/read', params: {} })
+        send({ jsonrpc: '2.0', id: ids.rateLimits, method: 'account/rateLimits/read', params: {} })
         return
       }
-      if (message.id === 2) {
-        if (message.error) {
-          fail(new Error(`CODEX_MODEL_LIST_ERROR: ${JSON.stringify(message.error).slice(0, 300)}`))
-          return
+      if (message.id === ids.modelList || message.id === ids.account || message.id === ids.rateLimits) {
+        // 任何一个是错误就跳过该字段（不整体失败：账号方法在某些版本可能不支持）
+        if (!message.error) {
+          if (message.id === ids.modelList) collected.modelList = message.result
+          if (message.id === ids.account) collected.account = message.result
+          if (message.id === ids.rateLimits) collected.rateLimits = message.result
         }
-        done(parseCodexModelList(message.result))
+        // 三个都回齐了（或失败）就结束
+        if (
+          (collected.modelList !== undefined || message.id === ids.modelList) &&
+          (collected.account !== undefined || message.id === ids.account) &&
+          (collected.rateLimits !== undefined || message.id === ids.rateLimits)
+        ) {
+          finish('')
+        }
       }
     }
     child.stdout.on('data', (/** @type {Buffer} */ chunk) => {
@@ -775,20 +872,23 @@ export async function probeCodexModels({ executable, timeoutMs = 15_000, spawnIm
       }
     })
     child.stderr.on('data', () => {
-      /* stderr 只作为诊断，不当作响应 */
+      /* 诊断输出，不参与判定 */
     })
-    child.on('error', (/** @type {any} */ err) => fail(new Error(`CODEX_SPAWN_ERROR: ${err?.message ?? String(err)}`)))
-    child.on('exit', (/** @type {number | null} */ code) => {
-      if (!settled) fail(new Error(`CODEX_EXITED_EARLY: code=${code}`))
-    })
+    child.on('error', () => finish('CODEX_SPAWN_ERROR'))
+    child.on('exit', () => finish('CODEX_EXITED_EARLY'))
+
     send({
       jsonrpc: '2.0',
       id: 1,
       method: 'initialize',
-      params: { clientInfo: { name: 'dsh-meetingstone-capabilities', version: '1.0.0' }, capabilities: {} },
+      params: {
+        clientInfo: { name: 'dsh-meetingstone-capabilities', version: '1.0.0' },
+        capabilities: { experimentalApi: false, requestAttestation: false },
+      },
     })
   })
 }
+
 
 /**
  * 构造一个 CLI 目录条目（按来源优先级合并：discovered > config > static > unknown）。
@@ -809,7 +909,7 @@ export function buildCatalogEntry(cli, state = {}) {
   const configModels = Array.isArray(config?.models) ? config.models : []
   const errors = Array.isArray(state.errors) ? [...state.errors] : []
 
-  /** @type {Array<{ id: string, label: string, provider: string | null, source: string, contextWindow?: number | null, contextWindowSource?: string }>} */
+  /** @type {Array<{ id: string, label: string, provider: string | null, source: string, contextWindow?: number | null, contextWindowSource?: string, available?: boolean }>} */
   const models = []
   /** @type {Set<string>} */
   const modelIds = new Set()
@@ -831,6 +931,12 @@ export function buildCatalogEntry(cli, state = {}) {
             contextWindowSource: item.contextWindowSource || 'probe',
           }
         : {}),
+      // 2026-11-16：账号可用性结论（true/false；缺省 = 未验证）。
+      // 只对 `false` 做 UI 降级提示 —— 探测失败一律不写 false，避免抖动导致模型消失。
+      ...(typeof item.available === 'boolean' ? { available: item.available } : {}),
+      // 阻塞原因（如 'rate-limit' = 额度耗尽，是**账号状态**而非模型被禁）。
+      // 与 available 分开：额度恢复后模型立刻可用，不需要重新探测模型授权。
+      ...(typeof item.blocked === 'string' && item.blocked ? { blocked: item.blocked } : {}),
     })
   }
   for (const item of configModels) {
@@ -1419,7 +1525,7 @@ export async function probeCodebuddyModels({
       params: {
         protocolVersion: 1,
         clientCapabilities: {},
-        clientInfo: { name: 'meetingstone-probe', version: '0.1.1' },
+        clientInfo: { name: 'meetingstone-probe', version: '0.1.2' },
       },
     })
   })
@@ -1857,7 +1963,27 @@ export function createDefaultProbes(deps = {}) {
     codex: async ({ executable }) => {
       const exe = executable || (await resolveExecutable('codex'))
       if (!exe) throw new Error('codex 可执行文件不可用')
-      const models = await probeCodexModels({ executable: exe, spawnImpl: deps.spawnImpl })
+
+      // 2026-11-16（用户裁决）：**绝对不能用消耗额度的方式取模型信息**。
+      //
+      // 第一版实现为了判断「账号是否授权某模型」，对 model/list 里每个模型发起一次
+      // 真实 turn —— 8 个模型就是 8 次计费调用，额度耗尽时还会长时间挂死
+      // （用户真机反馈「刷新能力按钮卡死」）。已彻底移除。
+      //
+      // 现在只用**零额度消耗**的只读方法：
+      //   model/list + account/read + account/rateLimits/read
+      // 一次 app-server、8 秒超时、不发起任何 turn。
+      const snapshot = await probeCodexAccountSnapshot({ executable: exe, spawnImpl: deps.spawnImpl })
+      if (!snapshot.ok && snapshot.models.length === 0) {
+        throw new Error(snapshot.reason || 'CODEX_ACCOUNT_SNAPSHOT_UNAVAILABLE: 无法读取 codex 模型清单')
+      }
+      // 账号快照挂到返回值上（由 buildCatalogEntry 透出，UI 可显示额度状态）
+      const models = snapshot.models.map((m) => ({
+        ...m,
+        // 额度耗尽时整批模型当前都不可用；这是**账号状态**，不是模型被禁。
+        // 只在明确 exhausted 时标注，避免把「暂时没额度」误显示成「模型不存在」。
+        ...(snapshot.rateLimits?.exhausted ? { blocked: 'rate-limit' } : {}),
+      }))
       // Codex app-server 的 model/list **不带** contextWindow，
       // 用模型上下文库补（GPT 系列官方都是 1.05M）。
       return fillContextWindows(models, { cli: 'codex' })

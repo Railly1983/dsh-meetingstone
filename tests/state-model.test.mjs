@@ -199,38 +199,44 @@ test('quota：V1 默认 unknown；按量付费 not_applicable；拒绝失败信�
   assert.equal(deriveQuota(roleA(), { quota: 'exhausted' }), QUOTA.UNKNOWN, 'exhausted 不再被采纳')
 })
 
-test('两色矩阵：3 偏好 × 3 就绪 × 3 额度（颜色与 quota 无关）', () => {
-  const expected = (pref, readiness) => {
-    if (pref === USER_PREFERENCE.DISABLED || readiness !== READINESS.READY) return ROLE_COLOR.GRAY
-    return ROLE_COLOR.GREEN
-  }
+test('两色矩阵：颜色只跟开关走（2026-11-16 用户裁决：不允许「打开但灰色」）', () => {
+  // 用户原话：「只有开关两个状态就行吧，为什么要设 打开-但灰色不可用 这个状态」。
+  // 新语义：只有 userPreference=disabled 才是灰，其余一律绿；
+  // readiness 只在派单时才知道，不参与颜色（避免「配好了却显示坏了」的假失败）。
+  const expected = (pref) =>
+    pref === USER_PREFERENCE.DISABLED ? ROLE_COLOR.GRAY : ROLE_COLOR.GREEN
 
   for (const userPreference of Object.values(USER_PREFERENCE)) {
     for (const readiness of Object.values(READINESS)) {
       for (const quota of Object.values(QUOTA)) {
         assert.equal(
           deriveRoleColor({ userPreference, readiness, quota }),
-          expected(userPreference, readiness),
+          expected(userPreference),
           `${userPreference}/${readiness}/${quota}`,
         )
       }
     }
   }
 
-  // 关键边界再单独钉一次
+  // 关键边界：readiness 不再是灰的理由
   assert.equal(
-    deriveRoleColor({ userPreference: USER_PREFERENCE.UNSET, readiness: READINESS.READY, quota: QUOTA.UNKNOWN }),
+    deriveRoleColor({ userPreference: USER_PREFERENCE.ENABLED, readiness: READINESS.BLOCKED }),
+    ROLE_COLOR.GREEN,
+    '打开就是绿 —— 能不能跑由派单结果反馈',
+  )
+  assert.equal(
+    deriveRoleColor({ userPreference: USER_PREFERENCE.ENABLED, readiness: READINESS.UNKNOWN }),
     ROLE_COLOR.GREEN,
   )
-  // V1 裁决：quota 不参与颜色 —— 即使传 exhausted 也只影响诊断，不影响颜色
+  assert.equal(
+    deriveRoleColor({ userPreference: USER_PREFERENCE.UNSET, readiness: READINESS.READY }),
+    ROLE_COLOR.GREEN,
+  )
+  // quota 不参与颜色
   assert.equal(
     deriveRoleColor({ userPreference: USER_PREFERENCE.ENABLED, readiness: READINESS.READY, quota: 'exhausted' }),
     ROLE_COLOR.GREEN,
     'quota 不参与颜色派生',
-  )
-  assert.equal(
-    deriveRoleColor({ userPreference: USER_PREFERENCE.DISABLED, readiness: READINESS.READY, quota: QUOTA.AVAILABLE }),
-    ROLE_COLOR.GRAY,
   )
 })
 
@@ -270,10 +276,15 @@ test('deriveRoleView：输出三字段 + 颜色 + 旧 availability，且是无�
   assert.equal(withQuota.color, ROLE_COLOR.GREEN, 'quota 不再让角色变黄')
   assert.equal(withQuota.quota, QUOTA.UNKNOWN, 'exhausted 不是合法额度值，回落 unknown')
 
-  // 配置不完整 -> 灰，availability 不得投影成 available
+  // 配置不完整：readiness 仍是 blocked（诊断信息保留），
+  // 但**颜色不再因此变灰**（2026-11-16 用户裁决：只有开关决定颜色）。
   const incomplete = deriveRoleView({ roleId: 'role-a', name: 'A' }, { availability: 'available' })
-  assert.equal(incomplete.readiness, READINESS.BLOCKED)
-  assert.equal(incomplete.color, ROLE_COLOR.GRAY)
+  assert.equal(incomplete.readiness, READINESS.BLOCKED, '诊断仍如实报 blocked')
+  assert.equal(
+    incomplete.color,
+    ROLE_COLOR.GREEN,
+    '颜色只看开关；配置不完整由派单结果反馈，不用灰点暗示',
+  )
   assert.equal(incomplete.availability, 'unknown', 'blocked 不能借旧 availability 变成 available')
 })
 

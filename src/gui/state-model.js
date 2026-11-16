@@ -144,6 +144,12 @@ function providerFor(role) {
 /**
  * 查询 provider 是否注册在宿主上。
  * 返回值：true=可用，false=不可用，undefined=没有查询能力 / 查询失败。
+ *
+ * 2026-11-16（用户裁决）：回到官方语义 —— provider 必须真实注册。
+ * codex 的模型固定在 provider 配置行上（官方不支持按任务选模型），
+ * 因此「角色声明的 provider 名没有对应配置行」就是真不可用（开关变灰是正确反馈，
+ * 用户按官方方式补一行配置即可），不再用克隆机制掩饰。
+ *
  * @param {string} provider
  * @param {any} ctx
  * @returns {boolean | undefined}
@@ -289,9 +295,16 @@ export function deriveQuota(role, ctx = {}) {
  * @returns {'gray' | 'green'}
  */
 export function deriveRoleColor({ userPreference, readiness } = /** @type {any} */ ({})) {
-  if (userPreference === USER_PREFERENCE.DISABLED || readiness !== READINESS.READY) {
-    return ROLE_COLOR.GRAY
-  }
+  // 2026-11-16（用户裁决）：**颜色只反映开关**。
+  //
+  // 用户原话：「只有开关两个状态就行吧，为什么要设 打开-但灰色不可用 这个状态」。
+  //
+  // 之前的实现是「禁用 或 readiness!=ready 都判灰」，导致配置正确但 provider
+  // 名对不上时显示成灰色 —— 那是我自己发明的状态，会给用户错误暗示
+  // （「角色坏了」），而实际上派单才知道能不能跑。
+  //
+  // 现在的语义：开关打开 = 绿，关闭 = 灰。能不能跑由派单结果如实反馈。
+  if (userPreference === USER_PREFERENCE.DISABLED) return ROLE_COLOR.GRAY
   return ROLE_COLOR.GREEN
 }
 

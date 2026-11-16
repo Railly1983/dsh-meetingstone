@@ -77,8 +77,9 @@ test('宿主能力不可得：五个角色都标「待配置」，绝不 ready',
       assert.notEqual(role.setupState, 'ready')
       assert.equal(role.setupReason, expectedReason)
       const view = deriveRoleView(role)
-      assert.notEqual(view.readiness, 'ready')
-      assert.equal(view.color, 'gray')
+      assert.notEqual(view.readiness, 'ready', '诊断仍如实：宿主能力不可得就不是 ready')
+      // 2026-11-16 用户裁决：颜色只看开关，不用灰点暗示「不可用」
+      assert.equal(view.color, 'green', '已启用 → 绿；能不能跑由派单结果反馈')
       assert.equal(view.availability, 'unknown')
     }
   }

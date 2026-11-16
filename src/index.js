@@ -75,7 +75,7 @@ export const name = 'meetingstone'
 /** 包名，与 package.json 的 name 一致（补丁按包名解析入口）。 */
 export const PACKAGE_NAME = 'dsh-meetingstone'
 
-export const PLUGIN_VERSION = '0.1.1'
+export const PLUGIN_VERSION = '0.1.2'
 
 /**
  * 插件入口。
@@ -430,6 +430,8 @@ export function apply(ctx, config = {}) {
       registry: globalRegistry,
       dispatcher: toolDispatcher,
       probe,
+      // F2：roleAvailability 用同一份 channels 解析真实 provider，与派单口径一致
+      channels: cfg.channels ?? [],
       resolveRegistry,
       // P1-B：自动路由的全局兜底（项目/会话配置可覆盖 defaultRoleId；规则表只来自全局）
       defaultRoleId: cfg.defaultRoleId,

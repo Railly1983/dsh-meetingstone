@@ -277,7 +277,15 @@ export function createGlobalConfigWriter(deps = {}) {
       /** @type {Record<string, any>} */
       const merged = { ...existing, ...sanitized }
       if (sanitized.channel && isPlainObject(existing.channel)) {
-        merged.channel = { ...existing.channel, ...sanitized.channel }
+        const channel = { ...existing.channel, ...sanitized.channel }
+        // 2026-11-16：`null` = 删除该通道字段。
+        // 全局配置是字段合并、没有删除语义，所以「把 channelId 清掉」只能靠显式 null。
+        // 不这么做的话，用户改模型时旧 channelId 会残留，写出
+        // 「channelId=旧实例 + model=新模型」的矛盾组合，派单必然失败。
+        for (const [key, value] of Object.entries(sanitized.channel)) {
+          if (value === null) delete channel[key]
+        }
+        merged.channel = channel
       }
       roles[index] = merged
       return { ...current, roles }

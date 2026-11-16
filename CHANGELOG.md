@@ -2,6 +2,35 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本遵循 [SemVer](https://semver.org/)。
 
+## [0.1.2] - 2026-11-16
+
+**路由忠实性与可用性修复版本。** 相对 `0.1.1` 无破坏性变更。
+
+### Fixed
+
+- **F1 模型执行忠实性**：非进程内 provider（Codex / Claude Code / ACP）的模型固定在
+  provider 配置行上、无法按任务覆盖。此前角色声明的模型与实际执行可能不一致
+  （如声明 `gpt-6.1-sol` 却静默跑成 `gpt-6-astra`）。现在启动前会核对声明模型与
+  provider 固定模型，不一致即拒绝；并补齐实例与角色声明的 CLI / 模型 / 强度一致性
+  校验与合并顺序（执行组合为事实来源），堵住多条绕过路径。经独立外部审查三轮复核通过。
+- **F2 可用性口径分歧**：此前 `roleAvailability` 与真实派单用两套路由解析，出现
+  「角色能派却报不可用」。现在派单 / 可用性 / GUI 三处共用唯一路由解析入口
+  `src/dsh/route.js`（`resolveRoleRoute`），channels 实例表与角色声明按同一优先级解析。
+
+### Changed
+
+- 恢复老版本 channels 能力匹配方案：角色只声明 CLI / 模型 / 强度，由插件在已配置的
+  执行组合里匹配唯一实例；移除 provider 克隆 / 派生机制（官方不支持按任务为 Codex 选模型）。
+- 能力目录探测改用官方只读 RPC（`model/list` / `account/read` / `account/rateLimits/read`），
+  不再用真实对话探测模型可用性（会消耗额度）；额度耗尽标 `blocked=rate-limit`。
+- 角色开关颜色只反映用户的启用 / 停用，不再因 readiness 变灰。
+- `refreshCli` 增加超时保护与分段耗时日志，避免设置页刷新卡死。
+
+### Removed
+
+- 移除 `src/dsh/provider-assembler.js` 及对应的死代码、过时注释与测试
+  （`provider-assembler` / `role-availability` / `role-color`）。
+
 ## [0.1.1] - 2026-11-14
 
 **开箱即用版本。** 相对 `0.1.0` 无破坏性变更。

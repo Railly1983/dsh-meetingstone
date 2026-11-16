@@ -253,8 +253,14 @@ export function sanitizeRolePatch(raw, options = {}) {
         }
         if (typeof channelValue === 'string' && channelValue.trim()) {
           channel[channelKey] = channelValue.trim()
+        } else if (channelValue === null) {
+          // 2026-11-16：`null` = 显式清空该通道字段。
+          // 全局配置是字段合并（无法删键），如果不支持清空，改模型时会残留旧的
+          // channelId，写出「channelId=旧实例 + model=新模型」的矛盾组合。
+          // 写入器会在合并时删除这些键（见 global-writer.updateRole）。
+          channel[channelKey] = null
         } else {
-          bad(`channel.${channelKey}`, '必须是非空字符串')
+          bad(`channel.${channelKey}`, '必须是非空字符串或 null（null=清空该字段）')
         }
       }
       if (Object.keys(channel).length > 0) out.channel = channel

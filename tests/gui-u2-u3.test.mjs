@@ -529,7 +529,7 @@ test('B2c channelForCombo：CLI/模型 → 内部 channel（provider 映射 + �
   assert.equal(noCli.error, 'pendingConfig')
 })
 
-test('B2c buildGlobalPatch：切到无对应实例的 CLI 明确拒绝（不写半套组合）', async () => {
+test('B2c buildGlobalPatch：换 CLI 时旧 channelId 显式清空（不残留矛盾组合）', async () => {
   const { __test } = await loadClient()
   const t = (key) => key
   const role = {
@@ -539,7 +539,9 @@ test('B2c buildGlobalPatch：切到无对应实例的 CLI 明确拒绝（不写�
     setting: '骨干',
     channel: { channelId: 'ch-acp', kind: 'acp-cli', provider: 'acp' },
   }
-  // claude 在 CHANNELS 里没有实例；旧 channelId 无法在全局层删除 → 明确拒绝。
+  // 2026-11-16（用户裁决）：claude 在 CHANNELS 里没有实例也**必须能保存**。
+  // 但旧 channelId（ch-acp，属于 acp-cli）必须被清空，否则写出
+  // 「kind=claude-code + channelId=ch-acp」的矛盾组合。
   const built = __test.buildGlobalPatch(
     t,
     role,
@@ -547,7 +549,211 @@ test('B2c buildGlobalPatch：切到无对应实例的 CLI 明确拒绝（不写�
     CAPABILITIES,
     CHANNELS,
   )
-  assert.equal(built.error, 'comboChannelUnsupported')
+  assert.equal(built.error, null, '能力目录里的模型必须能配置上去')
+  assert.equal(built.patch.channel.kind, 'claude-code')
+  assert.equal(built.patch.channel.model, 'sonnet')
+  assert.equal(built.patch.channel.channelId, null, '旧实例不再适用 → 显式清空')
+})
+
+test('2026-11-16 用户裁决：能力目录说了算，profile 里没有实例也必须能保存', async () => {
+  const { __test } = await loadClient()
+  const t = (key) => key
+  // 真机形状：codex 只配了 gpt-6-astra + high 一条实例，
+  // 但能力目录（codex app-server 探测）报出多个模型与多档强度。
+  const channels = [
+    { channelId: 'ch-wk', kind: 'codex', provider: 'codex', model: 'gpt-6-astra', reasoning: 'high' },
+  ]
+  const capabilities = [
+    {
+      id: 'codex', label: 'Codex', provider: 'codex',
+      models: [
+        { id: 'gpt-6-astra', label: 'Astra', provider: 'codex', source: 'discovered' },
+        { id: 'gpt-6.1-sol', label: 'Sol', provider: 'codex-sol', source: 'discovered' },
+      ],
+      strengths: [
+        { id: 'high', label: 'High', source: 'discovered' },
+        { id: 'medium', label: 'Medium', source: 'discovered' },
+      ],
+      sources: { models: 'discovered', strengths: 'discovered' }, refreshedAt: 1, errors: [],
+    },
+  ]
+  const role = {
+    roleId: 'role-wukong', name: '悟空', aliases: ['WK'], setting: '核心专家',
+    channel: { kind: 'codex', channelId: 'ch-wk', provider: 'codex', model: 'gpt-6-astra', reasoning: 'high' },
+  }
+
+  // 只改设定 → 能保存，且不误动 channel。
+  const onlySetting = __test.buildGlobalPatch(
+    t,
+    role,
+    { name: '悟空', aliases: 'WK', setting: '新设定', cli: 'codex', model: 'gpt-6-astra', reasoning: 'high' },
+    capabilities,
+    channels,
+  )
+  assert.equal(onlySetting.error, null)
+  assert.deepEqual(onlySetting.patch, { setting: '新设定' })
+
+  // 换到探测到、但 profile 没有实例的模型 → 必须能保存（用户裁决：能力目录才是事实源）。
+  const otherModel = __test.buildGlobalPatch(
+    t,
+    role,
+    { name: '悟空', aliases: 'WK', setting: '核心专家', cli: 'codex', model: 'gpt-6.1-sol', reasoning: 'high' },
+    capabilities,
+    channels,
+  )
+  assert.equal(otherModel.error, null, '能力目录里的模型必须能配置上去')
+  // 旧 channelId 指向 astra 实例，新模型是 sol —— 必须显式清空，否则写出矛盾组合。
+  assert.equal(
+    otherModel.patch.channel.channelId,
+    null,
+    '旧 channelId 必须被显式清空（否则 channelId=astra + model=sol 自相矛盾）',
+  )
+  assert.equal(otherModel.patch.channel.model, 'gpt-6.1-sol')
+  assert.equal(otherModel.patch.channel.provider, 'codex-sol')
+
+  // 只改强度（profile 没配 medium）→ 同样必须能保存。
+  const otherReasoning = __test.buildGlobalPatch(
+    t,
+    role,
+    { name: '悟空', aliases: 'WK', setting: '核心专家', cli: 'codex', model: 'gpt-6-astra', reasoning: 'medium' },
+    capabilities,
+    channels,
+  )
+  assert.equal(otherReasoning.error, null, '能力目录里的强度必须能配置上去')
+  assert.equal(otherReasoning.patch.channel.reasoning, 'medium')
+  assert.equal(
+    otherReasoning.patch.channel.channelId,
+    null,
+    '实例配置的是 high，改成 medium 后该实例不再匹配 → 清空 channelId',
+  )
+
+  // 原样保存 → 无差异。
+  const same = __test.buildGlobalPatch(t, role, __test.draftOfRole(role), capabilities, channels)
+  assert.equal(same.error, null)
+  assert.deepEqual(same.patch, {})
+})
+
+test('2026-11-16 用户裁决：新建角色也能用探测到但未落盘的组合', async () => {
+  const { __test } = await loadClient()
+  const t = (key) => key
+  const channels = [
+    { channelId: 'ch-wk', kind: 'codex', provider: 'codex', model: 'gpt-6-astra', reasoning: 'high' },
+  ]
+  const capabilities = [
+    {
+      id: 'codex', label: 'Codex', provider: 'codex',
+      models: [
+        { id: 'gpt-6-astra', label: 'Astra', provider: 'codex', source: 'discovered' },
+        { id: 'gpt-6.1-sol', label: 'Sol', provider: 'codex-sol', source: 'discovered' },
+      ],
+      strengths: [{ id: 'high', label: 'High', source: 'discovered' }],
+      sources: { models: 'discovered', strengths: 'discovered' }, refreshedAt: 1, errors: [],
+    },
+  ]
+  const ok = __test.buildCreateRolePayload(
+    t,
+    { name: '新角色', aliases: '', setting: '', cli: 'codex', model: 'gpt-6-astra', reasoning: 'high' },
+    capabilities,
+    channels,
+    [],
+  )
+  assert.equal(ok.error, null)
+  assert.equal(ok.payload.channel.channelId, 'ch-wk', '有实例的组合带 channelId')
+
+  // 探测到但 profile 没有实例 → 仍要能创建（能力目录是事实源）。
+  const discovered = __test.buildCreateRolePayload(
+    t,
+    { name: '新角色', aliases: '', setting: '', cli: 'codex', model: 'gpt-6.1-sol', reasoning: 'high' },
+    capabilities,
+    channels,
+    [],
+  )
+  assert.equal(discovered.error, null, '能力目录里的模型必须能创建角色')
+  assert.equal(discovered.payload.channel.model, 'gpt-6.1-sol')
+  assert.equal(discovered.payload.channel.provider, 'codex-sol')
+})
+
+test('2026-11-16：不声明通道的默认角色，改设定不会被静默绑到某条实例', async () => {
+  const { __test } = await loadClient()
+  const t = (key) => key
+  // 默认角色形状：channel 只有 kind，没有 model/reasoning/channelId。
+  const defaultRole = {
+    roleId: 'role-worker', name: '执行者', aliases: ['干活'],
+    setting: '干活', channel: { kind: 'in-process' },
+  }
+  const channels = [
+    { channelId: 'ch-a', kind: 'in-process', provider: 'spawn', model: 'm-a', reasoning: 'high' },
+    { channelId: 'ch-b', kind: 'in-process', provider: 'spawn', model: 'm-b', reasoning: 'high' },
+  ]
+  const capabilities = [
+    {
+      id: 'dsh', label: 'DSH', provider: 'spawn',
+      models: [
+        { id: 'm-a', label: 'A', provider: 'spawn', source: 'config' },
+        { id: 'm-b', label: 'B', provider: 'spawn', source: 'config' },
+      ],
+      strengths: [{ id: 'high', label: 'High', source: 'config' }],
+      sources: { models: 'config', strengths: 'config' }, refreshedAt: null, errors: [],
+    },
+  ]
+  const built = __test.buildGlobalPatch(
+    t,
+    defaultRole,
+    { name: '执行者', aliases: '干活', setting: '新设定', cli: 'dsh', model: '', reasoning: '' },
+    capabilities,
+    channels,
+  )
+  assert.equal(built.error, null)
+  assert.deepEqual(built.patch, { setting: '新设定' }, '只改设定不得偷偷绑定执行组合')
+})
+
+test('2026-11-16 用户裁决：下拉列出探测到的全部模型/强度，不按 profile 打「未配置」标记', async () => {
+  const { __test } = await loadClient()
+  const t = (key) => key
+  const channels = [
+    { channelId: 'ch-wk', description: '', kind: 'codex', provider: 'codex', model: 'gpt-6-astra', reasoning: 'high' },
+  ]
+  const capabilities = [
+    {
+      id: 'codex', label: 'Codex', provider: 'codex',
+      models: [
+        { id: 'gpt-6-astra', label: 'Astra', provider: 'codex', source: 'discovered' },
+        { id: 'gpt-6.1-sol', label: 'Sol', provider: 'codex-sol', source: 'discovered' },
+      ],
+      strengths: [
+        { id: 'high', label: 'High', source: 'discovered' },
+        { id: 'medium', label: 'Medium', source: 'discovered' },
+      ],
+      sources: { models: 'discovered', strengths: 'discovered' }, refreshedAt: 1, errors: [],
+    },
+    { id: 'dsh', label: 'DSH', provider: 'spawn', models: [], strengths: [], sources: { models: 'unknown', strengths: 'unknown' }, refreshedAt: null, errors: [] },
+    { id: 'claude', label: 'Claude', provider: 'claude-code', models: [], strengths: [], sources: { models: 'unknown', strengths: 'unknown' }, refreshedAt: null, errors: [] },
+    { id: 'codebuddy', label: 'CodeBuddy', provider: 'acp', models: [], strengths: [], sources: { models: 'unknown', strengths: 'unknown' }, refreshedAt: null, errors: [] },
+  ]
+  const role = {
+    roleId: 'role-wukong', name: '悟空', aliases: [],
+    setting: '', channel: { kind: 'codex', channelId: 'ch-wk', provider: 'codex', model: 'gpt-6-astra', reasoning: 'high' },
+  }
+  const view = viewWith([role], { capabilities, global: { channels } })
+  const detail = __test.renderRoleDetail(t, view, 'role-wukong', {
+    draft: { name: '悟空', aliases: '', setting: '', cli: 'codex', model: 'gpt-6-astra', reasoning: 'high' },
+    scope: 'global',
+    showScope: false,
+  })
+  const texts = collectNodes(detail, (node) => node.type === 'option').map((node) =>
+    String(node.props?.children ?? ''),
+  )
+  // 探测到的模型/强度全部可选，且不带任何「未配置」标记（用户裁决：能列出来就能选）。
+  for (const label of ['Astra', 'Sol']) {
+    const found = texts.find((value) => value.includes(label))
+    assert.ok(found, `${label} 必须在选项里`)
+    assert.ok(!found.includes('未配置'), `${label} 不得被 profile 状态打标`)
+  }
+  for (const label of ['High', 'Medium']) {
+    const found = texts.find((value) => value === `${label} · sourceDiscovered` || value.startsWith(label))
+    assert.ok(found, `${label} 必须在选项里`)
+    assert.ok(!String(found).includes('未配置'), `${label} 不得被 profile 状态打标`)
+  }
 })
 
 test('B2c renderRoleDetail：4 CLI 选项（无 ch-*）+ 模型/强度来源 + 未知置灰 + 刷新按钮', async () => {

@@ -704,21 +704,18 @@ export function createDispatcher({ registry, adapter, limits = {}, worktrees = n
       return fail(DISPATCH_ERRORS.ROLE_DISABLED, `角色「${role.name}」已停用，不能派单`)
     }
 
-    // 2. 通道可用性（provider 未安装时给出可诊断的错误，而不是崩）
-    if (adapter.canStart) {
-      let probe
-      try {
-        probe = adapter.canStart(role)
-      } catch (err) {
-        probe = { ok: false, reason: err instanceof Error ? err.message : String(err) }
-      }
-      if (!probe.ok) {
-        return fail(
-          DISPATCH_ERRORS.PROVIDER_UNAVAILABLE,
-          `角色「${role.name}」的通道不可用：${probe.reason ?? '未知原因'}`,
-        )
-      }
-    }
+    // 2. 2026-11-16（用户裁决）：**取消派单前的 provider 预检**。
+    //
+    // 用户原话：「只有开关两个状态就行吧……用户配好一个设置组合，你看下 provider
+    // 里还有没有，没有就加一行 provider，然后按用户的配置派任务，有问题就返回
+    // 用户错误信息」。
+    //
+    // 之前这里先调 `adapter.canStart(role)` 做预检，provider 名对不上就直接拒单。
+    // 那是**基于我自己判断的状态**，而不是真实的派单结果 —— 会出现「配好了却派不出去」
+    // 的假失败。现在直接派单：真能跑就跑，跑不了由 `start()` 抛出的真实错误
+    // 如实返回给用户（含原因与修复提示）。
+    //
+    // 保留 `canStart` 导出供 UI/测试使用，但派单路径不再用它拦截。
 
     // 3. 并发纪律：**先占槽再启动**，本插件的全局额度在任何 await 之前预占；所有派单都按写任务计数。
     //    项目身份用 realpath 归一化：`原路径` 与 `原路径/src/..`、junction/symlink

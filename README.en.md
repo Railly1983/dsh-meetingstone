@@ -10,7 +10,7 @@ Already using Codex, Claude Code, CodeBuddy, or DeepSeek Harness? Each has stren
 
 [简体中文](README.md) · [Quick start](docs/getting-started.en.md) · [Examples (中文)](docs/scenarios.zh-CN.md) · [FAQ (中文)](docs/faq.zh-CN.md)
 
-**Current published package version: `0.1.1`.** Requires DSH `>=0.2.2-rc.1 <0.3.0-0`.
+**Current published package version: `0.1.2`.** Requires DSH `>=0.2.2-rc.1 <0.3.0-0`.
 
 **Works out of the box**: three default roles (Implementer / Reviewer / Researcher) run on native DSH subagents, so you can delegate immediately without configuring any external CLI. They appear only when you have no roles of your own.
 

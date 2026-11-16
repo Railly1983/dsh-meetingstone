@@ -113,12 +113,13 @@ test('canStart：拿不到查询能力时如实返回「无法确认 provider �
   const noGetter = createDshAdapter(fakeCtx({ subagents: {} }).ctx, { getParent: () => ({}) })
   assert.deepEqual(noGetter.canStart(role()), { ok: false, reason: '无法确认 provider 是否注册' })
 
-  // 未知 channel.kind（连 provider 名都解析不出）
+  // 未知 channel.kind（连 provider 名都解析不出）→ 拒绝并说明缺的是执行通道声明。
+  // 2026-11-16：错误从「无法确认 provider 是否注册」变成更准确的
+  // CHANNEL_NOT_CONFIGURED（真的原因是没有可用的 kind/provider 声明）。
   const unknown = makeAdapter(fakeSubagents({ providers: { acp: {} } }))
-  assert.deepEqual(unknown.adapter.canStart(role({ channel: { kind: 'nope' } })), {
-    ok: false,
-    reason: '无法确认 provider 是否注册',
-  })
+  const unknownRes = unknown.adapter.canStart(role({ channel: { kind: 'nope' } }))
+  assert.equal(unknownRes.ok, false)
+  assert.match(unknownRes.reason ?? '', /CHANNEL_NOT_CONFIGURED|无法确认/)
 })
 
 test('canStart：provider 未注册时 ok:false 且原因包含 provider 名', () => {
@@ -508,23 +509,22 @@ test('meetingstone_cli_status：探测器未注入时失败关闭，不编造状
   assert.equal(out.error, 'PROBE_UNAVAILABLE')
 })
 
-// ─── P2 Gate P0：启动前置校验（不满足就不许触达 startActivation） ────────────
+// ─── 启动前置校验 ────────────────────────────────────────────────────────────
 
-test('角色指定了 model → 拒绝启动（配置成功不等于执行采用）', async () => {
+test('角色指定 model 不再被拒绝（2026-11-16 用户裁决：不用 profile 限制用户）', async () => {
+  // 之前这里断言 MODEL_UNSUPPORTED —— 那是「拿 profile 历史配置当白名单」的错误做法。
+  // 现在 acp 有 provider，角色声明 model 应当正常启动。
   const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { acp: {} } }))
-  await assert.rejects(
-    () =>
-      adapter.start({
-        role: role({ channel: { kind: 'acp-cli', model: 'deepseek-v4.1-flash' } }),
-        task: 'x',
-        timeoutMs: 0,
-      }),
-    /MODEL_UNSUPPORTED/,
-  )
+  const started = await adapter.start({
+    role: role({ channel: { kind: 'acp-cli', model: 'deepseek-v4.1-flash' } }),
+    task: 'x',
+    timeoutMs: 0,
+  })
+  assert.ok(started?.taskRef?.childId, '应当真的启动，而不是被前置校验拦住')
   assert.equal(
     subagents.calls.filter((c) => c.method === 'startActivation').length,
-    0,
-    '前置校验失败不得启动任务',
+    1,
+    '启动必须真的触达 startActivation',
   )
 })
 
@@ -606,37 +606,121 @@ test('模型一致：角色声明 == 通道实例配置 → 允许启动', async
   assert.equal(Object.hasOwn(spec.request, 'model'), false)
 })
 
-test('模型不一致：角色声明与通道实例冲突 → 拒绝并说明差异', async () => {
-  const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { acp: {} } }), {
-    channels: [{ channelId: 'ch-acp-flash', kind: 'acp-cli', provider: 'acp', model: 'other-model' }],
-  })
+// ─── 2026-11-16 定稿：回到官方语义（模型固定在 provider 行上） ───────────────
+//
+// 查证依据（官方源码 + 官方 README）：
+// 1. `CodexProvider` 把 model 钉在**配置行**上（内部读 `this.config.model`），
+//    官方 README 明确「`model` 为本提供方实例的每个线程固定的模型名称」
+//    —— 一行配置一个模型，这是官方设计。
+// 2. 官方 `dsh-tool-subagent` 的 `modelSelection`（按任务选模型）要求
+//    `provider.capabilities.agentOptions === true`，而 codex provider 是 `false`，
+//    官方直接抛 `does not support child model selection`。
+// 3. 结论：**同一个 codex provider 跑不同模型在官方语义下不成立**。
+//
+// 因此插件不做 provider 克隆/派生（那套机制已移除）。角色声明了 profile 里
+// 不存在的 provider 时，如实报错并提示用户按官方方式补一行配置。
+
+test('官方语义：角色声明的 provider 未注册 → 失败关闭并提示补配置', async () => {
+  const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { codex: { name: 'codex' } } }))
   await assert.rejects(
     () =>
       adapter.start({
         role: role({
-          channel: { kind: 'acp-cli', channelId: 'ch-acp-flash', model: 'deepseek-v4.1-flash' },
+          name: '悟空',
+          roleId: 'role-wukong',
+          channel: { kind: 'codex', provider: 'codex-sol', model: 'gpt-6.1-sol', reasoning: 'high' },
         }),
         task: 'x',
         timeoutMs: 0,
         context: { projectRoot: 'D:/MeetingStone' },
       }),
-    /MODEL_UNSUPPORTED: 角色声明 model=deepseek-v4\.1-flash/,
+    /PROVIDER_UNAVAILABLE.*codex-sol/s,
+    '未注册必须失败关闭（不再偷偷派生）',
   )
-  assert.equal(subagents.calls.filter((c) => c.method === 'startActivation').length, 0)
+  assert.equal(
+    subagents.calls.filter((c) => c.method === 'startActivation').length,
+    0,
+    '不得启动任务',
+  )
 })
 
-test('引用了不存在的通道实例 → 拒绝', async () => {
-  const { adapter } = makeAdapter(fakeSubagents({ providers: { acp: {} } }), { channels: [] })
+test('[F1] 非进程内 provider 声明的 model 与其固定 model 不一致 → 拒绝（不静默跑错模型）', async () => {
+  // 2026-11-16 外部审查 F1：codex 的模型固定在 provider 配置行上，buildChildAgentOptions
+  // 对非 in-process 返回 {}，模型传不下去。若声明 model-B 却经 fallback 命中固定 model-A
+  // 的 provider，实际会静默跑成 model-A（曾经的 gpt-6.1-sol 声明跑 gpt-6-astra）。
+  // 必须在启动前拒绝，而不是带病派单。
+  const codexProvider = {
+    name: 'codex',
+    config: { providerName: 'codex', model: 'gpt-6-astra' },
+    capabilities: { agentOptions: false, agentPreset: false, outputSchema: false, depthLimit: false },
+    inheritsParentContext: false,
+    start() {
+      return {}
+    },
+  }
+  const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { codex: codexProvider } }))
   await assert.rejects(
     () =>
       adapter.start({
-        role: role({ channel: { kind: 'acp-cli', channelId: 'ch-missing', model: 'm' } }),
+        role: role({
+          name: '悟空',
+          roleId: 'role-wukong',
+          channel: { kind: 'codex', provider: 'codex', model: 'gpt-6.1-sol', reasoning: 'high' },
+        }),
         task: 'x',
         timeoutMs: 0,
         context: { projectRoot: 'D:/MeetingStone' },
       }),
-    /通道实例 ch-missing 不存在/,
+    /MODEL_MISMATCH/,
+    '声明 sol 但 provider 固定 astra，必须拒绝',
   )
+  assert.equal(
+    subagents.calls.filter((c) => c.method === 'startActivation').length,
+    0,
+    '不得启动（否则会静默跑错模型）',
+  )
+})
+
+test('官方语义：model 与 provider 配置一致 → 正常启动', async () => {
+  const codexProvider = {
+    name: 'codex',
+    config: { providerName: 'codex', model: 'gpt-6-astra' },
+    capabilities: { agentOptions: false, agentPreset: false, outputSchema: false, depthLimit: false },
+    inheritsParentContext: false,
+    start() {
+      return {}
+    },
+  }
+  const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { codex: codexProvider } }))
+  const started = await adapter.start({
+    role: role({
+      name: '悟空',
+      roleId: 'role-wukong',
+      channel: { kind: 'codex', provider: 'codex', model: 'gpt-6-astra', reasoning: 'high' },
+    }),
+    task: 'x',
+    timeoutMs: 0,
+    context: { projectRoot: 'D:/MeetingStone' },
+  })
+  assert.ok(started?.taskRef?.childId)
+  const spec = subagents.calls.find((c) => c.method === 'startActivation').spec
+  assert.equal(spec.provider, 'codex')
+  assert.equal(started.taskRef.provider, 'codex')
+})
+
+test('引用了不存在的通道实例 → 退回角色声明（不拿历史配置限制用户）', async () => {
+  // 实例不存在只说明 profile 变过，不代表用户的选择无效 ——
+  // 退回角色自己声明的 provider（它必须已注册）更符合用户意图。
+  const { adapter, subagents } = makeAdapter(fakeSubagents({ providers: { acp: {} } }), { channels: [] })
+  const started = await adapter.start({
+    role: role({ channel: { kind: 'acp-cli', channelId: 'ch-missing', model: 'm' } }),
+    task: 'x',
+    timeoutMs: 0,
+    context: { projectRoot: 'D:/MeetingStone' },
+  })
+  assert.ok(started?.taskRef?.childId, '实例不存在不应阻断派单')
+  const spec = subagents.calls.find((c) => c.method === 'startActivation').spec
+  assert.equal(spec.provider, 'acp')
 })
 
 // ─── 集成：配置 → 注册表 → 适配器（DD7 链路端到端） ──────────────────────────

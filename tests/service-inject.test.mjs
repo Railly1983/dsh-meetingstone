@@ -96,9 +96,11 @@ test('宿主不提供 subagents 时：dispatch 返回可诊断错误而不是抛
 
   const dispatchTool = ctx.__tools.find((t) => t.name === 'meetingstone_dispatch')
   const res = await dispatchTool.execute({ role: 'A', task: 'x' }, { agent: {} })
-  assert.equal(res.ok, false)
-  assert.equal(res.code, 'PROVIDER_UNAVAILABLE')
-  assert.match(res.message, /无法确认|未注册/)
+  // 2026-11-16：取消派单前预检后，失败会由真实执行路径如实报出
+  // （provider 未注册 / projectRoot 缺失等），但必须失败关闭且可诊断，绝不静默成功。
+  assert.equal(res.ok, false, '必须失败关闭')
+  assert.ok(typeof res.code === 'string' && res.code.length > 0, '必须有稳定错误码')
+  assert.ok(res.message && res.message.length > 0, '必须有可诊断信息')
 })
 
 test('安全取服务：getter 抛异常时退化为 unknown，不影响其它能力', async () => {
